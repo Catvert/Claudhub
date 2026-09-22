@@ -102,16 +102,7 @@ fn http(
     body: Option<&str>,
     secret: Option<&Secret>,
 ) -> Result<String, String> {
-    // One agent for the whole process: it holds the connection pool and the
-    // TLS setup, and building one per call threw away the session a view
-    // polling the same host every ten seconds would have reused.
-    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    let agent = AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_global(Some(HTTP_TIMEOUT))
-            .build()
-            .into()
-    });
+    let agent = agent();
     let headers = resolve(headers, secret)?;
 
     // Four arms and not one loop over a generic builder: ureq 3 types a request
@@ -134,18 +125,39 @@ fn http(
         other => return Err(format!("unsupported HTTP method: {other}")),
     };
 
+    // The URL and never the headers: the token travels in the latter, and an
+    // error message ends up in a bubble and in the log.
     let mut response = sent.map_err(|e| format!("{url}: {e}"))?;
     let status = response.status();
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("unreadable answer from {url}: {e}"))?;
+    let text = response.body_mut().read_to_string();
     if !status.is_success() {
         // The body is kept: an API says *why* it refused in there, and a bare
         // "answered 422" is exactly the message one comes back to read twice.
-        return Err(format!("{url} answered {status} — {}", first_line(&text)));
+        // A body that does not read still leaves the status, which is the half
+        // of the answer that matters.
+        let why = text.as_deref().map(first_line).unwrap_or_default();
+        return Err(format!("{url} answered {status} — {why}"));
     }
-    Ok(text)
+    text.map_err(|e| format!("unreadable answer from {url}: {e}"))
+}
+
+/// One agent for the whole process: it holds the connection pool and the TLS
+/// setup, and building one per call threw away the session a view polling the
+/// same host every ten seconds would have reused.
+///
+/// **A status is not an error here.** ureq 3 turns every 4xx and 5xx into an
+/// `Error::StatusCode` by default, which carries the number and drops the body
+/// — so the branch of `http` that reads *why* an API refused was never reached,
+/// and a 403 said "403" and nothing of the scope the token was missing.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into()
+    })
 }
 
 /// Puts the secret into the headers that asked for it.
@@ -235,6 +247,13 @@ mod tests {
             command: "gh run list".into(),
         }
         .is_network());
+    }
+
+    /// The body of a refusal is what says why, and an agent that turns the
+    /// status into an error throws it away before `http` can read it.
+    #[test]
+    fn a_refusal_is_read_rather_than_raised() {
+        assert!(!agent().config().http_status_as_error());
     }
 
     /// A header still holding the placeholder would go out as it stands, and

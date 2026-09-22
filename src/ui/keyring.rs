@@ -64,9 +64,16 @@ impl KeyringEntry {
 
 /// The value a settings field stands for, keyring references resolved.
 ///
-/// **Cached after the first read.** Opening a keyring can ask the user to
-/// unlock it, and a panel that reads on every gesture would ask again and
-/// again — which is what makes this worth a global rather than a call.
+/// **Cached after the first read, and a failure too.** Opening a keyring can
+/// ask the user to unlock it, and the Sentry panel resolves its token on every
+/// frame it is drawn (`sentry_key`): a failure left uncached was a blocking
+/// D-Bus round trip per frame on the interface's thread, a warning per frame in
+/// the log, and an unlock prompt reopened as fast as it was dismissed.
+///
+/// The answer is filed under the setting's **text**, so changing the setting
+/// asks again by itself; a failure is otherwise forgotten only by `retry`,
+/// which is what the panel's refresh button calls — the gesture of someone who
+/// has just created the entry.
 ///
 /// `None` when the reference names nothing: an unresolved placeholder sent as
 /// the token is a request refused with a 401, which sends one looking at the
@@ -81,27 +88,58 @@ pub fn resolve(value: &str) -> Option<String> {
         // as they stand.
         return Some(value.to_string());
     };
-    static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-    if let Ok(cache) = CACHE.lock() {
-        if let Some(hit) = cache.as_ref().and_then(|cache| cache.get(value)) {
-            return Some(hit.clone());
-        }
-    }
-    match entry.read() {
-        Ok(found) => {
-            if let Ok(mut cache) = CACHE.lock() {
-                cache
-                    .get_or_insert_with(HashMap::new)
-                    .insert(value.to_string(), found.clone());
+    // Held across the read, deliberately: two lookups of one entry racing
+    // would be two unlock prompts.
+    let mut answers = ANSWERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    answers
+        .get_or_insert_with(Answers::default)
+        .lookup(value, || match entry.read() {
+            Ok(found) => Some(found),
+            Err(e) => {
+                // Said and not silently empty: it is the difference between
+                // "the token is wrong" and "there is no entry under that name".
+                // Once per failure, now that the failure is kept.
+                log::warn!("{}: {e}", entry.describe());
+                None
             }
-            Some(found)
+        })
+}
+
+/// Forgets the references the keyring could not answer, so the next `resolve`
+/// asks it again. What it did answer stays: that read is the one that may
+/// have cost an unlock.
+pub fn retry() {
+    let mut answers = ANSWERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(answers) = answers.as_mut() {
+        answers.forget_failures();
+    }
+}
+
+static ANSWERS: Mutex<Option<Answers>> = Mutex::new(None);
+
+/// What the keyring said of each reference, by the setting's text — `None`
+/// for an entry it could not give.
+#[derive(Default)]
+struct Answers(HashMap<String, Option<String>>);
+
+impl Answers {
+    /// The answer filed for `value`, or `read`'s, filed on the way — whether
+    /// it found something or not.
+    fn lookup(&mut self, value: &str, read: impl FnOnce() -> Option<String>) -> Option<String> {
+        if let Some(answer) = self.0.get(value) {
+            return answer.clone();
         }
-        Err(e) => {
-            // Said and not silently empty: it is the difference between "the
-            // token is wrong" and "there is no entry under that name".
-            log::warn!("{}: {e}", entry.describe());
-            None
-        }
+        let answer = read();
+        self.0.insert(value.to_string(), answer.clone());
+        answer
+    }
+
+    fn forget_failures(&mut self) {
+        self.0.retain(|_, answer| answer.is_some());
     }
 }
 
@@ -137,6 +175,37 @@ mod tests {
         assert_eq!(KeyringEntry::parse("sntrys_hunter2"), None);
         assert_eq!(KeyringEntry::parse("$SENTRY_TOKEN"), None);
         assert_eq!(KeyringEntry::parse("keyring:"), None);
+    }
+
+    /// A keyring that failed is not asked again on the next frame — only once
+    /// the setting changes, or `retry` says so.
+    #[test]
+    fn a_failure_is_kept_until_a_retry_and_a_success_past_it() {
+        let mut answers = Answers::default();
+        let reads = std::cell::Cell::new(0);
+        let failing = || {
+            reads.set(reads.get() + 1);
+            None
+        };
+        assert_eq!(answers.lookup("keyring:a", failing), None);
+        assert_eq!(answers.lookup("keyring:a", failing), None);
+        assert_eq!(reads.get(), 1);
+        // Another text is another question.
+        answers.lookup("keyring:b", failing);
+        assert_eq!(reads.get(), 2);
+        // A retry forgets the failure, and the entry now there is read.
+        answers.forget_failures();
+        assert_eq!(
+            answers.lookup("keyring:a", || Some("t".into())).as_deref(),
+            Some("t")
+        );
+        // A success survives the next retry: it is the read that may have cost
+        // an unlock.
+        answers.forget_failures();
+        assert_eq!(
+            answers.lookup("keyring:a", || unreachable!()).as_deref(),
+            Some("t")
+        );
     }
 
     /// What is not a reference travels as it stands — the value itself, and the

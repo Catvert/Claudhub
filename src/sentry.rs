@@ -25,7 +25,6 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use serde::Deserialize;
 
 /// Sentry's public API. A self-hosted instance says so in the settings, which
 /// is the only thing that changes.
@@ -110,17 +109,57 @@ impl Frame {
     /// (`/var/www/app/Http/Kernel.php`) or a module (`app.http.kernel`). We cut
     /// at the first segment that exists in the worktree; failing that we return
     /// the path as it stands and the user sees what Sentry said.
-    pub fn repo_path(&self, worktree: &Path) -> String {
-        let normalized = self.filename.replace('\\', "/");
-        let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
-        for start in 0..parts.len() {
-            let candidate = parts[start..].join("/");
-            if worktree.join(&candidate).exists() {
-                return candidate;
-            }
-        }
-        normalized
+    ///
+    /// `exists` says whether a repository-relative path names a file of the
+    /// worktree — see `locate` for why it is asked rather than looked up.
+    pub fn repo_path(&self, exists: impl Fn(&str) -> bool) -> String {
+        self.locate(exists)
+            .unwrap_or_else(|| self.filename.replace('\\', "/"))
     }
+
+    /// The path inside the worktree this frame names, or `None` when none of
+    /// its tails is a file there — which is what says the frame opens nothing.
+    ///
+    /// **Never a path that climbs out.** The frame comes from an event, and
+    /// an event is anyone's to send — a project's DSN is public, it ships in
+    /// the page's JavaScript — so `../../../.bashrc` is a frame like any other,
+    /// and the editor it opens writes. A tail holding a `..`, or anything the
+    /// host reads as a root or a drive (`C:` under Windows), is refused before
+    /// `exists` is asked; the tails after it are still tried, and they are
+    /// inside the worktree by construction.
+    ///
+    /// `exists` and not the worktree's path, because the answer is not
+    /// always on this machine's disk: under Windows the worktree is a Linux
+    /// path of the distribution, which `Path::exists` looks for on drive `C:`.
+    /// The view hands the explorer's file list when it has one, and the disk
+    /// (`on_disk`) otherwise.
+    pub fn locate(&self, exists: impl Fn(&str) -> bool) -> Option<String> {
+        let normalized = self.filename.replace('\\', "/");
+        let parts: Vec<&str> = normalized
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect();
+        (0..parts.len())
+            .map(|start| parts[start..].join("/"))
+            .filter(|candidate| inside(candidate))
+            .find(|candidate| exists(candidate))
+    }
+}
+
+/// True when `candidate` is a relative path that stays below where it is
+/// joined: plain names only, on every platform's reading of it.
+fn inside(candidate: &str) -> bool {
+    !candidate.split('/').any(|part| part == "..")
+        && Path::new(candidate)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+/// The disk's answer to `Frame::locate`: what the worktree holds, read where
+/// this process runs — right on Linux, and blind under Windows, where the
+/// worktree is the distribution's.
+pub fn on_disk(worktree: &Path) -> impl Fn(&str) -> bool + '_ {
+    move |candidate| worktree.join(candidate).exists()
 }
 
 /// One step of the trail that led to the error.
@@ -211,82 +250,40 @@ fn escape(text: &str) -> String {
 
 // — What the API returns ————————————————————————————————————————————
 //
-// Separate structures, `#[serde(default)]` everywhere: the API adds and removes
-// fields, and a missing one must not empty the whole list.
+// **Read field by field, never deserialised into a struct** — every answer,
+// not only the frames (see `collect_frames` for what it cost there).
+// `#[serde(default)]` covers a field that is *absent*; one that is present and
+// `null` fails the whole struct, and a struct is one row of a list: a single
+// issue with a `null` culprit or permalink emptied the whole page. Only the
+// outer array is demanded — an answer that is not one is not Sentry's.
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawIssue {
-    id: String,
-    #[serde(rename = "shortId")]
-    short_id: String,
-    title: String,
-    culprit: String,
-    level: String,
-    status: String,
-    /// Sentry writes the count as a **string** in the issue list and as a
-    /// number elsewhere: the raw value is kept and converted by hand,
-    /// otherwise half the responses fail to read.
-    count: serde_json::Value,
-    #[serde(rename = "userCount")]
-    user_count: serde_json::Value,
-    #[serde(rename = "firstSeen")]
-    first_seen: String,
-    #[serde(rename = "lastSeen")]
-    last_seen: String,
-    permalink: String,
-    metadata: RawMeta,
+/// The answer's outer list. Anything but an array is a response we cannot
+/// read, which is the one failure worth an error.
+fn list_of(json: &str, what: &str) -> Result<Vec<serde_json::Value>> {
+    serde_json::from_str::<Vec<serde_json::Value>>(json)
+        .with_context(|| format!("unreadable Sentry response ({what})"))
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawMeta {
-    #[serde(rename = "type")]
-    kind: String,
-    value: String,
+/// A text field: absent, `null` and not-a-string all read as empty.
+fn text_of(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawEvent {
-    message: String,
-    entries: Vec<RawEntry>,
-    tags: Vec<RawTag>,
+/// A list field: absent, `null` and not-a-list all read as empty.
+fn items_of<'a>(value: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+    value
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawTag {
-    key: String,
-    value: String,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawEntry {
-    #[serde(rename = "type")]
-    kind: String,
-    data: serde_json::Value,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawSpread {
-    key: String,
-    name: String,
-    #[serde(rename = "totalValues")]
-    total: u64,
-    #[serde(rename = "topValues")]
-    top: Vec<RawSpreadValue>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawSpreadValue {
-    value: String,
-    count: u64,
-}
-
+/// A number, which Sentry writes as a **string** in the issue list and as a
+/// number elsewhere: both are read, otherwise half the responses fail.
 fn as_u64(value: &serde_json::Value) -> u64 {
     value
         .as_u64()
@@ -294,33 +291,38 @@ fn as_u64(value: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// A number field, absent or `null` reading as zero.
+fn count_of(value: &serde_json::Value, key: &str) -> u64 {
+    value.get(key).map(as_u64).unwrap_or(0)
+}
+
 /// Reads a project's issue list.
 pub fn parse_issues(json: &str) -> Result<Vec<Issue>> {
-    let raw: Vec<RawIssue> =
-        serde_json::from_str(json).context("unreadable Sentry response (issues)")?;
-    Ok(raw
-        .into_iter()
-        .map(|issue| Issue {
-            count: as_u64(&issue.count),
-            users: as_u64(&issue.user_count),
-            id: issue.id,
-            short_id: issue.short_id,
-            // The kind alone when the metadata has one: the title repeats it
-            // with the message glued on, and the two are two things — the class
-            // that was raised, and what it said.
-            kind: if issue.metadata.kind.is_empty() {
-                issue.title.clone()
-            } else {
-                issue.metadata.kind
-            },
-            value: issue.metadata.value,
-            title: issue.title,
-            culprit: issue.culprit,
-            level: issue.level,
-            status: issue.status,
-            first_seen: issue.first_seen,
-            last_seen: issue.last_seen,
-            permalink: issue.permalink,
+    Ok(list_of(json, "issues")?
+        .iter()
+        .filter(|issue| issue.is_object())
+        .map(|issue| {
+            let title = text_of(issue, "title");
+            let metadata = issue.get("metadata").unwrap_or(&serde_json::Value::Null);
+            let kind = text_of(metadata, "type");
+            Issue {
+                id: text_of(issue, "id"),
+                short_id: text_of(issue, "shortId"),
+                // The kind alone when the metadata has one: the title repeats
+                // it with the message glued on, and the two are two things —
+                // the class that was raised, and what it said.
+                kind: if kind.is_empty() { title.clone() } else { kind },
+                value: text_of(metadata, "value"),
+                title,
+                culprit: text_of(issue, "culprit"),
+                level: text_of(issue, "level"),
+                status: text_of(issue, "status"),
+                count: count_of(issue, "count"),
+                users: count_of(issue, "userCount"),
+                first_seen: text_of(issue, "firstSeen"),
+                last_seen: text_of(issue, "lastSeen"),
+                permalink: text_of(issue, "permalink"),
+            }
         })
         .collect())
 }
@@ -331,38 +333,36 @@ pub fn parse_issues(json: &str) -> Result<Vec<Issue>> {
 /// whose events have expired is not an error, it is an issue with nothing left
 /// to read.
 pub fn parse_event(json: &str) -> Result<Option<Event>> {
-    let raw: Vec<RawEvent> =
-        serde_json::from_str(json).context("unreadable Sentry response (event)")?;
-    let Some(raw) = raw.into_iter().next() else {
+    let events = list_of(json, "event")?;
+    let Some(raw) = events.first() else {
         return Ok(None);
     };
     let mut frames = Vec::new();
     let mut crumbs = Vec::new();
-    for entry in &raw.entries {
+    for entry in items_of(raw, "entries") {
+        let data = entry.get("data").unwrap_or(&serde_json::Value::Null);
         // Both shapes exist depending on the SDK that sent the event, and
         // handling only one gives an empty trace on half the projects.
-        match entry.kind.as_str() {
+        match text_of(entry, "type").as_str() {
             "exception" => {
-                let values = entry.data.get("values").and_then(|v| v.as_array());
-                for value in values.into_iter().flatten() {
+                for value in items_of(data, "values") {
                     collect_frames(value.get("stacktrace"), &mut frames);
                 }
             }
-            "stacktrace" => collect_frames(Some(&entry.data), &mut frames),
-            "breadcrumbs" => collect_crumbs(&entry.data, &mut crumbs),
+            "stacktrace" => collect_frames(Some(data), &mut frames),
+            "breadcrumbs" => collect_crumbs(data, &mut crumbs),
             _ => {}
         }
     }
     Ok(Some(Event {
-        message: raw.message,
-        tags: raw
-            .tags
-            .into_iter()
-            .filter(|tag| !tag.key.is_empty())
+        message: text_of(raw, "message"),
+        tags: items_of(raw, "tags")
+            .iter()
             .map(|tag| Tag {
-                key: tag.key,
-                value: tag.value,
+                key: text_of(tag, "key"),
+                value: text_of(tag, "value"),
             })
+            .filter(|tag| !tag.key.is_empty())
             .collect(),
         frames,
         crumbs,
@@ -470,28 +470,31 @@ fn collect_crumbs(data: &serde_json::Value, out: &mut Vec<Crumb>) {
 /// A tag with a single value is dropped: "environment: production, 100 %" is a
 /// bar that says nothing, and seven of them push the trace off the screen.
 pub fn parse_tags(json: &str) -> Result<Vec<Spread>> {
-    let raw: Vec<RawSpread> =
-        serde_json::from_str(json).context("unreadable Sentry response (tags)")?;
-    Ok(raw
-        .into_iter()
-        .filter(|spread| spread.top.len() > 1)
-        .map(|spread| Spread {
-            name: if spread.name.is_empty() {
-                spread.key
-            } else {
-                spread.name
-            },
-            values: spread
-                .top
-                .iter()
-                .map(|value| {
-                    let share = match spread.total {
-                        0 => 0,
-                        total => ((value.count * 100) / total).min(100) as u8,
-                    };
-                    (value.value.clone(), share)
-                })
-                .collect(),
+    Ok(list_of(json, "tags")?
+        .iter()
+        .filter(|spread| items_of(spread, "topValues").len() > 1)
+        .map(|spread| {
+            let total = count_of(spread, "totalValues");
+            let name = text_of(spread, "name");
+            Spread {
+                name: if name.is_empty() {
+                    text_of(spread, "key")
+                } else {
+                    name
+                },
+                values: items_of(spread, "topValues")
+                    .iter()
+                    .map(|value| {
+                        let share =
+                            match total {
+                                0 => 0,
+                                total => (count_of(value, "count").saturating_mul(100) / total)
+                                    .min(100) as u8,
+                            };
+                        (text_of(value, "value"), share)
+                    })
+                    .collect(),
+            }
         })
         .collect())
 }
@@ -545,12 +548,15 @@ pub fn instant_of(text: &str) -> Option<i64> {
 ///
 /// The introduction arrives already translated from the view: `tr!` belongs to
 /// the `ui` feature, and this module has to compile in the headless server.
+///
+/// `exists` is what brings a frame's path back to the repository — see
+/// `Frame::locate`.
 pub fn prompt(
     intro: &str,
     org: &str,
     issue: &Issue,
     event: Option<&Event>,
-    worktree: &Path,
+    exists: &dyn Fn(&str) -> bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(intro);
@@ -613,7 +619,7 @@ pub fn prompt(
     if !event.frames.is_empty() {
         out.push_str("\n## Trace\n");
         for frame in &event.frames {
-            let path = frame.repo_path(worktree);
+            let path = frame.repo_path(exists);
             out.push_str(&format!("- {path}:{}", frame.line));
             if !frame.function.is_empty() {
                 out.push_str(&format!(" · {}", frame.function));
@@ -626,7 +632,7 @@ pub fn prompt(
         if frame.context.is_empty() {
             continue;
         }
-        let path = frame.repo_path(worktree);
+        let path = frame.repo_path(exists);
         out.push_str(&format!("\n## {path}:{}\n", frame.line));
         out.push_str("```\n");
         for (number, text) in &frame.context {
@@ -790,13 +796,7 @@ mod tests {
     fn the_prompt_quotes_the_trace_and_the_code_that_is_ours() {
         let issues = parse_issues(ISSUES).unwrap();
         let event = parse_event(EVENT).unwrap().unwrap();
-        let text = prompt(
-            "Fix this.",
-            "acme",
-            &issues[0],
-            Some(&event),
-            Path::new("/nowhere"),
-        );
+        let text = prompt("Fix this.", "acme", &issues[0], Some(&event), &nowhere);
         assert!(text.starts_with("Fix this."));
         assert!(text.contains("- Sentry issue: SHOP-2F"));
         assert!(text.contains("# ValueError"));
@@ -814,8 +814,106 @@ mod tests {
     #[test]
     fn a_prompt_with_no_event_yet_says_what_is_known() {
         let issues = parse_issues(ISSUES).unwrap();
-        let text = prompt("Fix this.", "acme", &issues[0], None, Path::new("/nowhere"));
+        let text = prompt("Fix this.", "acme", &issues[0], None, &nowhere);
         assert!(text.contains("# ValueError"));
         assert!(!text.contains("## Trace"));
+    }
+
+    /// A worktree that holds nothing: every frame keeps what Sentry said.
+    fn nowhere(_: &str) -> bool {
+        false
+    }
+
+    /// Sentry writes `null` where it has nothing, and one such field in one
+    /// row must not cost the list, the event or the distribution.
+    #[test]
+    fn a_null_anywhere_is_a_field_that_is_not_there() {
+        let issues = parse_issues(
+            r#"[
+              { "id": "1", "title": "Boom", "culprit": null, "permalink": null,
+                "shortId": null, "count": null, "userCount": null,
+                "metadata": null },
+              { "id": "2", "title": "Bang", "metadata": { "type": null, "value": "x" } },
+              null
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].id, "1");
+        assert!(issues[0].culprit.is_empty() && issues[0].permalink.is_empty());
+        assert_eq!(issues[0].kind, "Boom");
+        assert_eq!(issues[0].count, 0);
+        assert_eq!(issues[1].kind, "Bang");
+        assert_eq!(issues[1].value, "x");
+
+        let event = parse_event(
+            r#"[{
+              "message": null,
+              "tags": [{ "key": "release", "value": null }, { "key": null, "value": "x" }],
+              "entries": [
+                { "type": "stacktrace", "data": { "frames": [
+                    { "filename": "app/x.py", "lineNo": null, "inApp": null, "context": null }
+                ] } },
+                { "type": null, "data": null },
+                { "type": "breadcrumbs", "data": null }
+              ]
+            }]"#,
+        )
+        .unwrap()
+        .expect("one event");
+        assert!(event.message.is_empty());
+        assert_eq!(event.tags.len(), 1);
+        assert_eq!(event.frames.len(), 1);
+        assert_eq!(event.frames[0].line, 0);
+        // `entries` itself may be null.
+        assert!(parse_event(r#"[{ "entries": null, "tags": null }]"#)
+            .unwrap()
+            .is_some());
+
+        let spreads = parse_tags(
+            r#"[{ "key": "browser", "name": null, "totalValues": null,
+                  "topValues": [ { "value": null, "count": 3 }, { "value": "Firefox", "count": null } ] }]"#,
+        )
+        .unwrap();
+        assert_eq!(spreads.len(), 1);
+        assert_eq!(spreads[0].name, "browser");
+        // No total: no share, rather than a division by zero.
+        assert_eq!(spreads[0].values[1], ("Firefox".into(), 0));
+    }
+
+    /// An event is anyone's to send, and a frame that climbs out of the
+    /// worktree must open nothing — the editor it would open writes.
+    #[test]
+    fn a_frame_never_names_a_file_outside_the_worktree() {
+        let frame = |filename: &str| Frame {
+            filename: filename.into(),
+            ..Default::default()
+        };
+        let everything = |_: &str| true;
+        // A climb is refused; the tail below it is inside by construction.
+        assert_eq!(
+            frame("../../../.bashrc").locate(everything).as_deref(),
+            Some(".bashrc")
+        );
+        let asked = std::cell::RefCell::new(Vec::new());
+        let record = |candidate: &str| {
+            asked.borrow_mut().push(candidate.to_string());
+            false
+        };
+        assert_eq!(frame("app/../../etc/passwd").locate(record), None);
+        assert!(asked.borrow().iter().all(|path| !path.contains("..")));
+        assert!(asked.borrow().contains(&"etc/passwd".to_string()));
+        // `.` says nothing, and a Windows path is cut like a Unix one.
+        let known = |candidate: &str| candidate == "src/Http/Kernel.php";
+        assert_eq!(
+            frame(r"C:\inetpub\app\.\src\Http\Kernel.php")
+                .locate(known)
+                .as_deref(),
+            Some("src/Http/Kernel.php")
+        );
+        // Nothing found: the frame opens nothing, and shows what Sentry said.
+        let module = frame("app.http.kernel");
+        assert_eq!(module.locate(nowhere), None);
+        assert_eq!(module.repo_path(nowhere), "app.http.kernel");
     }
 }
