@@ -386,9 +386,113 @@ pub fn expect_at(sql: &str, upto: usize) -> Expect {
     expect
 }
 
+/// The words of the outermost statement: what stands inside parentheses — a
+/// subquery, a function's arguments, a window's `OVER (ORDER BY …)` — is left
+/// out, and so are the parentheses themselves.
+///
+/// It is what says whether a query sorts or bounds **itself**, as against
+/// something it contains doing so.
+pub fn top_level(sql: &str) -> Vec<Word> {
+    let mut depth = 0usize;
+    words(sql)
+        .into_iter()
+        .filter(|word| {
+            if !word.quoted && word.text == "(" {
+                depth += 1;
+                return false;
+            }
+            if !word.quoted && word.text == ")" {
+                depth = depth.saturating_sub(1);
+                return false;
+            }
+            depth == 0
+        })
+        .collect()
+}
+
+/// Verbs that change something, wherever they stand.
+///
+/// `INTO` is among them: it is `INSERT INTO`, and it is also `SELECT … INTO
+/// OUTFILE`, which writes a file on the server — and a `SELECT … INTO @x`,
+/// which does not, but does not come back as rows either. `SET` is not: it is
+/// written in `CAST(x AS CHAR CHARACTER SET utf8mb4)`, and an `UPDATE` is
+/// caught by its own name.
+const WRITES: &[&str] = &[
+    "insert", "update", "delete", "replace", "merge", "into", "create", "drop", "alter",
+    "truncate", "rename", "call", "grant", "revoke",
+];
+
+/// Verbs of `WRITES` that are also the names of MySQL functions:
+/// `REPLACE(s, 'a', 'b')`, `INSERT(s, 1, 2, 'x')`, `TRUNCATE(x, 2)`.
+const ALSO_FUNCTIONS: &[&str] = &["replace", "insert", "truncate"];
+
+/// True when `sql` holds a verb that changes something, at any depth and in
+/// any statement — strings, comments and quoted names set aside, so that a
+/// `WHERE action = 'delete'` or a column called `"update"` writes nothing.
+///
+/// **Rough on purpose, and on the side of caution**: what it costs to be wrong
+/// one way is a query not paged past what it first read, and the other way is
+/// a write run again at every page. So a verb counts unless it is plainly not
+/// one — a function call, a `FOR UPDATE` lock.
+pub fn writes(sql: &str) -> bool {
+    let words = words(sql);
+    words.iter().enumerate().any(|(index, word)| {
+        if !word.any(WRITES) {
+            return false;
+        }
+        let called = words
+            .get(index + 1)
+            .is_some_and(|next| !next.quoted && next.text == "(");
+        if called && word.any(ALSO_FUNCTIONS) {
+            return false;
+        }
+        // `SELECT … FOR UPDATE` locks what it reads, and writes nothing.
+        let locks = word.is("update") && index > 0 && words[index - 1].is("for");
+        !locks
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a query writes is read past its strings and its function calls,
+    /// and never missed at the end of a `WITH` or after a first statement.
+    #[test]
+    fn a_write_is_found_wherever_it_hides() {
+        assert!(writes("INSERT INTO t VALUES (1); SELECT * FROM t"));
+        assert!(writes(
+            "WITH old AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM old)"
+        ));
+        assert!(writes("SELECT * FROM t INTO OUTFILE '/tmp/x'"));
+        assert!(writes("select 1; update t set a = 2"));
+        // A read, however it is dressed.
+        assert!(!writes(
+            "SELECT * FROM t WHERE action = 'delete' -- insert here"
+        ));
+        assert!(!writes(r#"SELECT "update", `drop` FROM t"#));
+        assert!(!writes(
+            "SELECT REPLACE(name, 'a', 'b'), TRUNCATE(price, 2) FROM t"
+        ));
+        assert!(!writes("SELECT * FROM t FOR UPDATE"));
+        assert!(!writes(
+            "SELECT CAST(x AS CHAR CHARACTER SET utf8mb4) FROM t"
+        ));
+    }
+
+    /// Only the outermost statement's words: a subquery's sort is its own.
+    #[test]
+    fn the_top_level_leaves_the_parentheses_out() {
+        let top: Vec<String> = top_level(
+            "SELECT a, ROW_NUMBER() OVER (ORDER BY b) FROM (SELECT * FROM t LIMIT 3) x ORDER BY a",
+        )
+        .into_iter()
+        .map(|word| word.text.to_lowercase())
+        .collect();
+        assert_eq!(top.iter().filter(|word| *word == "order").count(), 1);
+        assert!(!top.contains(&"limit".to_string()));
+        assert!(top.ends_with(&["order".into(), "by".into(), "a".into()]));
+    }
 
     fn source(table: &str, alias: Option<&str>) -> Source {
         Source {

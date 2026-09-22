@@ -150,6 +150,11 @@ pub struct QueryState {
     pub offset: usize,
     pub shown: usize,
     pub more: bool,
+    /// The result went on past the window, and the rest will not be read:
+    /// the query is not a plain read, and reading further would run it again
+    /// (`db::replayable`). `more` is then off, and the bar says why the list
+    /// stops.
+    pub truncated: bool,
     pub affected: Option<u64>,
     pub has_columns: bool,
     pub elapsed_ms: u64,
@@ -1188,14 +1193,23 @@ impl ClaudhubApp {
             console.state.sent = None;
             console.state.sort = None;
             console.state.can_sort = false;
+            console.state.truncated = false;
+            // A query still running on the previous connection answers a
+            // request no console is waiting for any more: request `0` is never
+            // sent (the counter starts at one), so its rows are dropped on
+            // arrival rather than shown under the new connection's name.
+            console.state.request = 0;
+            console.state.running = false;
+            console.state.appending = false;
+            console.state.record = false;
             self.set_db_rows(id, db::Rows::default(), cx);
             self.index_db_schema(id, &connection, database.as_deref(), cx);
         }
         if let Some(table) = table {
-            let quoted = match connection.engine {
-                db::Engine::Sqlite => format!("\"{table}\""),
-                db::Engine::Mysql => format!("`{table}`"),
-            };
+            // Quoted the way a followed key is, the quote doubled inside: a
+            // table named with a backtick is legal, and the bare wrap broke
+            // the query open.
+            let quoted = db::link::quote(connection.engine, &table);
             // No `LIMIT`: the result window already stands for one, and a bound
             // written into the text would outlive the query one writes over it.
             let sql = format!("SELECT * FROM {quoted};");
@@ -1652,12 +1666,24 @@ impl ClaudhubApp {
             self.record_sql_query(id, &rows, elapsed_ms, cx);
         }
         match rows {
-            Ok(rows) => {
+            Ok(mut rows) => {
                 let Some(console) = self.console_mut(id) else {
                     return;
                 };
                 console.state.error = None;
                 let sent = console.state.sent.clone().unwrap_or_default();
+                // **What is not a plain read is read once.** Every way on —
+                // scrolling down, the next page, a sort — replays the text, and
+                // `INSERT …; SELECT …` would insert once more each time. The
+                // rows past the window are therefore not offered, and the bar
+                // says the list is cut rather than letting it end as if whole.
+                let replayable = console
+                    .state
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| db::replayable(connection.engine, &sent));
+                console.state.truncated = rows.more && !replayable;
+                rows.more &= replayable;
                 console.state.can_sort = db::can_order(&sent, &rows.columns);
                 console.state.affected = rows.affected;
                 if console.state.appending {
@@ -1680,6 +1706,7 @@ impl ClaudhubApp {
                 console.state.has_columns = false;
                 console.state.can_sort = false;
                 console.state.more = false;
+                console.state.truncated = false;
                 self.set_db_rows(id, db::Rows::default(), cx);
             }
         }
@@ -1835,6 +1862,23 @@ impl ClaudhubApp {
             return;
         };
         if console.state.exporting.is_some() || console.state.sent.is_none() {
+            return;
+        }
+        // **Refused, and not cut to the rows on screen.** An export replays the
+        // query whole, which a write must never be; and a file of the rows
+        // already read would be named and shaped like the whole result while
+        // holding a page of it, which is worse than no file. Those rows are
+        // one `Ctrl+C` away. Refused before the picker, too: choosing a path
+        // for nothing is a gesture wasted.
+        let replayable = console.state.connection.as_ref().is_some_and(|connection| {
+            console
+                .state
+                .sent
+                .as_deref()
+                .is_some_and(|sent| db::replayable(connection.engine, sent))
+        });
+        if !replayable {
+            self.announce_error(tr!("db-export-not-a-read"), cx);
             return;
         }
         let directory = directories::UserDirs::new()
@@ -2217,6 +2261,9 @@ impl ClaudhubApp {
         if !state.has_columns {
             let affected = state.affected.unwrap_or(0);
             return tr!("db-affected", { n: affected, ms: ms });
+        }
+        if state.truncated {
+            return tr!("db-row-truncated", { n: state.shown, ms: ms });
         }
         if state.offset == 0 && !state.more {
             return tr!("db-row-count", { n: state.shown, ms: ms });

@@ -455,14 +455,57 @@ const SORT_ALIAS: &str = "claudhub_result";
 /// The alias `paged` gives its own.
 const PAGE_ALIAS: &str = "claudhub_page";
 
+/// True when running `sql` again — for the next page, for an export, for a
+/// sort — changes nothing but the rows it reads.
+///
+/// **A query that is not a plain read is never run a second time.** Paging,
+/// sorting and exporting all replay the text that was sent, and the console
+/// takes whatever one types: `INSERT …; SELECT …` inserted once more at every
+/// page and once more at the export, with nothing on screen to say so. What is
+/// not replayable is read once, and what did not fit in that one read is said
+/// to be cut rather than fetched (`ui::db_query`).
+///
+/// SQLite is always replayable: its connection is opened **read-only**
+/// (`sqlite::open`), so nothing it runs can write, however it is written.
+/// MySQL is replayable when it is one statement, opening on a verb that
+/// reads — the wrappable ones, and `SHOW`, `DESCRIBE`, `EXPLAIN` — with no
+/// verb that writes anywhere in it (`sql::writes`, which is what catches the
+/// `WITH … DELETE` MySQL accepts and the `SELECT … INTO OUTFILE`). A function
+/// with side effects of its own is beyond what reading the text can tell; the
+/// account's rights are the barrier there, as the module says.
+pub fn replayable(engine: Engine, sql: &str) -> bool {
+    match engine {
+        Engine::Sqlite => true,
+        Engine::Mysql => read_body(sql, READ_HEADS).is_some(),
+    }
+}
+
+/// What a statement that lets itself be wrapped opens on. The empty string is
+/// the case of a query opening on a parenthesis, `(SELECT …) UNION (SELECT …)`.
+const WRAP_HEADS: &[&str] = &["", "SELECT", "WITH", "VALUES", "TABLE"];
+
+/// What a statement that only reads opens on: the wrappable ones, and those
+/// whose answer is a result without being a query one can put in a derived
+/// table.
+const READ_HEADS: &[&str] = &[
+    "", "SELECT", "WITH", "VALUES", "TABLE", "SHOW", "DESCRIBE", "DESC", "EXPLAIN",
+];
+
 /// The body of a query that lets itself be wrapped in a derived table.
 ///
 /// `None` when the query does not let itself be wrapped: several statements —
-/// the parenthesis would fall between two — or something other than a read. The
-/// semicolon is looked for in the raw text, so a query carrying a `;` inside a
-/// string literal loses the wrap: that is the sense of the refusal, and it
-/// costs only one unavailable gesture.
+/// the parenthesis would fall between two — or something other than a plain
+/// read, since a wrap is run again at each page and each sort. The semicolon
+/// is looked for in the raw text, so a query carrying a `;` inside a string
+/// literal loses the wrap: that is the sense of the refusal, and it costs only
+/// one unavailable gesture.
 fn wrappable(sql: &str) -> Option<&str> {
+    read_body(sql, WRAP_HEADS)
+}
+
+/// The body of a single statement opening on one of `heads` and writing
+/// nothing — its trailing semicolon trimmed.
+fn read_body<'a>(sql: &'a str, heads: &[&str]) -> Option<&'a str> {
     let body = sql.trim().trim_end_matches(';').trim_end();
     if body.is_empty() || body.contains(';') {
         return None;
@@ -472,9 +515,7 @@ fn wrappable(sql: &str) -> Option<&str> {
         .next()
         .unwrap_or_default()
         .to_ascii_uppercase();
-    // The empty string is the case of a query opening on a parenthesis,
-    // `(SELECT …) UNION (SELECT …)`.
-    if !matches!(head.as_str(), "" | "SELECT" | "WITH" | "VALUES" | "TABLE") {
+    if !heads.contains(&head.as_str()) || sql::writes(body) {
         return None;
     }
     Some(body)
@@ -491,7 +532,19 @@ fn wrappable(sql: &str) -> Option<&str> {
 /// continues, and it is the same row the plain read looks at before stopping.
 ///
 /// `None` for what does not let itself be wrapped — and the wrap can still be
-/// refused at run time, so both engines keep the plain read as the fallback.
+/// refused at run time, so both engines keep the plain read as the fallback,
+/// which only ever runs a plain read (`wrappable` says so first).
+///
+/// **A sorted query is extended, not wrapped.** An `ORDER BY` buried in a
+/// derived table with no `LIMIT` beside it is one MariaDB drops by design and
+/// MySQL drops whenever it materialises the table, so the page came back in
+/// whatever order the engine found convenient — the user's `ORDER BY
+/// created_at DESC` on page one, anything on page two. When the outermost
+/// statement sorts, the bound is therefore written after it, on a line of its
+/// own so that a closing `--` comment cannot swallow it; the sort `order_by`
+/// writes is one such statement, and keeps its single wrap. When it also
+/// bounds itself, there is no place left to write ours, and it is read from
+/// the start.
 pub fn paged(sql: &str, offset: usize, limit: usize) -> Option<String> {
     if offset == 0 {
         return None;
@@ -499,32 +552,19 @@ pub fn paged(sql: &str, offset: usize, limit: usize) -> Option<String> {
     let body = wrappable(sql)?;
     let wanted = limit.checked_add(1)?;
     let clause = format!("LIMIT {wanted} OFFSET {offset}");
-    // A sort of ours is **extended**, not wrapped a second time: an `ORDER BY`
-    // buried in a derived table is one MySQL is free to drop, and the page
-    // would come back in whatever order the engine found convenient.
-    if is_sorted(body) {
-        return Some(format!("{body} {clause}"));
+    let top = sql::top_level(body);
+    let sorted = top
+        .windows(2)
+        .any(|pair| pair[0].is("order") && pair[1].is("by"));
+    if sorted {
+        if top.iter().any(|word| word.is("limit")) {
+            return None;
+        }
+        return Some(format!("{body}\n{clause}"));
     }
     Some(format!(
         "SELECT * FROM (\n{body}\n) AS {PAGE_ALIAS} {clause}"
     ))
-}
-
-/// True when `body` is what `order_by` wrote: our derived table, closed by an
-/// `ORDER BY <rank> ASC|DESC` and nothing after it.
-fn is_sorted(body: &str) -> bool {
-    let marker = format!("\n) AS {SORT_ALIAS} ORDER BY ");
-    let Some((_, tail)) = body.rsplit_once(&marker) else {
-        return false;
-    };
-    match tail.rsplit_once(' ') {
-        Some((rank, direction)) => {
-            !rank.is_empty()
-                && rank.bytes().all(|byte| byte.is_ascii_digit())
-                && matches!(direction, "ASC" | "DESC")
-        }
-        None => false,
-    }
 }
 
 /// One table row, values escaped and terminated by a newline.
@@ -907,13 +947,78 @@ mod tests {
     fn a_sorted_query_keeps_one_wrap() {
         let sorted = order_by("SELECT a, b FROM t", 1, false).unwrap();
         let page = paged(&sorted, 20, 10).unwrap();
-        assert_eq!(page, format!("{sorted} LIMIT 11 OFFSET 20"));
+        assert_eq!(page, format!("{sorted}\nLIMIT 11 OFFSET 20"));
         assert_eq!(page.matches("SELECT * FROM (").count(), 1);
-        // Anything else, sort-looking or not, is wrapped.
-        let hand_written = "SELECT * FROM (\nSELECT a\n) AS claudhub_result ORDER BY x ASC";
-        assert!(paged(hand_written, 20, 10)
+    }
+
+    /// The user's own sort survives the second page: a derived table's
+    /// `ORDER BY` is one MariaDB and a materialising MySQL drop, so a sorted
+    /// query is bounded where it stands.
+    #[test]
+    fn a_sort_of_the_users_is_not_buried_in_a_wrap() {
+        assert_eq!(
+            paged("SELECT * FROM t ORDER BY created_at DESC;", 20, 10).unwrap(),
+            "SELECT * FROM t ORDER BY created_at DESC\nLIMIT 11 OFFSET 20"
+        );
+        // On its own line: a closing comment does not swallow the bound.
+        let commented = paged("SELECT a FROM t ORDER BY a -- newest", 20, 10).unwrap();
+        assert!(
+            commented.ends_with("-- newest\nLIMIT 11 OFFSET 20"),
+            "{commented}"
+        );
+        // A union sorted as a whole is bounded as a whole.
+        assert!(
+            paged("SELECT a FROM t UNION SELECT a FROM u ORDER BY 1", 20, 10)
+                .unwrap()
+                .ends_with("ORDER BY 1\nLIMIT 11 OFFSET 20")
+        );
+        // Sorted and bounded already: there is no room for our bound, and the
+        // page is read from the start rather than out of order.
+        assert!(paged("SELECT * FROM t ORDER BY a LIMIT 500", 20, 10).is_none());
+        // A sort that is not the statement's — a subquery's, a window's — is
+        // not one to keep: the whole is wrapped as before.
+        for inner in [
+            "SELECT * FROM (SELECT * FROM t ORDER BY a LIMIT 50) x",
+            "SELECT ROW_NUMBER() OVER (ORDER BY a) FROM t",
+        ] {
+            assert!(paged(inner, 20, 10)
+                .unwrap()
+                .starts_with("SELECT * FROM (\n"));
+        }
+        // A bound of the user's with no sort is kept inside the wrap.
+        assert!(paged("SELECT * FROM t LIMIT 5000", 20, 10)
             .unwrap()
-            .starts_with("SELECT * FROM (\nSELECT * FROM ("));
+            .ends_with("\n) AS claudhub_page LIMIT 11 OFFSET 20"));
+    }
+
+    /// What writes is never run again: not paged, not sorted, not replayed —
+    /// SQLite aside, whose connection is read-only.
+    #[test]
+    fn a_write_is_never_replayed() {
+        for write in [
+            "INSERT INTO t VALUES (1); SELECT * FROM t",
+            "SELECT * FROM t; DELETE FROM t",
+            "WITH x AS (SELECT 1) UPDATE t SET a = 1",
+            "SELECT * FROM t INTO OUTFILE '/tmp/t.csv'",
+            "CALL refresh_stats()",
+            "UPDATE t SET a = 1",
+        ] {
+            assert!(!replayable(Engine::Mysql, write), "{write}");
+            assert!(paged(write, 20, 10).is_none(), "{write}");
+            assert!(order_by(write, 0, true).is_none(), "{write}");
+            assert!(replayable(Engine::Sqlite, write), "{write}");
+        }
+        for read in [
+            "SELECT * FROM t WHERE state = 'deleted';",
+            "(SELECT 1) UNION (SELECT 2)",
+            "SHOW PROCESSLIST",
+            "describe t",
+            "EXPLAIN SELECT * FROM t",
+        ] {
+            assert!(replayable(Engine::Mysql, read), "{read}");
+        }
+        // Two reads are two statements, and a wrap would fall between them.
+        assert!(!replayable(Engine::Mysql, "SELECT 1; SELECT 2"));
     }
 
     /// What cannot be wrapped is not sorted — rather than sorted wrong.

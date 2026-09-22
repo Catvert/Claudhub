@@ -438,8 +438,14 @@ impl ClaudhubApp {
             intro => intro.to_string(),
         };
         let org = Settings::global(cx).sentry_org.trim().to_string();
-        let text =
-            crate::sentry::prompt(&intro, &org, &issue, self.sentry.event.as_ref(), &worktree);
+        let known = self.known_files(&worktree);
+        let text = crate::sentry::prompt(
+            &intro,
+            &org,
+            &issue,
+            self.sentry.event.as_ref(),
+            &|candidate| known.contains(candidate),
+        );
         // Through the terminal, in a bracketed paste, like the notes: the agent
         // is what has the repository in its hands, and Claudhub never talks to
         // an API for this.
@@ -678,7 +684,13 @@ impl ClaudhubApp {
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .disabled(loading)
-                    .on_click(cx.listener(|this, _, _window, cx| this.load_sentry(cx))),
+                    // A keyring that failed is kept failed, or it would be
+                    // asked on every frame — see `keyring::resolve`. Reading
+                    // again is the gesture that asks it again.
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        crate::ui::keyring::retry();
+                        this.load_sentry(cx);
+                    })),
             )
     }
 }
@@ -820,6 +832,28 @@ pub struct PageKey {
     /// The theme, because the colours are baked into the rows.
     theme: String,
     worktree: Option<PathBuf>,
+    /// The explorer's file count, under Windows only: it is what says which
+    /// frames open there — see `known_files` — and it arrives after the page.
+    files: usize,
+}
+
+/// What `sentry::Frame::locate` asks: whether a path names a file of the
+/// worktree.
+enum KnownFiles {
+    /// The disk this process sees, which is the worktree's under Linux.
+    Disk(PathBuf),
+    /// The explorer's list, under Windows: the worktree is a path of the
+    /// distribution, and `Path::exists` would look for it on drive `C:`.
+    Listed(std::collections::HashSet<String>),
+}
+
+impl KnownFiles {
+    fn contains(&self, candidate: &str) -> bool {
+        match self {
+            Self::Disk(worktree) => crate::sentry::on_disk(worktree)(candidate),
+            Self::Listed(files) => files.contains(candidate),
+        }
+    }
 }
 
 /// The body of the page, laid out.
@@ -830,6 +864,34 @@ pub struct Page {
 }
 
 impl ClaudhubApp {
+    /// What says which of a trace's frames are files of `worktree`.
+    ///
+    /// **Under Windows, the explorer's list, and nothing until it has one**:
+    /// the worktree lives in the distribution and the wire carries no question
+    /// about a path's existence, so a trace read before the explorer has
+    /// listed its files opens none of them — the page is laid out again when
+    /// the list arrives (`PageKey::files`). What the list leaves out — the
+    /// inside of a folder git ignores whole, `vendor/` — does not open there
+    /// either; under Linux, where the disk is the worktree's, it does.
+    fn known_files(&self, worktree: &std::path::Path) -> KnownFiles {
+        if cfg!(windows) {
+            let files = self
+                .explorers
+                .get(worktree)
+                .map(|explorer| {
+                    explorer
+                        .files
+                        .iter()
+                        .filter_map(|path| path.to_str())
+                        .map(|path| path.replace('\\', "/"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return KnownFiles::Listed(files);
+        }
+        KnownFiles::Disk(worktree.to_path_buf())
+    }
+
     /// Lays the body out, when what it is made of has moved.
     ///
     /// The same device as the SQL history's list: a key of everything the
@@ -851,6 +913,14 @@ impl ClaudhubApp {
                 settings.theme, settings.light_theme, settings.dark_theme
             ),
             worktree: self.active.clone(),
+            files: if cfg!(windows) {
+                self.active
+                    .as_ref()
+                    .and_then(|worktree| self.explorers.get(worktree))
+                    .map_or(0, |explorer| explorer.files.len())
+            } else {
+                0
+            },
         };
         if self
             .sentry
@@ -861,6 +931,7 @@ impl ClaudhubApp {
             return;
         }
         let worktree = self.active.clone().unwrap_or_default();
+        let known = self.known_files(&worktree);
         let highlight = cx.theme().highlight_theme.clone();
         let mut rows = Vec::new();
         let mut frames = Vec::new();
@@ -888,7 +959,12 @@ impl ClaudhubApp {
                 // **Newest first.** Sentry's order is the call's — oldest first
                 // — and what one comes for is the line that raised.
                 for frame in event.frames.iter().rev() {
-                    let path = frame.repo_path(&worktree);
+                    // Located or nothing: a path Sentry wrote that is not a
+                    // file of this worktree — `../../.bashrc` included, since
+                    // an event is anyone's to send — is shown and never opened.
+                    let located = frame.locate(|candidate| known.contains(candidate));
+                    let opens = located.is_some();
+                    let path = located.unwrap_or_else(|| frame.filename.replace('\\', "/"));
                     // The excerpt is a fragment with nothing before it — a
                     // grammar's error recovery is what makes parsing it on its
                     // own worth doing — and its language comes from the path
@@ -916,7 +992,7 @@ impl ClaudhubApp {
                         }
                     }
                     frames.push(PaintedFrame {
-                        opens: !path.is_empty() && worktree.join(&path).exists(),
+                        opens,
                         line: frame.line,
                         function: frame.function.clone(),
                         in_app: frame.in_app,
