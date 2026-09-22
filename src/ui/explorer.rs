@@ -666,9 +666,10 @@ fn offset_of(text: &gpui_kit::component::input::Rope, landing: &Landing) -> usiz
                 .find_map(|needle| text.find(needle.as_str()))
                 .unwrap_or(0)
         }
+        // UTF-16 columns, as the protocol counts them, and not the rope's
+        // characters — see `lsp::lsp_offset`.
         Landing::Position { line, character } => {
-            use gpui_kit::component::input::RopeExt;
-            text.position_to_offset(&lsp_types::Position::new(*line, *character))
+            crate::ui::lsp::lsp_offset(text, &lsp_types::Position::new(*line, *character))
         }
     }
 }

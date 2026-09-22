@@ -76,6 +76,36 @@ fn local(worktree: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(worktree).unwrap_or(path).to_path_buf()
 }
 
+/// The LSP position of a byte offset in the editor's text.
+///
+/// **Not the rope's own `offset_to_position`**, which counts the column in
+/// characters: the protocol counts UTF-16 code units, and no
+/// `positionEncoding` is negotiated to say otherwise. The two agree until a
+/// line carries a character outside the basic plane — an emoji in a comment
+/// or a string — after which every hover, completion and code action on that
+/// line asked about a column one to the left of the caret. The arithmetic is
+/// `lsp::sync`'s, the one already trusted with the edits we send; only the
+/// line is copied out of the rope, never the document.
+pub(super) fn lsp_position(text: &Rope, offset: usize) -> lsp_types::Position {
+    let point = text.offset_to_point(offset);
+    let line = text.slice_line(point.row).to_string();
+    lsp_types::Position::new(
+        point.row as u32,
+        crate::lsp::sync::utf16_column(&line, point.column),
+    )
+}
+
+/// And back: the byte offset of a position a server gave, clamped to the text
+/// — a server may name a line the buffer no longer has.
+pub(super) fn lsp_offset(text: &Rope, position: &lsp_types::Position) -> usize {
+    let row = position.line as usize;
+    if row >= text.lines_len() {
+        return text.len();
+    }
+    let line = text.slice_line(row).to_string();
+    text.line_start_offset(row) + crate::lsp::sync::byte_of_utf16(&line, position.character)
+}
+
 /// How long a change waits before it is sent.
 ///
 /// A keystroke emits a change event, and a document is sent whole or as an
@@ -737,11 +767,18 @@ impl ClaudhubApp {
         let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
         let state = editing.input.read(cx);
         let offset = state.selected_range().start;
-        let position = state.text().offset_to_position(offset);
+        let position = lsp_position(state.text(), offset);
         // Read here, while the editor is at hand: the fallback runs from inside
         // the answer's closure, by which time the caret may have moved.
         let symbol = crate::ui::search::symbol_at(&state.text().to_string(), offset);
-        if !self.lsp_enabled(&worktree) || !self.lsp.contains_key(&worktree) {
+        // A server that has stopped is no server: asking it would be waiting
+        // on a session that is gone.
+        let serving = self.lsp_enabled(&worktree)
+            && self
+                .lsp
+                .get(&worktree)
+                .is_some_and(|session| !matches!(session.status, Status::Failed(_)));
+        if !serving {
             self.fallback_to_search(symbol, window, cx);
             return;
         }
@@ -829,6 +866,19 @@ impl ClaudhubApp {
         params: Value,
     ) -> async_channel::Receiver<Result<String, String>> {
         let (sender, receiver) = async_channel::bounded(1);
+        // **A session that has failed is answered here**, and never asked:
+        // its thread is gone, and what is sent to it is sent to nobody — the
+        // popover would spin until something else failed it. The core answers
+        // a dead session too (`lsp::Host::ask`); this is the half that does
+        // not cost a round trip.
+        if let Some(Session {
+            status: Status::Failed(reason),
+            ..
+        }) = self.lsp.get(worktree)
+        {
+            let _ = sender.try_send(Err(reason.to_string()));
+            return receiver;
+        }
         if method == "textDocument/completion" {
             if let Some(previous) = self.lsp_asking.insert(
                 (worktree.to_path_buf(), method.to_string()),
@@ -914,7 +964,7 @@ impl Provider {
     }
 
     fn position(&self, text: &Rope, offset: usize) -> Value {
-        let position = text.offset_to_position(offset);
+        let position = lsp_position(text, offset);
         json!({"line": position.line, "character": position.character})
     }
 }
@@ -1004,8 +1054,8 @@ impl CodeActionProvider for Provider {
         cx: &mut App,
     ) -> Task<Result<Vec<CodeAction>>> {
         let text = state.read(cx).text().clone();
-        let start = text.offset_to_position(range.start);
-        let end = text.offset_to_position(range.end);
+        let start = lsp_position(&text, range.start);
+        let end = lsp_position(&text, range.end);
         // **The diagnostics of the range travel with the request**, and they
         // are not a courtesy: a quick fix is offered *for* a diagnostic, and a
         // server given none has nothing to fix — the list comes back empty and
@@ -1130,12 +1180,16 @@ pub(super) fn apply_to(
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    let ours = crate::lsp::uri::of(path);
+    // Compared as paths and not as text: a server writes its URIs its own
+    // way — `%3A` where we write nothing, lower-case hex where we write
+    // upper — and a byte-for-byte comparison refused, as "another file", the
+    // fix it had computed for this one.
+    let ours = |uri: &lsp_types::Uri| crate::lsp::uri::path(uri.as_str()).as_deref() == Some(path);
     let mut mine: Vec<TextEdit> = Vec::new();
     let mut elsewhere = false;
     if let Some(changes) = &edit.changes {
         for (uri, edits) in changes {
-            if uri.as_str() == ours {
+            if ours(uri) {
                 mine.extend(edits.iter().cloned());
             } else {
                 elsewhere = true;
@@ -1144,7 +1198,7 @@ pub(super) fn apply_to(
     }
     if let Some(lsp_types::DocumentChanges::Edits(documents)) = &edit.document_changes {
         for document in documents {
-            if document.text_document.uri.as_str() == ours {
+            if ours(&document.text_document.uri) {
                 mine.extend(document.edits.iter().map(|edit| match edit {
                     lsp_types::OneOf::Left(edit) => edit.clone(),
                     // An annotated edit carries the same text and a label for a
@@ -1165,13 +1219,45 @@ pub(super) fn apply_to(
         elsewhere = true;
     }
     if !mine.is_empty() {
-        mine.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
+        let mine = back_to_front(mine);
         state.update(cx, |state, cx| {
+            // The editor reads an edit's columns in **characters** and the
+            // server wrote them in UTF-16 units: each position is brought to
+            // the editor's count against the text as it is now, which is the
+            // text they all refer to — applied back to front, no edit moves
+            // what the next one names.
+            let mine: Vec<TextEdit> = mine
+                .into_iter()
+                .map(|mut edit| {
+                    let text = state.text();
+                    edit.range.start = text.offset_to_position(lsp_offset(text, &edit.range.start));
+                    edit.range.end = text.offset_to_position(lsp_offset(text, &edit.range.end));
+                    edit
+                })
+                .collect();
             state.apply_lsp_edits(&mine, window, cx);
             cx.notify();
         });
     }
     !elsewhere
+}
+
+/// The order a workspace edit's edits are applied in: last position first.
+///
+/// **And, at one position, last listed first.** The protocol says two
+/// insertions at the same point land in the order the array gives them; each
+/// one pushes what was there to its right, so the one listed last must go in
+/// first. A stable sort on the position alone kept their order and applied
+/// them the wrong way round — `use A;` and `use B;` came out as `use B;use A;`.
+fn back_to_front(edits: Vec<TextEdit>) -> Vec<TextEdit> {
+    let mut edits: Vec<(usize, TextEdit)> = edits.into_iter().enumerate().collect();
+    edits.sort_by_key(|(index, edit)| {
+        (
+            std::cmp::Reverse(edit.range.start),
+            std::cmp::Reverse(*index),
+        )
+    });
+    edits.into_iter().map(|(_, edit)| edit).collect()
 }
 
 impl DocumentRangeSemanticTokensProvider for Provider {
@@ -1300,6 +1386,45 @@ mod tests {
         // and half a path would name nothing.
         let outside = Path::new("/usr/lib/php/Bar.php");
         assert_eq!(local(worktree, outside), outside);
+    }
+
+    /// The caret after an emoji, as the protocol names it: the elephant is one
+    /// character and **two** UTF-16 units, and the rope's own conversion —
+    /// characters — put every position after it one column to the left.
+    #[test]
+    fn a_position_is_counted_in_utf16_units_both_ways() {
+        let text = Rope::from_str("<?php\n$a = '🐘'; $b\n");
+        let dollar_b = "<?php\n$a = '🐘'; ".len();
+        let position = lsp_position(&text, dollar_b);
+        assert_eq!(position, lsp_types::Position::new(1, 11));
+        // The character count, which is what the editor used to send.
+        assert_eq!(text.offset_to_position(dollar_b).character, 10);
+        assert_eq!(lsp_offset(&text, &position), dollar_b);
+        // A server's position past the line, or past the text, is clamped.
+        assert_eq!(
+            lsp_offset(&text, &lsp_types::Position::new(1, 99)),
+            "<?php\n$a = '🐘'; $b".len()
+        );
+        assert_eq!(
+            lsp_offset(&text, &lsp_types::Position::new(9, 0)),
+            text.len()
+        );
+    }
+
+    /// Two insertions at one point land in the order the server listed them,
+    /// which, applied back to front, means the last listed goes in first.
+    #[test]
+    fn edits_are_applied_back_to_front_and_ties_last_listed_first() {
+        let at = |line, character, text: &str| TextEdit {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(line, character),
+                lsp_types::Position::new(line, character),
+            ),
+            new_text: text.into(),
+        };
+        let ordered = back_to_front(vec![at(0, 0, "use A;"), at(3, 2, "x"), at(0, 0, "use B;")]);
+        let texts: Vec<&str> = ordered.iter().map(|e| e.new_text.as_str()).collect();
+        assert_eq!(texts, ["x", "use B;", "use A;"]);
     }
 
     /// What PHPantom 0.10 announces, in its order.

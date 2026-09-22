@@ -16,7 +16,9 @@
 //! - **SGR** (`1006`), the only one with no edge: the numbers are written in
 //!   decimal, so a column past the 223rd can be expressed. It is what
 //!   everything written in the last fifteen years asks for.
-//! - **UTF-8** (`1005`), a patch over the previous one.
+//! - **UTF-8** (`1005`), a patch over the next one: the same numbers, each
+//!   written as a character rather than a byte, which carries them up to the
+//!   2015th cell — the last whose offset still fits in two bytes of UTF-8.
 //! - **The original format**, one byte per number, where nothing goes past the
 //!   223rd column — a terminal was a hundred and thirty wide when it was
 //!   defined. The event is **given up** there rather than clamped: reporting a
@@ -126,7 +128,11 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
     }
     if mode.contains(TermMode::UTF8_MOUSE) {
         let mut out = b"\x1b[M".to_vec();
-        for value in [u32::from(code) + 32, offset(column)?, offset(line)?] {
+        for value in [
+            u32::from(code) + 32,
+            offset(column, UTF8_LAST)?,
+            offset(line, UTF8_LAST)?,
+        ] {
             let mut buffer = [0u8; 4];
             out.extend_from_slice(char::from_u32(value)?.encode_utf8(&mut buffer).as_bytes());
         }
@@ -137,8 +143,8 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
         b'[',
         b'M',
         code.checked_add(32)?,
-        u8::try_from(offset(column)?).ok()?,
-        u8::try_from(offset(line)?).ok()?,
+        u8::try_from(offset(column, BYTE_LAST)?).ok()?,
+        u8::try_from(offset(line, BYTE_LAST)?).ok()?,
     ])
 }
 
@@ -146,11 +152,20 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
 /// format cannot name, and the hover that has no button.
 const NO_BUTTON: u8 = 3;
 
-/// The original format's offset of thirty-two, which puts every number in a
-/// printable byte. Past the 223rd cell there is no room left, and nothing
-/// honest to report.
-fn offset(value: usize) -> Option<u32> {
-    (value <= 223).then(|| value as u32 + 32)
+/// The last cell the original format can name: one byte, less the offset.
+const BYTE_LAST: usize = 223;
+
+/// The last cell `1005` can name: xterm writes at most two bytes of UTF-8,
+/// whose largest value is 2047, less the offset. The limit is the mode's own —
+/// holding it to the byte format's gave up every click past the 223rd column,
+/// on exactly the wide terminals this mode was invented for.
+const UTF8_LAST: usize = 2015;
+
+/// The offset of thirty-two both legacy formats add, which puts every number
+/// in a printable character. Past the format's last cell there is no room
+/// left, and nothing honest to report.
+fn offset(value: usize, last: usize) -> Option<u32> {
+    (value <= last).then(|| value as u32 + 32)
 }
 
 /// The modifiers, as xterm adds them to the button code.
@@ -268,6 +283,21 @@ mod tests {
         let hovering = at(None, Action::Move, 1, 1);
         let report = report(TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE, hovering);
         assert_eq!(report.as_deref(), Some(&b"\x1b[<35;2;2M"[..]));
+    }
+
+    /// `1005` has a limit of its own, far past the byte format's: a click at
+    /// column 300 is written as the character 332, and one past 2015 is given
+    /// up like the rest.
+    #[test]
+    fn the_utf8_encoding_reaches_past_the_byte_formats_edge() {
+        let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::UTF8_MOUSE;
+        let far = report(mode, at(Some(Button::Left), Action::Press, 299, 0)).expect("reported");
+        let mut expected = b"\x1b[M ".to_vec();
+        // Column 300 plus 32, then line 1 plus 32.
+        expected.extend_from_slice("\u{14c}!".as_bytes());
+        assert_eq!(far, expected);
+        assert!(report(mode, at(Some(Button::Left), Action::Press, 2014, 0)).is_some());
+        assert!(report(mode, at(Some(Button::Left), Action::Press, 2015, 0)).is_none());
     }
 
     /// The original format cannot say "column 300". We give the event up: a

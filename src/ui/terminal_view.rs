@@ -93,6 +93,10 @@ pub struct TerminalView {
     /// True between button press and release: that is what tells a selection
     /// drag from a plain hover.
     selecting: bool,
+    /// True between a press that went **to the program** and its release,
+    /// which the program is owed wherever the button comes up — see
+    /// `release_left`.
+    reported_press: bool,
     /// The cell the mouse was last reported at.
     ///
     /// A movement is measured in pixels and a report in cells: without this
@@ -255,6 +259,7 @@ impl TerminalView {
             cell: gpui_kit::size(px(8.), px(16.)),
             on_grid: HashMap::new(),
             selecting: false,
+            reported_press: false,
             mouse_cell: None,
             scroll_remainder: 0.,
             pending_size: None,
@@ -571,7 +576,9 @@ impl TerminalView {
             return;
         };
         self.terminal.resize(size);
-        self.snapshot = self.terminal.snapshot();
+        // Through the one door: the runs painted are cut from the snapshot, and
+        // a new grid behind them drew the old runs over the new geometry.
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -611,6 +618,21 @@ impl TerminalView {
         viewport_position(point - self.bounds.origin, self.cell)
     }
 
+    /// The grid cell a report names, held inside the grid.
+    ///
+    /// A drag goes past the edge and a release can land anywhere in the window
+    /// (`release_left`); xterm reports both at the last cell of the edge they
+    /// crossed, and a program told of column 400 in an 80-wide grid reads it as
+    /// nonsense or as a click that never happened.
+    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize) {
+        let cell = self.position_at(position);
+        let size = self.terminal.size();
+        (
+            cell.column.min(size.columns.saturating_sub(1)),
+            cell.line.min(size.lines.saturating_sub(1)),
+        )
+    }
+
     /// Reports a mouse event to the program, if it is listening.
     ///
     /// Returns true when it has received it: the gesture then belongs entirely
@@ -628,8 +650,7 @@ impl TerminalView {
         if modifiers.shift || !self.terminal.reports_mouse() {
             return false;
         }
-        let cell = self.position_at(position);
-        let (column, line) = (cell.column, cell.line);
+        let (column, line) = self.cell_at(position);
         // A movement is only worth reporting when the cell changes: the program
         // redraws on every event, and a movement of the hand crosses a dozen.
         // Nothing was sent, hence the `false` — there is no local gesture to
@@ -667,6 +688,7 @@ impl TerminalView {
             event.position,
             event.modifiers,
         ) {
+            self.reported_press = true;
             // A selection left behind would paint over what the program draws,
             // with no way left to remove it.
             self.terminal.clear_selection();
@@ -698,6 +720,14 @@ impl TerminalView {
         // `mouse::report` sorts them out.
         let held =
             matches!(event.pressed_button, Some(MouseButton::Left)).then_some(mouse::Button::Left);
+        // A press whose button is no longer down has ended somewhere we were
+        // not told of — outside the window, where not even the window's
+        // listener hears it. This is the net under `release_left`: a hover
+        // must not go on extending a selection, nor leave the program holding
+        // a button.
+        if held.is_none() && (self.selecting || self.reported_press) {
+            self.release_left(event.position, event.modifiers, cx);
+        }
         if !self.selecting
             && self.report_mouse(held, mouse::Action::Move, event.position, event.modifiers)
         {
@@ -713,22 +743,47 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // The release follows the press: if that one went to the program, there
-        // is no selection under way, and that is what `selecting` says.
         if event.button != MouseButton::Left {
             return;
         }
-        if !self.selecting
-            && self.report_mouse(
-                Some(mouse::Button::Left),
-                mouse::Action::Release,
-                event.position,
-                event.modifiers,
-            )
-        {
+        self.release_left(event.position, event.modifiers, cx);
+    }
+
+    /// The left button came up: ends what its press started.
+    ///
+    /// **Called from two places**, the element's own mouse-up and the window's
+    /// (see the paint phase), because the first only hears a release over the
+    /// terminal: the button let go over the next panel left `selecting` set,
+    /// and every hover after it went on extending a selection nobody was
+    /// making; a press the program had been sent never got its release, and a
+    /// program that drags — a split being resized in tmux — held on to it.
+    /// Whichever hears it first does the work, and the other finds nothing to
+    /// do.
+    ///
+    /// The release follows the press: if that one went to the program, so does
+    /// this one, Shift or not — a press without its release is a button the
+    /// program believes is still down.
+    fn release_left(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: gpui_kit::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::take(&mut self.reported_press) {
+            let (column, line) = self.cell_at(position);
+            self.mouse_cell = Some((column, line));
+            self.terminal.report_mouse(mouse::Report {
+                button: Some(mouse::Button::Left),
+                action: mouse::Action::Release,
+                column,
+                line,
+                modifiers,
+            });
             return;
         }
-        self.selecting = false;
+        if !std::mem::take(&mut self.selecting) {
+            return;
+        }
         // An empty selection is a plain click: keeping it would leave an
         // invisible remnant that would make the next copy fail.
         if !self.terminal.has_selection() {
@@ -985,15 +1040,32 @@ impl Render for TerminalView {
                     //
                     // It answers every click in the window, terminals being a
                     // dozen in the multiplexer: hence the read before the
-                    // update — with no size pending there is nothing to lease.
+                    // update — with nothing pending there is nothing to lease.
+                    //
+                    // **And a press of ours ends here too**, wherever the
+                    // button comes up — see `release_left`.
                     window.on_mouse_event(
-                        move |_: &gpui_kit::MouseUpEvent, phase, _, cx: &mut App| {
-                            if phase != gpui_kit::DispatchPhase::Bubble
-                                || view.read(cx).pending_size.is_none()
-                            {
+                        move |event: &gpui_kit::MouseUpEvent, phase, _, cx: &mut App| {
+                            if phase != gpui_kit::DispatchPhase::Bubble {
                                 return;
                             }
-                            view.update(cx, |view, cx| view.settle_size(cx));
+                            let (resize, release) = {
+                                let view = view.read(cx);
+                                (
+                                    view.pending_size.is_some(),
+                                    event.button == MouseButton::Left
+                                        && (view.selecting || view.reported_press),
+                                )
+                            };
+                            if !resize && !release {
+                                return;
+                            }
+                            view.update(cx, |view, cx| {
+                                if release {
+                                    view.release_left(event.position, event.modifiers, cx);
+                                }
+                                view.settle_size(cx);
+                            });
                         },
                     );
                 }
