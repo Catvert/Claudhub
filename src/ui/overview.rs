@@ -326,6 +326,9 @@ pub struct Plan {
     pub tiles: Vec<Placed>,
     pub notes: Vec<Card>,
     pub links: Vec<Link>,
+    /// Every node with its place and its parent, parents before their
+    /// children: the order `hold` walks.
+    pub order: Vec<(Node, Rect, Option<Node>)>,
     /// Everything, for `fit` and the scrollbars.
     pub bounds: Rect,
 }
@@ -639,8 +642,19 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
                 x += widths[child] + SIBLING_GAP;
             }
         }
+        let mut parent_of: Vec<Option<usize>> = vec![None; nodes.len()];
+        for (index, branch) in nodes.iter().enumerate() {
+            for &child in &branch.children {
+                parent_of[child] = Some(index);
+            }
+        }
         for (index, branch) in nodes.iter().enumerate() {
             let rect = rects[index];
+            plan.order.push((
+                branch.node.clone(),
+                rect,
+                parent_of[index].map(|p| nodes[p].node.clone()),
+            ));
             bounds = Some(match bounds {
                 Some(b) => b.union(&rect),
                 None => rect,
@@ -702,6 +716,92 @@ pub fn grid(pan: f32, zoom: f32, extent: f32) -> Vec<f32> {
         at += step;
     }
     lines
+}
+
+/// Keeps every node that stood on `before` where it stood, by giving it the
+/// offset that takes it back — and returns the nodes it moved.
+///
+/// **What is on screen stays put when a node comes or goes.** The tree
+/// centres a parent over its children, so closing a child moved its parent,
+/// and every neighbour of the parent's with it — the hand reached for a node
+/// that had just slid away. Offsets are what the hand's own moves are made
+/// of, so a node held is a node as if dragged back; and a node added still
+/// lands where the tree puts it, beside siblings that did not move.
+///
+/// **One node at a time, parents first**: an offset carries down the tree,
+/// so fixing a parent moves its children, and fixing a child in the same
+/// pass would count that move twice.
+pub fn hold(groups: &[Group], hand: &mut Hand, before: &Plan) -> Vec<Node> {
+    let natural = plan(groups, hand);
+    let mut held = Vec::new();
+    let mut settle = |hand: &mut Hand, node: &Node, (dx, dy): (f32, f32)| {
+        let offset = hand.moved.entry(node.clone()).or_default();
+        offset.0 += dx;
+        offset.1 += dy;
+        if !held.contains(node) {
+            held.push(node.clone());
+        }
+    };
+    // What was there: back where it stood.
+    for _ in 0..=before.order.len() {
+        let now = plan(groups, hand);
+        let drifted = now.order.iter().find_map(|(node, rect, _)| {
+            let old = before.rect(node)?;
+            let (dx, dy) = (old.x - rect.x, old.y - rect.y);
+            (dx.abs() > 0.01 || dy.abs() > 0.01).then(|| (node.clone(), (dx, dy)))
+        });
+        let Some((node, delta)) = drifted else {
+            break;
+        };
+        settle(hand, &node, delta);
+    }
+    // What is new: where the tree puts it **beside its neighbour** — the
+    // sibling before it, or its parent when it is the first — moved by what
+    // that neighbour was moved by. Held alone, a new child would inherit its
+    // parent's correction and land on its sibling.
+    for (index, (node, natural_rect, parent)) in natural.order.iter().enumerate() {
+        if before.rect(node).is_some() {
+            continue;
+        }
+        let neighbour = natural.order[..index]
+            .iter()
+            .rev()
+            .find(|(_, _, p)| p == parent)
+            .map(|(n, _, _)| n.clone())
+            .or_else(|| parent.clone());
+        let now = plan(groups, hand);
+        let Some(current) = now.rect(node) else {
+            continue;
+        };
+        let correction = neighbour
+            .and_then(|n| Some((now.rect(&n)?, natural.rect(&n)?)))
+            .map_or((0., 0.), |(held_at, was_at)| {
+                (held_at.x - was_at.x, held_at.y - was_at.y)
+            });
+        let target = (natural_rect.x + correction.0, natural_rect.y + correction.1);
+        let (dx, dy) = (target.0 - current.x, target.1 - current.y);
+        if dx.abs() > 0.01 || dy.abs() > 0.01 {
+            settle(hand, node, (dx, dy));
+        }
+    }
+    held
+}
+
+/// True when the plane gained or lost a node — what `hold` answers — and
+/// not when it shows other projects, which is a new plane to fit rather
+/// than one to keep.
+pub fn nodes_changed(before: &Plan, now: &Plan) -> bool {
+    let projects = |plan: &Plan| plan.gits.iter().map(|g| g.path.clone()).collect::<Vec<_>>();
+    if projects(before) != projects(now) {
+        return false;
+    }
+    let nodes = |plan: &Plan| {
+        plan.order
+            .iter()
+            .map(|(n, _, _)| n.clone())
+            .collect::<Vec<_>>()
+    };
+    nodes(before) != nodes(now)
 }
 
 /// A scrollbar's thumb along one axis: where it starts and how long it is,
@@ -1100,6 +1200,72 @@ mod tests {
             h: 900.,
         };
         assert_eq!(View::focus(rect, (2000., 1000.), 0.9).zoom, 1.);
+    }
+
+    /// The complaint that made `hold`: closing a child moved its parent.
+    #[test]
+    fn closing_a_child_leaves_its_parent_and_its_siblings_where_they_were() {
+        let mut main = checkout("/r", "main", true, None);
+        main.terminals = vec![(7, Tile::Small.size()), (8, Tile::Small.size())];
+        let feature = checkout("/r-a", "feature", false, Some("main"));
+        let before = plan(
+            &[group("/r", vec![main.clone(), feature.clone()])],
+            &Hand::default(),
+        );
+
+        // Terminal 7 closes.
+        main.terminals = vec![(8, Tile::Small.size())];
+        let groups = [group("/r", vec![main, feature])];
+        let mut hand = Hand::default();
+        assert!(nodes_changed(&before, &plan(&groups, &hand)));
+        let held = hold(&groups, &mut hand, &before);
+        assert!(!held.is_empty());
+        let after = plan(&groups, &hand);
+        for node in [
+            Node::Git(PathBuf::from("/r")),
+            Node::Worktree(PathBuf::from("/r")),
+            Node::Worktree(PathBuf::from("/r-a")),
+            Node::Terminal(8),
+        ] {
+            assert_eq!(after.rect(&node), before.rect(&node), "{node:?}");
+        }
+        // Nothing left to hold: a second pass moves nothing.
+        assert!(hold(&groups, &mut hand, &before).is_empty());
+    }
+
+    #[test]
+    fn a_new_child_lands_beside_siblings_that_stay() {
+        let mut main = checkout("/r", "main", true, None);
+        main.terminals = vec![(7, Tile::Small.size())];
+        let before = plan(&[group("/r", vec![main.clone()])], &Hand::default());
+        main.terminals.push((8, Tile::Small.size()));
+        let groups = [group("/r", vec![main])];
+        let mut hand = Hand::default();
+        hold(&groups, &mut hand, &before);
+        let after = plan(&groups, &hand);
+        assert_eq!(after.tile(7), before.tile(7));
+        assert_eq!(
+            after.rect(&Node::Worktree(PathBuf::from("/r"))),
+            before.rect(&Node::Worktree(PathBuf::from("/r")))
+        );
+        // Beside the first, one gap along, on its line.
+        let (first, second) = (after.tile(7).unwrap(), after.tile(8).unwrap());
+        assert_eq!(second.y, first.y);
+        assert_eq!(second.x, first.right() + SIBLING_GAP);
+    }
+
+    #[test]
+    fn another_project_is_not_a_change_to_hold() {
+        let a = plan(
+            &[group("/a", vec![checkout("/a", "main", true, None)])],
+            &Hand::default(),
+        );
+        let b = plan(
+            &[group("/b", vec![checkout("/b", "main", true, None)])],
+            &Hand::default(),
+        );
+        assert!(!nodes_changed(&a, &b));
+        assert!(!nodes_changed(&a, &a));
     }
 
     #[test]

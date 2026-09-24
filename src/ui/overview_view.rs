@@ -178,6 +178,11 @@ impl ClaudhubApp {
 
     /// What the plane holds, laid out.
     fn overview_plan(&self) -> Plan {
+        overview::plan(&self.overview_groups(), &self.overview_hand)
+    }
+
+    /// What the plane holds, before it is laid out.
+    fn overview_groups(&self) -> Vec<Group<'_>> {
         // A worktree's nodes hang from its card, unless they say they are
         // the repository's; a repository's note versioned on several branches
         // is one note, shown once — the main checkout's copy first.
@@ -247,7 +252,7 @@ impl ClaudhubApp {
                     .collect(),
             })
             .collect();
-        overview::plan(&groups, &self.overview_hand)
+        groups
     }
 
     fn overview_size(&self) -> (f32, f32) {
@@ -264,7 +269,21 @@ impl ClaudhubApp {
         // The places kept from the last session, once — the screen may come
         // up with the window, before any toggle has read them.
         self.load_overview_places(cx);
-        let plan = self.overview_plan();
+        let mut plan = self.overview_plan();
+        // A node came or went since the last frame: what was on screen stays
+        // where it stood — see `overview::hold`.
+        if let Some(before) = self.overview_previous.take() {
+            if self.overview_fitted && overview::nodes_changed(&before, &plan) {
+                let mut hand = self.overview_hand.clone();
+                let held = overview::hold(&self.overview_groups(), &mut hand, &before);
+                self.overview_hand = hand;
+                if !held.is_empty() {
+                    self.remember_offsets(&held, cx);
+                    plan = self.overview_plan();
+                }
+            }
+        }
+        self.overview_previous = Some(plan.clone());
         let size = self.overview_size();
         // Everything in view the first time — and after picking another
         // project — once the canvas has a size: its first frame has none, and
@@ -643,6 +662,29 @@ impl ClaudhubApp {
             }
             if size.is_some() {
                 *home_size = size;
+            }
+        });
+    }
+
+    /// Writes the offsets of nodes moved without a hand — held in place —
+    /// as a drag's are: a terminal's go with the rest of it.
+    fn remember_offsets(&self, nodes: &[Node], cx: &mut Context<Self>) {
+        let moved = &self.overview_hand.moved;
+        super::store::Store::update_global(cx, |store| {
+            for node in nodes {
+                let offset = moved.get(node).copied();
+                match node {
+                    Node::Git(main) => {
+                        store.repos.entry(main.clone()).or_default().home_offset = offset
+                    }
+                    Node::Worktree(path) => {
+                        store.worktrees.entry(path.clone()).or_default().home_offset = offset
+                    }
+                    Node::Note(path) => {
+                        store.home_places.entry(path.clone()).or_default().offset = offset
+                    }
+                    Node::Terminal(_) => {}
+                }
             }
         });
     }

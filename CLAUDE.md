@@ -603,6 +603,12 @@ worktree.
   par `TerminalView::set_canvas`, et **leur grille ne bouge pas** : elle se
   calcule sur la taille logique de la carte, jamais sur les pixels couverts, que
   l'arrondi ferait varier d'une ligne — chacune un `SIGWINCH`.
+- **Ce qui est à l'écran ne bouge pas quand un nœud vient ou part**
+  (`overview::hold`) : l'arbre recentre un parent sur ses enfants, si bien
+  que fermer un enfant déplaçait le parent et ses voisins. Chaque nœud déjà
+  là reçoit le décalage qui le ramène — parents d'abord, un à la fois, un
+  décalage descendant l'arbre — et un nouveau prend la correction de son
+  voisin. Pas au changement de projet, qui est un autre plan à cadrer.
 - **Déplacer un nœud emmène son sous-arbre**, retenu comme un décalage par
   rapport à l'arbre (`overview::Moved`) ; la poignée d'un coin le
   redimensionne (`overview::Sizes`, un terminal portant sa taille). Git,
