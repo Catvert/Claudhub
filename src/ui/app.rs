@@ -1857,11 +1857,22 @@ impl ClaudhubApp {
                 self.git.send(Cmd::LoadOutlines {
                     worktrees: worktrees.clone(),
                 });
-                self.read_canvas(worktrees.clone(), cx);
             }
             // What each agent can read of its surroundings, at the same pace
             // as what it is made of.
             self.write_contexts(cx);
+        }
+        // The home screen's nodes, at the agents' pace while it is up: a
+        // note an agent writes in a worktree nobody watches is two seconds
+        // away, not ten. The projects on show only — a folder listing and a
+        // few small files each.
+        if self.overview {
+            let shown: Vec<PathBuf> = self
+                .overview_repos()
+                .into_iter()
+                .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
+                .collect();
+            self.read_canvas(shown, cx);
         }
         let programs = Settings::global(cx).terminal.agent_programs();
         self.git.send(Cmd::ScanAgents {

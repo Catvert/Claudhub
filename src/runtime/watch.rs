@@ -225,6 +225,16 @@ impl Watcher {
                                 batch.paths.push(path);
                             }
                         }
+                        // A node folder born: the plan made before does not
+                        // watch it, and the next note written in it would go
+                        // unseen until the sweep.
+                        if changes_content(&event.kind) {
+                            for path in &event.paths {
+                                if let Some(checkout) = canvas_folder_of(path, mappings.keys()) {
+                                    replan.insert(checkout);
+                                }
+                            }
+                        }
                         for listing in listings(event, &mappings) {
                             if listing.folder {
                                 replan.insert(listing.checkout.clone());
@@ -398,6 +408,23 @@ fn path_listings(path: &Path, mappings: &GitWatches) -> Vec<Listing> {
     found
 }
 
+/// A checkout's node folders — `.claudhub/` and `.claudhub/notes/`.
+fn canvas_folders(checkout: &Path) -> [PathBuf; 2] {
+    let root = checkout.join(crate::canvas::DIR);
+    [root.join(crate::canvas::NOTES), root]
+}
+
+/// The checkout whose node folder this path is, if it is one.
+fn canvas_folder_of<'a>(
+    path: &Path,
+    checkouts: impl IntoIterator<Item = &'a PathBuf>,
+) -> Option<PathBuf> {
+    checkouts
+        .into_iter()
+        .find(|checkout| canvas_folders(checkout).iter().any(|folder| folder == path))
+        .cloned()
+}
+
 /// True for an event likely to change what `git status` answers.
 ///
 /// The decisive filter is `Access`: inotify reports every **opening** of a
@@ -555,6 +582,14 @@ fn add_checkout(worktree: &Path, plan: &mut WatchPlan, seen: &mut HashSet<PathBu
             );
             plan.directories
                 .push((worktree.to_path_buf(), RecursiveMode::NonRecursive));
+            // The home screen's node folders, which git may not know yet — a
+            // folder an agent has just made holds nothing tracked — and whose
+            // every new file is a node to show at once.
+            for dir in canvas_folders(worktree) {
+                if dir.is_dir() && !plan.directories.iter().any(|(known, _)| *known == dir) {
+                    plan.directories.push((dir, RecursiveMode::NonRecursive));
+                }
+            }
             for submodule in submodules {
                 // An uninitialized gitlink has no repository to read. Do not
                 // accidentally walk back up into its parent's repository.
@@ -971,6 +1006,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(first, "the first linked worktree was not reported");
         assert!(second, "the second linked worktree was not reported");
+    }
+
+    /// A node folder an agent has just made is watched, and its birth makes
+    /// the plan again — so the next note written in it is seen.
+    #[test]
+    fn the_node_folders_are_watched_and_their_birth_replans() {
+        let checkouts = [PathBuf::from("/r"), PathBuf::from("/r-a")];
+        assert_eq!(
+            canvas_folder_of(Path::new("/r-a/.claudhub/notes"), &checkouts),
+            Some(PathBuf::from("/r-a"))
+        );
+        assert_eq!(
+            canvas_folder_of(Path::new("/r/.claudhub"), &checkouts),
+            Some(PathBuf::from("/r"))
+        );
+        assert_eq!(
+            canvas_folder_of(Path::new("/r/.claudhub/notes/x.md"), &checkouts),
+            None
+        );
+        assert_eq!(canvas_folder_of(Path::new("/r/src"), &checkouts), None);
+
+        let root =
+            std::env::temp_dir().join(format!("claudhub-canvas-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claudhub/notes")).unwrap();
+        // A repository, or the plan watches the whole folder recursively.
+        crate::git::git(&root, &["init", "-q"]).unwrap();
+        let plan = watch_plan(&root);
+        let dirs: Vec<_> = plan
+            .directories
+            .iter()
+            .map(|(dir, _)| dir.clone())
+            .collect();
+        assert!(dirs.contains(&root.join(".claudhub/notes")), "{dirs:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

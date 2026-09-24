@@ -619,8 +619,9 @@ worktree.
   Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
   **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
   lise chez un collègue — ou dans le coffre du worktree pour une note privée.
-  Le disque fait foi : un agent y écrit, la vue relit (surveillance du
-  checkout, relevé de l'accueil) ; la main y retourne après une pause, **à la
+  Le disque fait foi : un agent y écrit, la vue relit — la surveillance
+  couvre `.claudhub/notes/` même né après coup (sa naissance refait le plan),
+  et l'accueil relit les projets affichés toutes les deux secondes ; la main y retourne après une pause, **à la
   condition** que le fichier soit toujours celui lu. La mise en page reste
   locale (`Store::home_places`, par chemin). Le worker crée la note — nom
   libre sur le disque, signée du `user.name` du checkout.
