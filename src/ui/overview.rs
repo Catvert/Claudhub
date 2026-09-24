@@ -107,6 +107,25 @@ impl Tile {
     }
 }
 
+/// A node maximised: which, and what to give back — the view from before,
+/// and its size from before (`None`: the size its kind starts at).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Maximized {
+    pub node: Node,
+    pub view: View,
+    pub size: Option<(f32, f32)>,
+}
+
+/// The size that makes a node take `share` of the viewport at a zoom of one:
+/// room it really has — a terminal gets the lines and columns — and not a
+/// closer look at the room it had. Never smaller than it already is.
+pub fn maximized_size(viewport: (f32, f32), share: f32, current: (f32, f32)) -> (f32, f32) {
+    (
+        (viewport.0 * share).max(current.0),
+        (viewport.1 * share).max(current.1),
+    )
+}
+
 /// A size dragged by `delta`, never under `min`.
 pub fn resized(size: (f32, f32), delta: (f32, f32), min: (f32, f32)) -> (f32, f32) {
     ((size.0 + delta.0).max(min.0), (size.1 + delta.1).max(min.1))
@@ -643,6 +662,32 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
     plan
 }
 
+/// The grid's step in plane units, at a zoom of one.
+const GRID: f32 = 40.;
+/// Closer than this on screen, the lines would be a tint and not a grid.
+const GRID_MIN_SCREEN: f32 = 16.;
+
+/// Where the background grid's lines fall along one axis, in screen pixels
+/// from the canvas's edge: every `GRID` of the plane, doubled until they
+/// stand at least `GRID_MIN_SCREEN` apart.
+pub fn grid(pan: f32, zoom: f32, extent: f32) -> Vec<f32> {
+    let mut step = GRID * zoom;
+    if step <= 0. || extent <= 0. {
+        return Vec::new();
+    }
+    while step < GRID_MIN_SCREEN {
+        step *= 2.;
+    }
+    let first = pan.rem_euclid(step);
+    let mut lines = Vec::new();
+    let mut at = first;
+    while at < extent {
+        lines.push(at);
+        at += step;
+    }
+    lines
+}
+
 /// A scrollbar's thumb along one axis: where it starts and how long it is,
 /// in pixels of a track as long as the viewport. `content` is where the
 /// plane's bounds are on screen along that axis. `None` when everything is
@@ -1009,6 +1054,27 @@ mod tests {
     }
 
     #[test]
+    fn a_maximised_node_is_given_the_room_and_never_less_than_it_had() {
+        assert_eq!(
+            maximized_size((2000., 1000.), 0.9, (760., 480.)),
+            (1800., 900.)
+        );
+        assert_eq!(
+            maximized_size((1000., 500.), 0.9, (2000., 300.)),
+            (2000., 450.)
+        );
+        // At that size, the focus is at a zoom of one: the node is as big as
+        // the screen allows, not magnified.
+        let rect = Rect {
+            x: 50.,
+            y: 60.,
+            w: 1800.,
+            h: 900.,
+        };
+        assert_eq!(View::focus(rect, (2000., 1000.), 0.9).zoom, 1.);
+    }
+
+    #[test]
     fn maximising_fills_nine_tenths_of_the_screen_around_the_node() {
         let rect = Rect {
             x: 1000.,
@@ -1154,6 +1220,16 @@ mod tests {
         // Panned past the end: the empty room counts — 2500 in all.
         assert_eq!(thumb((-1500., 500.), 1000.), Some((600., 400.)));
         assert_eq!(thumb_ratio((0., 2000.), 1000.), 2.);
+    }
+
+    #[test]
+    fn the_grid_follows_the_plane_and_never_crowds() {
+        // At a zoom of one, every forty pixels, shifted with the pan.
+        assert_eq!(grid(10., 1., 100.), vec![10., 50., 90.]);
+        assert_eq!(grid(-30., 1., 100.), vec![10., 50., 90.]);
+        // Zoomed out a lot, the step doubles until it is readable.
+        let far = grid(0., 0.1, 200.);
+        assert_eq!(far[1] - far[0], 16.);
     }
 
     #[test]

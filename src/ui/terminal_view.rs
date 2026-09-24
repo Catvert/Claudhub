@@ -2582,12 +2582,20 @@ impl ClaudhubApp {
                 continue;
             }
             let id = terminal.view.entity_id().as_u64();
+            // Maximised is a moment, not a size: what is kept is the one it
+            // will be given back.
+            let size = match &self.overview_maximized {
+                Some(maximized) if maximized.node == crate::ui::overview::Node::Terminal(id) => {
+                    maximized.size.unwrap_or(terminal.size)
+                }
+                _ => terminal.size,
+            };
             list.push(crate::ui::store::SavedTerminal {
                 relaunch,
                 name: terminal.name.as_ref().map(|name| name.to_string()),
                 session: terminal.session.clone(),
                 right: terminal.view_name == crate::ui::panels::TerminalPanel::RIGHT,
-                size: Some(terminal.size),
+                size: Some(size),
                 offset: self
                     .overview_hand
                     .moved

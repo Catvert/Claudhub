@@ -348,7 +348,11 @@ impl ClaudhubApp {
                 .into_any_element()
             })
             .collect();
-        let bars = self.render_scrollbars(&plan, view, size, cx);
+        let bars = match self.overview_maximized {
+            Some(_) => Vec::new(),
+            None => self.render_scrollbars(&plan, view, size, cx),
+        };
+        let grid = render_grid(view, cx);
 
         let empty = plan.cards.is_empty();
         div()
@@ -393,6 +397,9 @@ impl ClaudhubApp {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let delta = event.delta.pixel_delta(window.line_height());
                 cx.stop_propagation();
+                if this.overview_maximized.is_some() {
+                    return;
+                }
                 if event.modifiers.secondary() {
                     let (x, y, _, _) = this.overview_viewport.get();
                     let anchor = (
@@ -409,6 +416,7 @@ impl ClaudhubApp {
                 cx.notify();
             }))
             .child(measure)
+            .child(grid)
             .child(links)
             .children(gits)
             .children(cards)
@@ -436,6 +444,13 @@ impl ClaudhubApp {
         let Some(drag) = self.overview_drag.clone() else {
             return;
         };
+        // A maximised node is a window filling the screen: nothing slides
+        // under it and nothing is dragged — a move would lose the very view
+        // the second press gives back.
+        if self.overview_maximized.is_some() {
+            self.overview_drag = None;
+            return;
+        }
         // The button came up somewhere this canvas did not see.
         if !matches!(
             event.pressed_button,
@@ -1613,6 +1628,40 @@ impl ClaudhubApp {
     }
 }
 
+/// A light grid under everything, moving and scaling with the plane: what
+/// makes a drag read as the plane moving rather than the cards, and a zoom
+/// as distance. Its step doubles when the lines would crowd — see
+/// `overview::grid`.
+fn render_grid(view: View, cx: &App) -> impl IntoElement {
+    let color = cx.theme().border.opacity(0.35);
+    canvas(
+        move |_, _, _| {},
+        move |bounds, _, window, _| {
+            let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+            for x in overview::grid(view.pan.0, view.zoom, w) {
+                window.paint_quad(gpui_kit::fill(
+                    gpui_kit::Bounds::new(
+                        point(bounds.origin.x + px(x), bounds.origin.y),
+                        gpui_kit::size(px(1.), bounds.size.height),
+                    ),
+                    color,
+                ));
+            }
+            for y in overview::grid(view.pan.1, view.zoom, h) {
+                window.paint_quad(gpui_kit::fill(
+                    gpui_kit::Bounds::new(
+                        point(bounds.origin.x, bounds.origin.y + px(y)),
+                        gpui_kit::size(bounds.size.width, px(1.)),
+                    ),
+                    color,
+                ));
+            }
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
 /// The grip in a node's bottom-right corner: dragged, it resizes the node.
 ///
 /// In pixels and not in `rem`, alone of what a node carries: a grip that
@@ -1673,7 +1722,7 @@ impl ClaudhubApp {
         node: Node,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::Stateful<gpui_kit::Div>> {
-        (!self.overview_hand.collapsed.contains(&node))
+        (!self.overview_hand.collapsed.contains(&node) && self.overview_maximized.is_none())
             .then(|| corner(cx.entity().downgrade(), node, cx))
     }
 
@@ -1685,7 +1734,7 @@ impl ClaudhubApp {
         let maximized = self
             .overview_maximized
             .as_ref()
-            .is_some_and(|(shown, _)| *shown == node);
+            .is_some_and(|maximized| maximized.node == node);
         let closable = !matches!(node, Node::Git(_));
         let key = format!("{node:?}");
         let (fold, grow, close) = (node.clone(), node.clone(), node);
@@ -1746,28 +1795,47 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Makes a node take nine tenths of the screen, or gives back the view
-    /// from before — the view, not a node's place: maximising moves nothing
-    /// on the plane, it looks closer.
+    /// Makes a node take nine tenths of the screen, or gives back what it had.
+    ///
+    /// **It grows the node, it does not only look closer**: the node is given
+    /// the room at a zoom of one (`overview::maximized_size`), so a terminal
+    /// gets the lines and columns — a zoom alone would show the same eighty
+    /// columns bigger. The tree makes way around it, and the view centres on
+    /// it. The second press gives back the size and the view from before.
     fn toggle_maximize(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
-        let before = match self.overview_maximized.take() {
-            Some((shown, before)) if shown == *node => {
-                self.overview_view = before;
-                cx.notify();
-                return;
+        let view_before = match self.overview_maximized.take() {
+            Some(maximized) => {
+                self.set_node_size(&maximized.node, maximized.size);
+                if maximized.node == *node {
+                    self.overview_view = maximized.view;
+                    cx.notify();
+                    return;
+                }
+                // Another node was maximised: the view to go back to is still
+                // the one before the first.
+                maximized.view
             }
-            // Another node was maximised: the view to go back to is still
-            // the one before the first.
-            Some((_, before)) => before,
             None => self.overview_view,
         };
-        self.overview_maximized = Some((node.clone(), before));
         if self.overview_hand.collapsed.remove(node) {
             self.remember_folds(node, cx);
         }
-        let plan = self.overview_plan(cx);
-        if let Some(rect) = plan.rect(node) {
-            self.overview_view = View::focus(rect, self.overview_size(), 0.9);
+        let Some(rect) = self.overview_plan(cx).rect(node) else {
+            return;
+        };
+        let viewport = self.overview_size();
+        let size_before = self.node_size(node);
+        self.set_node_size(
+            node,
+            Some(overview::maximized_size(viewport, 0.9, (rect.w, rect.h))),
+        );
+        self.overview_maximized = Some(overview::Maximized {
+            node: node.clone(),
+            view: view_before,
+            size: size_before,
+        });
+        if let Some(rect) = self.overview_plan(cx).rect(node) {
+            self.overview_view = View::focus(rect, viewport, 0.9);
         }
         // A terminal maximised is one to type in.
         if let Node::Terminal(id) = node {
@@ -1780,6 +1848,42 @@ impl ClaudhubApp {
             }
         }
         cx.notify();
+    }
+
+    /// The size the hand gave a node, if it gave one; a terminal always has
+    /// one, being the only kind that carries its own.
+    fn node_size(&self, node: &Node) -> Option<(f32, f32)> {
+        match node {
+            Node::Terminal(id) => self
+                .terminals
+                .iter()
+                .find(|t| t.view.entity_id().as_u64() == *id)
+                .map(|t| t.size),
+            _ => self.overview_hand.sizes.get(node).copied(),
+        }
+    }
+
+    /// Gives a node a size, or back the one its kind starts at.
+    fn set_node_size(&mut self, node: &Node, size: Option<(f32, f32)>) {
+        match node {
+            Node::Terminal(id) => {
+                if let Some(terminal) = self
+                    .terminals
+                    .iter_mut()
+                    .find(|t| t.view.entity_id().as_u64() == *id)
+                {
+                    terminal.size = size.unwrap_or_else(|| overview::Tile::default().size());
+                }
+            }
+            _ => match size {
+                Some(size) => {
+                    self.overview_hand.sizes.insert(node.clone(), size);
+                }
+                None => {
+                    self.overview_hand.sizes.remove(node);
+                }
+            },
+        }
     }
 
     /// The cross: a terminal closed, a note deleted, a worktree taken off

@@ -1077,8 +1077,8 @@ pub struct ClaudhubApp {
     /// What the hand decided on the plane: nodes moved, resized, folded,
     /// hidden — see `overview::Hand`.
     pub(super) overview_hand: crate::ui::overview::Hand,
-    /// The node maximised, and the view to go back to.
-    pub(super) overview_maximized: Option<(crate::ui::overview::Node, crate::ui::overview::View)>,
+    /// The node maximised, and what to give back — see `overview::Maximized`.
+    pub(super) overview_maximized: Option<crate::ui::overview::Maximized>,
     /// True while the commit sheet is open: a commit that lands then closes
     /// it — see `overview_view::CommitSheet`.
     pub(super) commit_sheet: bool,
