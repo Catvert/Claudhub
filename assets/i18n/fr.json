@@ -997,5 +997,6 @@
   "review-reopen": "Rouvrir",
   "panel-reviews": "Revues",
   "review-send": "Envoyer à l'agent",
-  "review-send-all": "Envoyer toutes les remarques ouvertes à l'agent"
+  "review-send-all": "Envoyer toutes les remarques ouvertes à l'agent",
+  "overview-diagram-loading": "Chargement du diagramme…"
 }

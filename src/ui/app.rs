@@ -1091,6 +1091,9 @@ pub struct ClaudhubApp {
     pub(super) canvas: HashMap<PathBuf, Vec<crate::ui::canvas_view::CanvasEntry>>,
     /// A note just created, to open for writing once it has been read.
     pub(super) canvas_created: Option<PathBuf>,
+    /// The diagrams' pictures, decoded once per stamp — see
+    /// `canvas_view::CanvasPicture`.
+    pub(super) canvas_pictures: HashMap<PathBuf, crate::ui::canvas_view::CanvasPicture>,
     /// Where the Claudhub skill is installed, by checkout asked about.
     pub(super) skill_status: HashMap<PathBuf, crate::skill::Status>,
     /// The worktrees whose kept terminals have been opened again: those, and
@@ -1565,6 +1568,7 @@ impl ClaudhubApp {
             canvas: HashMap::new(),
             canvas_created: None,
             skill_status: HashMap::new(),
+            canvas_pictures: HashMap::new(),
             terminals_revived: std::collections::HashSet::new(),
             overview_reveal: None,
             overview_loaded: false,
@@ -2320,7 +2324,14 @@ impl ClaudhubApp {
                 self.summaries.extend(summaries);
             }
             Evt::ClaudeProcesses { processes } => self.claude_processes_heard(&processes, cx),
-            Evt::CanvasRead { worktree, files } => self.canvas_read(worktree, files, window, cx),
+            Evt::CanvasRead {
+                worktree,
+                files,
+                pictures,
+            } => self.canvas_read(worktree, files, pictures, window, cx),
+            Evt::CanvasPicture { path, stamp, bytes } => {
+                self.canvas_picture(path, stamp, bytes, cx)
+            }
             Evt::SkillStatus { worktree, status } => {
                 self.skill_status.insert(worktree, status);
                 cx.notify();

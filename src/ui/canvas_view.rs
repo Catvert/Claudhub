@@ -40,6 +40,16 @@ pub(crate) struct CanvasEntry {
     pub private: bool,
     pub digest: u64,
     pub node: canvas::Node,
+    /// A picture dropped in the folder with no node file: shown as a
+    /// diagram, titled by its name, with nothing to edit.
+    pub standalone: bool,
+}
+
+/// A diagram's picture: the stamp it was read at, and the decoded image —
+/// kept while a newer one is on its way, so a node never blinks empty.
+pub(crate) struct CanvasPicture {
+    pub stamp: u64,
+    pub image: Option<std::sync::Arc<gpui_kit::Image>>,
 }
 
 /// A note open for writing.
@@ -64,6 +74,16 @@ pub(crate) const CONTEXT: &str = "context.md";
 
 /// How long the hand has to rest before what it typed goes to the disk.
 const SAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Where a diagram's picture is: its `image:` beside the node file.
+fn picture_of(entry: &CanvasEntry) -> Option<PathBuf> {
+    let image = entry.node.image.as_deref()?;
+    if entry.standalone {
+        return Some(entry.path.clone());
+    }
+    let dir = entry.path.parent()?;
+    Some(crate::wslpath::join(dir, image))
+}
 
 /// The `+ note` of a git node's or a card's head.
 pub(super) fn note_button(app: WeakEntity<ClaudhubApp>, hang: Hang) -> Button {
@@ -99,6 +119,7 @@ impl ClaudhubApp {
         &mut self,
         worktree: PathBuf,
         files: Vec<(PathBuf, bool, String)>,
+        pictures: Vec<(PathBuf, bool, u64)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -111,9 +132,61 @@ impl ClaudhubApp {
                     private,
                     digest: crate::files::digest(&text),
                     node,
+                    standalone: false,
                 })
             })
             .collect();
+        // The pictures the diagrams name, and the SVGs no node names — each
+        // a node of its own, titled by its file.
+        let named: Vec<PathBuf> = entries.iter().filter_map(picture_of).collect();
+        for (path, private, _) in &pictures {
+            let svg = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+            if svg && !named.contains(path) {
+                let title = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned());
+                let image = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                entries.push(CanvasEntry {
+                    path: path.clone(),
+                    private: *private,
+                    digest: 0,
+                    node: canvas::Node {
+                        kind: canvas::Kind::Diagram,
+                        anchor: Anchor::Worktree,
+                        title,
+                        author: None,
+                        agent: None,
+                        created: None,
+                        status: None,
+                        image,
+                        body: String::new(),
+                    },
+                    standalone: true,
+                });
+            }
+        }
+        // The bytes of what changed, and only of that.
+        for picture in entries.iter().filter_map(picture_of) {
+            let stamp = pictures
+                .iter()
+                .find(|(path, _, _)| *path == picture)
+                .map_or(0, |(_, _, stamp)| *stamp);
+            let known = self.canvas_pictures.get(&picture).map(|p| p.stamp);
+            if known != Some(stamp) {
+                self.canvas_pictures
+                    .entry(picture.clone())
+                    .or_insert(CanvasPicture { stamp, image: None })
+                    .stamp = stamp;
+                self.git.send(Cmd::ReadCanvasPicture {
+                    worktree: worktree.clone(),
+                    path: picture,
+                });
+            }
+        }
         // The order they were written in: the names start with their date.
         entries.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
         self.canvas.insert(worktree.clone(), entries);
@@ -129,6 +202,31 @@ impl ClaudhubApp {
                 self.canvas_created = Some(created);
             }
         }
+        cx.notify();
+    }
+
+    /// A picture's bytes arrived: decoded by gpui from them, once per stamp.
+    pub(super) fn canvas_picture(
+        &mut self,
+        path: PathBuf,
+        stamp: u64,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = crate::files::picture_of(&path) else {
+            return;
+        };
+        let image = std::sync::Arc::new(gpui_kit::Image::from_bytes(
+            super::preview::format_of(kind),
+            bytes,
+        ));
+        self.canvas_pictures.insert(
+            path,
+            CanvasPicture {
+                stamp,
+                image: Some(image),
+            },
+        );
         cx.notify();
     }
 
@@ -340,13 +438,25 @@ impl ClaudhubApp {
                         let node = Node::Note(path.clone());
                         this.forget_node(&node, cx);
                         if let Some((worktree, entry)) = this.canvas_entry(&path) {
-                            let (worktree, digest) = (worktree.clone(), entry.digest);
+                            let worktree = worktree.clone();
+                            // A picture of its own has no text read to guard
+                            // the delete with: asked, it goes.
+                            let expect = (!entry.standalone).then_some(entry.digest);
+                            // A diagram's picture goes with its node: left
+                            // behind, it would come back as a node of its own.
+                            let picture = picture_of(entry).filter(|p| *p != path);
                             this.git.send(Cmd::WriteCanvasFile {
-                                worktree,
+                                worktree: worktree.clone(),
                                 path: path.clone(),
                                 text: String::new(),
-                                expect: Some(digest),
+                                expect,
                             });
+                            if let Some(picture) = picture {
+                                this.git.send(Cmd::DeleteCanvasPicture {
+                                    worktree,
+                                    path: picture,
+                                });
+                            }
                         }
                         cx.notify();
                     });
@@ -433,6 +543,7 @@ impl ClaudhubApp {
                             kind: match entry.node.kind {
                                 canvas::Kind::Note => "note".into(),
                                 canvas::Kind::Review => "review".into(),
+                                canvas::Kind::Diagram => "diagram".into(),
                             },
                             title: entry.node.heading().unwrap_or_else(|| "(untitled)".into()),
                             file: entry
@@ -940,6 +1051,57 @@ impl ClaudhubApp {
         self.confirm_prompt(worktree.to_path_buf(), Vec::new(), text, false, window, cx);
     }
 
+    /// A diagram: its picture, scaled into the node, and its caption under it.
+    fn render_diagram_body(&self, entry: &CanvasEntry, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let picture = picture_of(entry)
+            .and_then(|path| self.canvas_pictures.get(&path))
+            .and_then(|picture| picture.image.clone());
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .p_2()
+            .gap_1()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radius)
+                    // A diagram drawn for a light page stays readable on a
+                    // dark theme: it keeps the page it was drawn on.
+                    .bg(gpui_kit::white())
+                    .overflow_hidden()
+                    .map(|el| match picture {
+                        Some(image) => el.child(
+                            gpui_kit::img(image)
+                                .size_full()
+                                .object_fit(gpui_kit::ObjectFit::Contain),
+                        ),
+                        None => el.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(tr!("overview-diagram-loading")),
+                        ),
+                    }),
+            )
+            .when(!entry.node.body.trim().is_empty(), |el| {
+                el.child(div().flex_none().max_h(px(120.)).text_xs().child(
+                    gpui_kit::component::text::TextView::markdown(
+                        SharedString::from(format!(
+                            "overview-diagram-caption-{}",
+                            entry.path.display()
+                        )),
+                        entry.node.body.clone(),
+                    ),
+                ))
+            })
+            .into_any_element()
+    }
+
     /// Goes to a finding: its worktree, its file, its line.
     fn open_finding(
         &mut self,
@@ -1043,7 +1205,14 @@ impl ClaudhubApp {
                 MouseButton::Left,
                 super::overview_view::grab(app.clone(), node.clone()),
             )
-            .child(icon(if review { "file-text" } else { "sticky-note" }).text_color(muted))
+            .child(
+                icon(match entry.node.kind {
+                    canvas::Kind::Review => "file-text",
+                    canvas::Kind::Diagram => "image",
+                    canvas::Kind::Note => "sticky-note",
+                })
+                .text_color(muted),
+            )
             .when(entry.private, |el| {
                 el.child(icon("eye-off").text_color(muted))
             })
@@ -1080,7 +1249,7 @@ impl ClaudhubApp {
                         .child(SharedString::from(byline.clone())),
                 )
             })
-            .when(detail, |el| {
+            .when(detail && !entry.standalone, |el| {
                 el.child(
                     Button::new(SharedString::from(format!(
                         "overview-note-edit-{}",
@@ -1119,7 +1288,9 @@ impl ClaudhubApp {
                         this.toggle_note_privacy(&private, cx);
                     })),
                 )
-                .child(self.window_controls(node.clone(), cx))
+            })
+            .when(detail, |el| {
+                el.child(self.window_controls(node.clone(), cx))
             });
         let body = match editor {
             Some(editor) => v_flex()
@@ -1133,6 +1304,9 @@ impl ClaudhubApp {
                 )
                 .into_any_element(),
             None if review => self.render_review_body(&entry, cx),
+            None if entry.node.kind == canvas::Kind::Diagram => {
+                self.render_diagram_body(&entry, cx)
+            }
             None => div()
                 .id(SharedString::from(format!(
                     "overview-note-body-{}",

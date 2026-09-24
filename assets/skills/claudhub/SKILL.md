@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes live on disk and the exact file format.
 ---
-<!-- claudhub-skill-version: 1 -->
+<!-- claudhub-skill-version: 2 -->
 
 # Claudhub
 
@@ -50,7 +50,7 @@ created: 2026-09-24T21:30:00+02:00
 The body, in Markdown.
 ```
 
-- `claudhub:` is `note` or `review`. **Without it, Claudhub ignores the file.**
+- `claudhub:` is `note`, `review` or `diagram`. **Without it, Claudhub ignores the file.**
 - `anchor:` is `worktree` (the node hangs from this worktree's card) or
   `repo` (it hangs from the repository's git node — for what concerns the
   whole project, not this branch).
@@ -104,3 +104,29 @@ status: open
   uses the excerpt to find the lines again once the code has moved.
 - Review what the branch changes against its base (`git diff <base>...HEAD`)
   unless told otherwise, and say so in the summary.
+
+## Diagrams
+
+A diagram is a picture shown as a node. Save it as **SVG** (PNG works too)
+in the same folder as the node files, and write a node beside it:
+
+```markdown
+---
+claudhub: diagram
+anchor: worktree
+title: Request flow
+author: <git config user.name>
+agent: claude
+created: 2026-09-24T21:30:00+02:00
+image: 2026-09-24-2130-request-flow.svg
+---
+A caption: what the diagram shows, and what it leaves out.
+```
+
+- `image:` is the picture's file name, relative to the node file's folder.
+- An SVG saved there without a node is shown too, titled by its file name —
+  but write the node: it carries the title, the author and the caption.
+- Keep the SVG self-contained: no external fonts, images or scripts. Give it
+  a `viewBox` and a sensible width and height; Claudhub scales it to its node.
+- When a diagramming skill produces the drawing, save its SVG output here
+  rather than only in a scratch folder.

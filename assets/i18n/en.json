@@ -997,5 +997,6 @@
   "review-reopen": "Reopen",
   "panel-reviews": "Reviews",
   "review-send": "Send to the agent",
-  "review-send-all": "Send every open finding to the agent"
+  "review-send-all": "Send every open finding to the agent",
+  "overview-diagram-loading": "Loading the diagram…"
 }

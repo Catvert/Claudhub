@@ -631,6 +631,12 @@ worktree.
   listées dans le panneau Notes — **jamais versées dans les notes**, que le
   coffre recopie. Envoyées à l'agent, elles lui demandent de passer lui-même
   la remarque `resolved` dans le fichier.
+- **Un diagramme est une image et son nœud** (`claudhub: diagram`,
+  `image:` à côté), un SVG seul devenant un nœud à lui. Le relevé ne transporte
+  que l'**empreinte** des images (`files::picture_stamps`, taille et date) ; les
+  octets ne passent que quand elle bouge — un relevé toutes les deux secondes
+  les enverrait sinon à travers WSL à chaque fois. Posé sur fond blanc : un
+  schéma dessiné pour une page claire reste lisible sur un thème sombre.
 - **Ce qu'un agent voit de son environnement** est une fiche Markdown
   (`ui::context`), réécrite à chaque relevé dans le coffre du worktree et
   annoncée par `$CLAUDHUB_CONTEXT` : base, commits, changements, agents,

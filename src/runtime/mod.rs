@@ -1270,6 +1270,7 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         }
         Cmd::ReadCanvas { worktree, dirs } => {
             let mut files = Vec::new();
+            let mut pictures = Vec::new();
             for (dir, private) in dirs {
                 // A folder that is not there is a worktree without nodes.
                 if let Ok(read) = crate::files::read_notes(&dir) {
@@ -1278,9 +1279,44 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                             (crate::wslpath::join(&dir, &name), private, text)
                         }));
                 }
+                pictures.extend(
+                    crate::files::picture_stamps(&dir)
+                        .into_iter()
+                        .map(|(path, stamp)| (path, private, stamp)),
+                );
             }
-            vec![Evt::CanvasRead { worktree, files }]
+            vec![Evt::CanvasRead {
+                worktree,
+                files,
+                pictures,
+            }]
         }
+        Cmd::DeleteCanvasPicture { worktree, path } => match std::fs::remove_file(&path) {
+            Ok(()) => vec![Evt::CanvasWritten {
+                worktree,
+                created: None,
+            }],
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => vec![fail(
+                Some(worktree),
+                Action::Notes,
+                anyhow::Error::new(e).context(format!("deleting {}", path.display())),
+            )],
+        },
+        Cmd::ReadCanvasPicture { worktree, path } => match std::fs::read(&path) {
+            Ok(bytes) => {
+                let stamp = crate::files::picture_stamps(path.parent().unwrap_or(&path))
+                    .into_iter()
+                    .find(|(p, _)| *p == path)
+                    .map_or(0, |(_, stamp)| stamp);
+                vec![Evt::CanvasPicture { path, stamp, bytes }]
+            }
+            Err(e) => vec![fail(
+                Some(worktree),
+                Action::Notes,
+                anyhow::Error::new(e).context(format!("reading {}", path.display())),
+            )],
+        },
         Cmd::CreateCanvasNote {
             worktree,
             dir,

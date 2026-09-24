@@ -541,6 +541,30 @@ pub fn write_vault_file(path: &Path, text: &str, expect: Option<u64>) -> Result<
 ///
 /// A missing folder is not an error: it is the state of a worktree that has not
 /// been annotated yet.
+/// The pictures of a folder, each with a stamp that changes when the file
+/// does — its length and its modification time together. It is what lets a
+/// reader ask for the bytes only of what changed: a folder read every two
+/// seconds would otherwise carry every diagram across the wire each time.
+pub fn picture_stamps(dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| picture_of(path).is_some())
+        .filter_map(|path| {
+            let meta = std::fs::metadata(&path).ok()?;
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as u64);
+            Some((path, modified ^ meta.len().rotate_left(32)))
+        })
+        .collect()
+}
+
 pub fn read_notes(dir: &Path) -> Result<Vec<(String, String)>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -600,6 +624,24 @@ pub fn sync_notes(dir: &Path, files: &[(String, String)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A diagram's bytes cross only when its stamp moves: pictures only, and
+    /// a stamp that changes with the file.
+    #[test]
+    fn a_picture_is_stamped_and_the_stamp_follows_the_file() {
+        let dir = std::env::temp_dir().join(format!("claudhub-stamps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("flow.svg"), "<svg/>").unwrap();
+        std::fs::write(dir.join("note.md"), "text").unwrap();
+        let before = picture_stamps(&dir);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].0, dir.join("flow.svg"));
+        std::fs::write(dir.join("flow.svg"), "<svg viewBox='0 0 1 1'/>").unwrap();
+        assert_ne!(picture_stamps(&dir)[0].1, before[0].1);
+        assert!(picture_stamps(&dir.join("absent")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The digest is compared between two processes — the view and the server —
     /// so it has to be identical from one binary to the next. These values are

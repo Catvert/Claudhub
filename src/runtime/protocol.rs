@@ -689,6 +689,18 @@ pub enum Cmd {
         text: String,
         expect: Option<u64>,
     },
+    /// The bytes of a picture a diagram node shows — asked only when its
+    /// stamp moved.
+    ReadCanvasPicture {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// Deletes a diagram's picture, gone with its node: a binary file has no
+    /// text read to guard the delete with.
+    DeleteCanvasPicture {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
     /// Where the Claudhub skill is installed for this checkout, and in which
     /// version — see `crate::skill`.
     SkillStatus {
@@ -1064,6 +1076,8 @@ impl Cmd {
             Self::WriteVaultFile { .. } => "WriteVaultFile",
             Self::ReadCanvas { .. } => "ReadCanvas",
             Self::SkillStatus { .. } => "SkillStatus",
+            Self::ReadCanvasPicture { .. } => "ReadCanvasPicture",
+            Self::DeleteCanvasPicture { .. } => "DeleteCanvasPicture",
             Self::SetSkill { .. } => "SetSkill",
             Self::WriteContext { .. } => "WriteContext",
             Self::CreateCanvasNote { .. } => "CreateCanvasNote",
@@ -1513,10 +1527,18 @@ pub enum Evt {
         worktree: WorktreeId,
         status: crate::skill::Status,
     },
-    /// A worktree's node files: full path, private or not, and text.
+    /// A worktree's node files: full path, private or not, and text — and
+    /// the pictures beside them, by stamp only (`files::picture_stamps`).
     CanvasRead {
         worktree: WorktreeId,
         files: Vec<(PathBuf, bool, String)>,
+        pictures: Vec<(PathBuf, bool, u64)>,
+    },
+    /// A diagram's picture, undecoded.
+    CanvasPicture {
+        path: PathBuf,
+        stamp: u64,
+        bytes: Vec<u8>,
     },
     /// A node file was written; `created` names the note just made, for the
     /// view to open it for writing once it has been read.

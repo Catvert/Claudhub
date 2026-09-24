@@ -51,7 +51,7 @@ pub struct Preview {
 }
 
 /// Our vocabulary translated into gpui's — the only place the two meet.
-fn format_of(kind: files::Picture) -> gpui_kit::ImageFormat {
+pub(super) fn format_of(kind: files::Picture) -> gpui_kit::ImageFormat {
     use files::Picture;
     match kind {
         Picture::Png => gpui_kit::ImageFormat::Png,

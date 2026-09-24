@@ -32,6 +32,8 @@ const MARK: &str = "claudhub";
 pub enum Kind {
     Note,
     Review,
+    /// A picture — an SVG most of the time — with the body as its caption.
+    Diagram,
 }
 
 impl Kind {
@@ -39,6 +41,7 @@ impl Kind {
         match self {
             Kind::Note => "note",
             Kind::Review => "review",
+            Kind::Diagram => "diagram",
         }
     }
 
@@ -46,6 +49,7 @@ impl Kind {
         match word {
             "note" => Some(Kind::Note),
             "review" => Some(Kind::Review),
+            "diagram" => Some(Kind::Diagram),
             _ => None,
         }
     }
@@ -73,6 +77,8 @@ pub struct Node {
     pub created: Option<String>,
     /// `open`, `resolved`… — a review's.
     pub status: Option<String>,
+    /// A diagram's picture, relative to the node file's folder.
+    pub image: Option<String>,
     pub body: String,
 }
 
@@ -87,6 +93,7 @@ impl Node {
             agent: None,
             created: Some(created),
             status: None,
+            image: None,
             body: String::new(),
         }
     }
@@ -128,6 +135,7 @@ pub fn parse(text: &str) -> Option<Node> {
         agent: None,
         created: None,
         status: None,
+        image: None,
         body: body.to_string(),
     };
     let mut marked = false;
@@ -154,6 +162,7 @@ pub fn parse(text: &str) -> Option<Node> {
             "agent" => node.agent = text,
             "created" => node.created = text,
             "status" => node.status = text,
+            "image" => node.image = text,
             _ => {}
         }
     }
@@ -197,6 +206,7 @@ pub fn render(node: &Node) -> String {
         ("agent", &node.agent),
         ("created", &node.created),
         ("status", &node.status),
+        ("image", &node.image),
     ] {
         if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
             out.push_str(&format!("{key}: {}\n", quote(value)));
@@ -472,6 +482,7 @@ mod tests {
             agent: Some("claude".into()),
             created: Some("2026-09-24T21:30:00Z".into()),
             status: Some("open".into()),
+            image: None,
             body: "# Summary\n\nAll good.\n".into(),
         };
         let text = render(&node);
@@ -479,6 +490,15 @@ mod tests {
         // A colon in a title is quoted, and comes back without the quotes.
         assert!(text.contains("title: \"Review: the cache\"\n"));
         assert_eq!(parse(&text), Some(node));
+    }
+
+    #[test]
+    fn a_diagram_names_its_picture() {
+        let node =
+            parse("---\nclaudhub: diagram\nanchor: repo\nimage: flow.svg\n---\nThe flow.").unwrap();
+        assert_eq!(node.kind, Kind::Diagram);
+        assert_eq!(node.image.as_deref(), Some("flow.svg"));
+        assert_eq!(parse(&render(&node)), Some(node));
     }
 
     #[test]
