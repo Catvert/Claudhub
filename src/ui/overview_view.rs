@@ -646,7 +646,7 @@ impl ClaudhubApp {
                     place.offset,
                     place.size,
                     place.collapsed,
-                    false,
+                    place.hidden,
                 )
             }))
             .collect::<Vec<_>>();
@@ -699,6 +699,7 @@ impl ClaudhubApp {
                     offset: note.offset,
                     size: note.size,
                     collapsed: note.collapsed,
+                    hidden: false,
                 };
                 super::store::Store::update_global(cx, |store| {
                     store.home_places.insert(path.clone(), place);
@@ -737,11 +738,9 @@ impl ClaudhubApp {
         // And what was taken off the plane comes back: a hidden worktree is
         // in no plan to be read from, so it is found among the repositories.
         let hidden: Vec<Node> = self
-            .overview_repos()
+            .hidden_nodes(cx)
             .into_iter()
-            .flat_map(|repo| repo.worktrees.iter())
-            .map(|worktree| Node::Worktree(worktree.path.clone()))
-            .filter(|node| self.overview_hand.hidden.contains(node))
+            .map(|(node, _)| node)
             .collect();
         let nodes: Vec<Node> = nodes.into_iter().chain(hidden).collect();
         self.overview_maximized = None;
@@ -915,6 +914,7 @@ impl ClaudhubApp {
                         })
                     }),
             )
+            .children(self.render_hidden_menu(cx))
             .child(self.render_skill_button(cx))
             .child(
                 Button::new("overview-reset")
@@ -2016,7 +2016,7 @@ impl ClaudhubApp {
     fn close_node(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
         match node {
             Node::Git(_) => {}
-            Node::Note(path) => self.delete_home_note(path, window, cx),
+            Node::Note(path) => self.close_home_note(path, window, cx),
             Node::Terminal(id) => {
                 let Some(terminal) = self
                     .terminals
@@ -2065,11 +2065,48 @@ impl ClaudhubApp {
                     Some(repo) => format!("{repo} · {label}"),
                     None => label.to_string(),
                 };
+                // The main checkout is the repository itself: hidden, never
+                // removed from here.
+                let removable = self
+                    .repos
+                    .worktree(path)
+                    .is_some_and(|w| !w.is_main)
+                    .then(|| self.main_of(path))
+                    .flatten();
                 let entity = cx.entity();
+                let target = path.clone();
                 window.open_dialog(cx, move |dialog, _, _| {
                     let (entity, node) = (entity.clone(), node.clone());
+                    let footer = match removable.clone() {
+                        Some(main) => {
+                            let (entity, target) = (entity.clone(), target.clone());
+                            super::dialogs::choose(
+                                tr!("overview-hide-button"),
+                                tr!("overview-remove-worktree"),
+                                move |window, cx| {
+                                    // Opened once this dialog has gone: the
+                                    // button dismisses the dialog on top when
+                                    // it is done, which would be this one.
+                                    let (entity, main, target) =
+                                        (entity.clone(), main.clone(), target.clone());
+                                    window.defer(cx, move |window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.confirm_remove_worktree(
+                                                main.clone(),
+                                                target.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        window.defer(cx, |window, cx| window.focus_dialog(cx));
+                                    });
+                                },
+                            )
+                        }
+                        None => super::dialogs::submit(tr!("overview-hide-button")),
+                    };
                     dialog
-                        .title(tr!("overview-hide-title"))
+                        .title(tr!("overview-close-worktree-title"))
                         .child(
                             v_flex()
                                 .gap_1()
@@ -2078,7 +2115,7 @@ impl ClaudhubApp {
                         )
                         .overlay_closable(false)
                         .close_button(false)
-                        .footer(super::dialogs::confirm())
+                        .footer(footer)
                         .on_ok(move |_, _, cx| {
                             entity.update(cx, |this, cx| {
                                 this.overview_hand.hidden.insert(node.clone());
@@ -2094,9 +2131,101 @@ impl ClaudhubApp {
         }
     }
 
+    /// The nodes taken off the plane in the projects on show, with the name
+    /// the « Hidden » menu gives them.
+    pub(super) fn hidden_nodes(&self, cx: &App) -> Vec<(Node, SharedString)> {
+        let _ = cx;
+        let mut hidden = Vec::new();
+        for repo in self.overview_repos() {
+            for worktree in &repo.worktrees {
+                let node = Node::Worktree(worktree.path.clone());
+                if self.overview_hand.hidden.contains(&node) {
+                    let (repo, label) = self.project_label(&worktree.path);
+                    let name = match repo {
+                        Some(repo) => format!("{repo} · {label}"),
+                        None => label.to_string(),
+                    };
+                    hidden.push((node, SharedString::from(name)));
+                }
+                for entry in self.canvas.get(&worktree.path).into_iter().flatten() {
+                    let node = Node::Note(entry.path.clone());
+                    if self.overview_hand.hidden.contains(&node)
+                        && !hidden.iter().any(|(n, _)| *n == node)
+                    {
+                        let name = entry.node.heading().unwrap_or_else(|| {
+                            entry
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        });
+                        hidden.push((node, SharedString::from(name)));
+                    }
+                }
+            }
+        }
+        hidden
+    }
+
+    /// Puts a hidden node back on the plane, and brings it into view.
+    fn unhide(&mut self, node: &Node, cx: &mut Context<Self>) {
+        if self.overview_hand.hidden.remove(node) {
+            self.remember_folds(node, cx);
+            self.overview_reveal = Some(node.clone());
+            cx.notify();
+        }
+    }
+
+    /// « Hidden (n) »: what was taken off the plane, one entry each to bring
+    /// it back, and all of it at once. Absent while nothing is hidden.
+    pub(super) fn render_hidden_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let hidden = self.hidden_nodes(cx);
+        if hidden.is_empty() {
+            return None;
+        }
+        let app = cx.entity().downgrade();
+        let count = hidden.len();
+        Some(
+            Button::new("overview-hidden")
+                .ghost()
+                .small()
+                .icon(icon("eye-off"))
+                .label(tr!("overview-hidden", { count: count }))
+                .dropdown_menu(move |menu, _, _| {
+                    let every: Vec<Node> = hidden.iter().map(|(node, _)| node.clone()).collect();
+                    let all = app.clone();
+                    let menu = hidden.iter().cloned().fold(menu, |menu, (node, name)| {
+                        let app = app.clone();
+                        menu.item(PopupMenuItem::new(name).icon(icon("eye")).on_click(
+                            move |_, _, cx| {
+                                if let Some(app) = app.upgrade() {
+                                    let node = node.clone();
+                                    app.update(cx, |this, cx| this.unhide(&node, cx));
+                                }
+                            },
+                        ))
+                    });
+                    menu.separator()
+                        .item(PopupMenuItem::new(tr!("overview-unhide-all")).on_click(
+                            move |_, _, cx| {
+                                if let Some(app) = all.upgrade() {
+                                    let every = every.clone();
+                                    app.update(cx, |this, cx| {
+                                        for node in &every {
+                                            this.unhide(node, cx);
+                                        }
+                                    });
+                                }
+                            },
+                        ))
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Writes what the hand folded or hid for one node back to the store.
     /// A terminal's fold goes with the rest of it, in `persist_terminals`.
-    fn remember_folds(&self, node: &Node, cx: &mut Context<Self>) {
+    pub(super) fn remember_folds(&self, node: &Node, cx: &mut Context<Self>) {
         let folded = self.overview_hand.collapsed.contains(node);
         let hidden = self.overview_hand.hidden.contains(node);
         super::store::Store::update_global(cx, |store| match node {
@@ -2107,7 +2236,9 @@ impl ClaudhubApp {
                 state.home_hidden = hidden;
             }
             Node::Note(path) => {
-                store.home_places.entry(path.clone()).or_default().collapsed = folded
+                let place = store.home_places.entry(path.clone()).or_default();
+                place.collapsed = folded;
+                place.hidden = hidden;
             }
             Node::Terminal(_) => {}
         });

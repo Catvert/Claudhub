@@ -1005,5 +1005,14 @@
   "review-delete": "Delete",
   "overview-merge": "Merge into %{base}",
   "merge-title": "Merge %{branch} into %{base}?",
-  "merge-body": "%{count} commit(s) will go into the base, from the main repository. Claudhub will then offer to remove the worktree."
+  "merge-body": "%{count} commit(s) will go into the base, from the main repository. Claudhub will then offer to remove the worktree.",
+  "overview-hidden": "Hidden (%{count})",
+  "overview-unhide-all": "Show them all",
+  "overview-hide-button": "Hide",
+  "overview-remove-worktree": "Remove the worktree…",
+  "overview-close-worktree-title": "Close this worktree?",
+  "overview-close-note-title": "Close this node?",
+  "overview-delete-file": "Delete the file",
+  "overview-close-note-shared": "Hiding takes it off the home screen and keeps its file in .claudhub/ — the « Hidden » menu brings it back. Deleting erases the file, for the whole team at the next commit.",
+  "overview-close-note-private": "Hiding takes it off the home screen and keeps its file in the vault — the « Hidden » menu brings it back. Deleting erases the file."
 }

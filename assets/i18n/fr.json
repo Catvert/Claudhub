@@ -1005,5 +1005,14 @@
   "review-delete": "Supprimer",
   "overview-merge": "Fusionner dans %{base}",
   "merge-title": "Fusionner %{branch} dans %{base} ?",
-  "merge-body": "%{count} commit(s) partiront dans la base, depuis le dépôt principal. Claudhub proposera ensuite de retirer le worktree."
+  "merge-body": "%{count} commit(s) partiront dans la base, depuis le dépôt principal. Claudhub proposera ensuite de retirer le worktree.",
+  "overview-hidden": "Masqués (%{count})",
+  "overview-unhide-all": "Tout réafficher",
+  "overview-hide-button": "Masquer",
+  "overview-remove-worktree": "Supprimer le worktree…",
+  "overview-close-worktree-title": "Fermer ce worktree ?",
+  "overview-close-note-title": "Fermer ce nœud ?",
+  "overview-delete-file": "Supprimer le fichier",
+  "overview-close-note-shared": "Masquer le retire de l'accueil et garde son fichier dans .claudhub/ — le menu « Masqués » le fait revenir. Supprimer efface le fichier, pour toute l'équipe au prochain commit.",
+  "overview-close-note-private": "Masquer le retire de l'accueil et garde son fichier dans le coffre — le menu « Masqués » le fait revenir. Supprimer efface le fichier."
 }

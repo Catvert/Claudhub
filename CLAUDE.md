@@ -657,9 +657,11 @@ worktree.
   Le commit réussi la referme (`commit_sheet`).
 - **Chaque nœud a les trois boutons d'une fenêtre** : replier jusqu'à l'en-tête
   (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — taille et vue
-  d'avant rendues au second clic —, et une croix toujours confirmée : un terminal fermé,
-  une note supprimée, un worktree **retiré du plan** avec ce qui en pend
-  (`Hand::hidden`), jamais supprimé ; le nœud git n'en a pas. **Un dialogue
+  d'avant rendues au second clic —, et une croix qui demande : un terminal
+  fermé ; une note, une revue ou un diagramme **masqué** (le fichier reste) ou
+  supprimé avec son image ; un worktree masqué avec ce qui en pend, ou supprimé
+  par le geste des worktrees ; le nœud git n'en a pas. Ce qui est masqué
+  (`Hand::hidden`, retenu) revient par le menu « Masqués » de la barre. **Un dialogue
   ouvert depuis un nœud prend le focus** (`focus_dialog`, différé) : ses
   boutons dispatchent `Confirm` depuis le focus, resté dans le terminal où la
   croix a été pressée — et OK ne faisait rien. Agrandir

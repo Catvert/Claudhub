@@ -310,6 +310,8 @@ pub struct NodePlace {
     pub offset: Option<(f32, f32)>,
     pub size: Option<(f32, f32)>,
     pub collapsed: bool,
+    /// Taken off the plane, the file kept: the « Hidden » menu brings it back.
+    pub hidden: bool,
 }
 
 /// A terminal as it is kept across a restart.

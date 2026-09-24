@@ -574,38 +574,102 @@ impl ClaudhubApp {
                 .close_button(false)
                 .footer(super::dialogs::confirm())
                 .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.note_editors.remove(&path);
-                        let node = Node::Note(path.clone());
-                        this.forget_node(&node, cx);
-                        if let Some((worktree, entry)) = this.canvas_entry(&path) {
-                            let worktree = worktree.clone();
-                            // A picture of its own has no text read to guard
-                            // the delete with: asked, it goes.
-                            let expect = (!entry.standalone).then_some(entry.digest);
-                            // A diagram's picture goes with its node: left
-                            // behind, it would come back as a node of its own.
-                            let picture = picture_of(entry).filter(|p| *p != path);
-                            this.git.send(Cmd::WriteCanvasFile {
-                                worktree: worktree.clone(),
-                                path: path.clone(),
-                                text: String::new(),
-                                expect,
-                            });
-                            if let Some(picture) = picture {
-                                this.git.send(Cmd::DeleteCanvasPicture {
-                                    worktree,
-                                    path: picture,
-                                });
-                            }
-                        }
-                        cx.notify();
-                    });
+                    entity.update(cx, |this, cx| this.delete_note_files(&path, cx));
                     true
                 })
         });
         // See `close_node`: the buttons dispatch from the focus.
         window.defer(cx, |window, cx| window.focus_dialog(cx));
+    }
+
+    /// The cross of a note, a review or a diagram: take it off the plane and
+    /// keep its file — the « Hidden » menu brings it back — or delete the
+    /// file, its picture with it.
+    pub(super) fn close_home_note(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, entry)) = self.canvas_entry(path) else {
+            return;
+        };
+        let name = entry
+            .node
+            .heading()
+            .unwrap_or_else(|| path.display().to_string());
+        let shared = !entry.private;
+        let entity = cx.entity();
+        let path = path.to_path_buf();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (hide, delete) = (
+                (entity.clone(), path.clone()),
+                (entity.clone(), path.clone()),
+            );
+            dialog
+                .title(tr!("overview-close-note-title"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(SharedString::from(name.clone())))
+                        .child(div().text_xs().child(if shared {
+                            tr!("overview-close-note-shared")
+                        } else {
+                            tr!("overview-close-note-private")
+                        })),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::choose(
+                    tr!("overview-hide-button"),
+                    tr!("overview-delete-file"),
+                    move |_, cx| {
+                        let (entity, path) = delete.clone();
+                        entity.update(cx, |this, cx| this.delete_note_files(&path, cx));
+                    },
+                ))
+                .on_ok(move |_, _, cx| {
+                    let (entity, path) = hide.clone();
+                    entity.update(cx, |this, cx| {
+                        let node = Node::Note(path.clone());
+                        this.note_editors.remove(&path);
+                        this.overview_hand.hidden.insert(node.clone());
+                        this.remember_folds(&node, cx);
+                        cx.notify();
+                    });
+                    true
+                })
+        });
+        window.defer(cx, |window, cx| window.focus_dialog(cx));
+    }
+
+    /// Deletes a node's file — and a diagram's picture with it: left behind,
+    /// it would come back as a node of its own.
+    fn delete_note_files(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.note_editors.remove(path);
+        let node = Node::Note(path.to_path_buf());
+        self.overview_hand.hidden.remove(&node);
+        self.forget_node(&node, cx);
+        if let Some((worktree, entry)) = self.canvas_entry(path) {
+            let worktree = worktree.clone();
+            // A picture of its own has no text read to guard the delete with:
+            // asked, it goes.
+            let expect = (!entry.standalone).then_some(entry.digest);
+            let picture = picture_of(entry).filter(|p| p != path);
+            self.git.send(Cmd::WriteCanvasFile {
+                worktree: worktree.clone(),
+                path: path.to_path_buf(),
+                text: String::new(),
+                expect,
+            });
+            if let Some(picture) = picture {
+                self.git.send(Cmd::DeleteCanvasPicture {
+                    worktree,
+                    path: picture,
+                });
+            }
+        }
+        cx.notify();
     }
 
     /// Writes each worktree's context sheet, where its vault is: what the
