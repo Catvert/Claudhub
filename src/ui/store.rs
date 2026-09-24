@@ -228,6 +228,8 @@ pub struct Session {
     /// over the checkout `claudhub` was launched from — see
     /// `ClaudhubApp::repo_opened`.
     pub worktree: Option<PathBuf>,
+    /// The home screen was up: the window comes back on it.
+    pub home: bool,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.
@@ -733,6 +735,7 @@ mod tests {
             session: Session {
                 worktree: None,
                 place: a_place(),
+                ..Default::default()
             },
             ..Default::default()
         };

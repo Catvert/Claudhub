@@ -230,6 +230,9 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // The places kept from the last session, once — the screen may come
+        // up with the window, before any toggle has read them.
+        self.load_overview_places(cx);
         let plan = self.overview_plan(cx);
         let size = self.overview_size();
         // Everything in view the first time — and after picking another
@@ -1552,6 +1555,7 @@ impl ClaudhubApp {
             return;
         }
         self.overview = true;
+        super::store::Store::update_global(cx, |store| store.session.home = true);
         self.overview_seen = None;
         self.load_overview_places(cx);
         let worktrees = self.repos.worktrees_in_order();
@@ -1581,6 +1585,7 @@ impl ClaudhubApp {
             return;
         }
         self.overview = false;
+        super::store::Store::update_global(cx, |store| store.session.home = false);
         self.overview_drag = None;
         for terminal in &self.terminals {
             terminal.view.update(cx, |view, _| view.set_canvas(None));

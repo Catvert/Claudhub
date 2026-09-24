@@ -1055,8 +1055,10 @@ pub struct ClaudhubApp {
     ///
     /// A state of the window and not a panel: what it replaces is the rails,
     /// the docks and the status bar, which is precisely what a panel cannot do.
-    /// Not remembered either — a screen with no way back to the code is not
-    /// where a window should come up.
+    /// **Remembered** (`Session::home`), unlike the multiplexer it replaced:
+    /// the home screen is somewhere one works from, with its button back to
+    /// the code in the title bar, and a window that forgot it came back on a
+    /// screen one had left.
     pub(super) overview: bool,
     /// Where the home screen's plane is looked at from, and how close.
     pub(super) overview_view: crate::ui::overview::View,
@@ -1544,7 +1546,7 @@ impl ClaudhubApp {
             dock,
             dock_skin,
             layout_save_scheduled: false,
-            overview: false,
+            overview: crate::ui::store::Store::global(cx).session.home,
             overview_view: crate::ui::overview::View::default(),
             overview_seen: None,
             overview_viewport: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
@@ -2618,6 +2620,13 @@ impl ClaudhubApp {
             // Before the session's terminal below, which opens a shell only
             // where there is none: the kept ones count.
             self.revive_terminals(&paths, window, cx);
+            // A window that comes back on the home screen asks for its cards
+            // at once, rather than at the sweep's next turn.
+            if self.overview {
+                self.git.send(Cmd::LoadOutlines {
+                    worktrees: paths.clone(),
+                });
+            }
         }
         // A weaker candidate never displaces a firmer one, and re-selecting is
         // free: `select_worktree` returns at once when the path is already the
