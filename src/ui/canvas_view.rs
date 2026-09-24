@@ -18,7 +18,7 @@ use gpui_kit::component::{
     h_flex,
     input::{EditorState, InputEvent},
     menu::DropdownMenu as _,
-    v_flex, ActiveTheme, Sizable as _, WindowExt as _,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
 };
 use gpui_kit::{
     div, prelude::*, px, AnyElement, App, Context, Entity, Focusable as _, MouseButton,
@@ -116,7 +116,11 @@ impl ClaudhubApp {
             .collect();
         // The order they were written in: the names start with their date.
         entries.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
-        self.canvas.insert(worktree, entries);
+        self.canvas.insert(worktree.clone(), entries);
+        // The worktree on show marks its reviews' findings in its diff.
+        if self.active.as_deref() == Some(worktree.as_path()) {
+            self.refresh_note_marks(&worktree);
+        }
         if let Some(created) = self.canvas_created.take() {
             if self.canvas_entry(&created).is_some() {
                 self.overview_reveal = Some(Node::Note(created.clone()));
@@ -704,6 +708,236 @@ impl ClaudhubApp {
             ))
             .children(rows)
             .into_any_element()
+    }
+
+    /// The open findings of a worktree's reviews, with the review file each
+    /// comes from.
+    pub(super) fn open_findings(&self, worktree: &Path) -> Vec<(PathBuf, canvas::Finding)> {
+        self.canvas
+            .get(worktree)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.node.kind == canvas::Kind::Review)
+            .flat_map(|entry| {
+                canvas::findings(&entry.node.body)
+                    .1
+                    .into_iter()
+                    .filter(|finding| !finding.resolved())
+                    .map(|finding| (entry.path.clone(), finding))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The Notes panel's section of the worktree's reviews: their open
+    /// findings, each to open, resolve or hand to the agent — the notes'
+    /// gestures, for remarks that live in a shared file rather than in the
+    /// vault. `None` where there is no review.
+    pub(super) fn render_reviews_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let worktree = self.active.clone()?;
+        let reviews: Vec<CanvasEntry> = self
+            .canvas
+            .get(&worktree)?
+            .iter()
+            .filter(|entry| entry.node.kind == canvas::Kind::Review)
+            .cloned()
+            .collect();
+        if reviews.is_empty() {
+            return None;
+        }
+        let open = self.open_findings(&worktree);
+        let header = self.section_header(
+            "reviews",
+            "file-text",
+            tr!("panel-reviews"),
+            tr!("note-count", { count: open.len() }),
+            cx,
+        );
+        let send_all = worktree.clone();
+        let header = header.child(
+            Button::new("reviews-send-all")
+                .ghost()
+                .small()
+                .icon(icon("send"))
+                .tooltip(tr!("review-send-all"))
+                .disabled(open.is_empty())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.send_findings(&send_all, None, window, cx);
+                })),
+        );
+        if self.collapsed("reviews") {
+            return Some(v_flex().w_full().child(header).into_any_element());
+        }
+        let theme = cx.theme().clone();
+        let groups = reviews.into_iter().map(|entry| {
+            let (_, found) = canvas::findings(&entry.node.body);
+            let title = entry
+                .node
+                .heading()
+                .unwrap_or_else(|| entry.path.display().to_string());
+            let byline = entry
+                .node
+                .agent
+                .clone()
+                .into_iter()
+                .chain(entry.node.author.clone())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let rows = found.into_iter().filter(|f| !f.resolved()).map(|finding| {
+                let color = match finding.severity.as_deref() {
+                    Some("blocker") => theme.danger,
+                    Some("warning") => theme.warning,
+                    Some("suggestion") => theme.info,
+                    _ => theme.muted_foreground,
+                };
+                let place = if finding.start == finding.end {
+                    format!("{}:{}", finding.path, finding.start)
+                } else {
+                    format!("{}:{}-{}", finding.path, finding.start, finding.end)
+                };
+                let key = format!("{}-{}", entry.path.display(), finding.at);
+                let (open, tick, send) = (
+                    (worktree.clone(), finding.clone()),
+                    (entry.path.clone(), finding.at),
+                    (worktree.clone(), entry.path.clone(), finding.at),
+                );
+                let first = finding.text.lines().next().unwrap_or_default().to_string();
+                v_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_0p5()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .text_xs()
+                            .child(div().flex_none().size(px(7.)).rounded_full().bg(color))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("reviews-open-{key}")))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(theme.link)
+                                    .cursor_pointer()
+                                    .child(SharedString::from(place))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let (worktree, finding) = open.clone();
+                                        this.open_finding(&worktree, &finding, window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("reviews-send-{key}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(icon("send"))
+                                    .tooltip(tr!("review-send"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let (worktree, file, at) = send.clone();
+                                        this.send_findings(&worktree, Some((file, at)), window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("reviews-tick-{key}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(icon("check"))
+                                    .tooltip(tr!("review-resolve"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let (path, at) = tick.clone();
+                                        this.set_finding_status(&path, at, "resolved", cx);
+                                    })),
+                            ),
+                    )
+                    .when(!first.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(SharedString::from(first)),
+                        )
+                    })
+            });
+            v_flex()
+                .w_full()
+                .child(
+                    h_flex()
+                        .px_2()
+                        .pt_1()
+                        .gap_1p5()
+                        .text_xs()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(SharedString::from(title)),
+                        )
+                        .when(!byline.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.muted_foreground)
+                                    .child(SharedString::from(byline)),
+                            )
+                        }),
+                )
+                .children(rows)
+        });
+        Some(
+            v_flex()
+                .w_full()
+                .child(header)
+                .children(groups)
+                .into_any_element(),
+        )
+    }
+
+    /// Hands findings to the worktree's agent — one, or every open one —
+    /// through the notes' prompt dialog: what is sent is seen and can be
+    /// added to first.
+    fn send_findings(
+        &mut self,
+        worktree: &Path,
+        only: Option<(PathBuf, usize)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.open_findings(worktree);
+        let chosen: Vec<&(PathBuf, canvas::Finding)> = open
+            .iter()
+            .filter(|(file, finding)| {
+                only.as_ref()
+                    .is_none_or(|(path, at)| path == file && *at == finding.at)
+            })
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        // One prompt per review file: each names the file the agent ticks.
+        let mut text = String::new();
+        let mut files: Vec<&PathBuf> = chosen.iter().map(|(file, _)| file).collect();
+        files.dedup();
+        for file in files {
+            let findings: Vec<&canvas::Finding> = chosen
+                .iter()
+                .filter(|(f, _)| f == file)
+                .map(|(_, finding)| finding)
+                .collect();
+            let shown = file
+                .strip_prefix(worktree)
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            if !text.is_empty() {
+                text.push_str("\n---\n\n");
+            }
+            text.push_str(&canvas::finding_prompt(&shown, &findings));
+        }
+        self.confirm_prompt(worktree.to_path_buf(), Vec::new(), text, false, window, cx);
     }
 
     /// Goes to a finding: its worktree, its file, its line.

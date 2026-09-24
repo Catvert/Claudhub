@@ -994,5 +994,8 @@
   "skill-remove-user": "Remove for me",
   "review-open-count": "%{open} / %{all} open",
   "review-resolve": "Mark resolved",
-  "review-reopen": "Reopen"
+  "review-reopen": "Reopen",
+  "panel-reviews": "Reviews",
+  "review-send": "Send to the agent",
+  "review-send-all": "Send every open finding to the agent"
 }

@@ -416,6 +416,38 @@ pub fn set_status(body: &str, at: usize, status: &str) -> String {
     out
 }
 
+/// What an agent is asked to do about findings: fix them, then say so in the
+/// review file itself — the tick a teammate's pull will read.
+pub fn finding_prompt(review_file: &str, findings: &[&Finding]) -> String {
+    let mut out = format!(
+        "Please address these findings from the code review in `{review_file}`. \
+         When one is fixed, set its `status:` to `resolved` in that file; if you \
+         disagree with one, say why instead.\n"
+    );
+    for finding in findings {
+        let place = if finding.start == finding.end {
+            format!("{}:{}", finding.path, finding.start)
+        } else {
+            format!("{}:{}-{}", finding.path, finding.start, finding.end)
+        };
+        out.push_str(&format!(
+            "\n## {place}{}\n",
+            finding
+                .severity
+                .as_deref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default()
+        ));
+        if let Some(excerpt) = &finding.excerpt {
+            out.push_str(&format!("\n```\n{excerpt}\n```\n"));
+        }
+        if !finding.text.is_empty() {
+            out.push_str(&format!("\n{}\n", finding.text));
+        }
+    }
+    out
+}
+
 /// Where a checkout's shared notes live.
 pub fn shared_dir(checkout: &Path) -> PathBuf {
     crate::wslpath::join(&crate::wslpath::join(checkout, DIR), NOTES)
@@ -500,6 +532,17 @@ mod tests {
         // A heading that is no place stays in the text of the one before.
         assert!(second.text.contains("### no place here"));
         assert!(findings("No findings at all.").1.is_empty());
+    }
+
+    #[test]
+    fn the_prompt_names_the_file_to_tick_and_quotes_each_place() {
+        let (_, found) = findings(REVIEW);
+        let prompt = finding_prompt(".claudhub/notes/r.md", &found.iter().collect::<Vec<_>>());
+        assert!(prompt.contains("`.claudhub/notes/r.md`"));
+        assert!(prompt.contains("`resolved`"));
+        assert!(prompt.contains("## src/cache.rs:42 (warning)\n"));
+        assert!(prompt.contains("## src/api.rs:10-12 (suggestion)\n"));
+        assert!(prompt.contains("The key is built twice."));
     }
 
     #[test]

@@ -473,6 +473,10 @@ impl ClaudhubApp {
     /// Called when a diff arrives and on every change to the notes, never during
     /// a render: `relocate` walks the whole diff per note.
     pub(super) fn refresh_note_marks(&mut self, worktree: &Path) {
+        // The open findings of the worktree's reviews, marked like notes and
+        // found again the same way — by their lines, then by their excerpt —
+        // but never added to the notes, which the vault is written from.
+        let findings = self.open_findings(worktree);
         let Some(state) = self.review.get_mut(worktree) else {
             return;
         };
@@ -494,6 +498,22 @@ impl ClaudhubApp {
                 None => {
                     drifted.insert(note.id);
                 }
+            }
+        }
+        for (_, finding) in findings
+            .iter()
+            .filter(|(_, finding)| std::path::Path::new(&finding.path) == path)
+        {
+            let as_note = notes::Note {
+                range: range.clone(),
+                path: path.clone(),
+                start: finding.start as usize,
+                end: finding.end as usize,
+                excerpt: finding.excerpt.clone().unwrap_or_default(),
+                ..notes::Note::default()
+            };
+            if let Some(span) = notes::relocate(&diff, &as_note).rows() {
+                spans.push(span);
             }
         }
         state.note_marks = std::rc::Rc::new(notes::marks(&diff, &spans));
@@ -608,7 +628,7 @@ impl ClaudhubApp {
     /// paste before you have seen what you just sent. The dialog is also what
     /// recalls what a request looks like — you add in one sentence what the
     /// notes do not say.
-    fn confirm_prompt(
+    pub(super) fn confirm_prompt(
         &mut self,
         worktree: PathBuf,
         ids: Vec<u64>,
@@ -786,6 +806,7 @@ impl ClaudhubApp {
         let todo = self.render_todo_section(cx);
         let journal = self.render_journal_section(cx);
         let notes = self.render_notes_section(cx);
+        let reviews = self.render_reviews_section(cx);
         let reviewed = self.render_reviewed_section(cx);
 
         v_flex()
@@ -811,6 +832,7 @@ impl ClaudhubApp {
                             .child(todo)
                             .child(journal)
                             .child(notes)
+                            .children(reviews)
                             .children(reviewed),
                         cx,
                     ),
@@ -886,7 +908,7 @@ impl ClaudhubApp {
     /// The collapse is **in memory** and is not persisted: it is a reading
     /// posture, which changes several times during a review, not a preference
     /// one expects back the next day.
-    fn section_header(
+    pub(super) fn section_header(
         &mut self,
         key: &'static str,
         glyph: &'static str,
@@ -938,7 +960,7 @@ impl ClaudhubApp {
             )
     }
 
-    fn collapsed(&self, key: &'static str) -> bool {
+    pub(super) fn collapsed(&self, key: &'static str) -> bool {
         self.notes_collapsed.contains(key)
     }
 

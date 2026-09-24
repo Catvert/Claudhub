@@ -625,6 +625,12 @@ worktree.
   condition** que le fichier soit toujours celui lu. La mise en page reste
   locale (`Store::home_places`, par chemin). Le worker crée la note — nom
   libre sur le disque, signée du `user.name` du checkout.
+- **Une revue est un nœud et ses remarques** (`### chemin:ligne`, lues par
+  `canvas::findings`) : résolues dans le fichier même, marquées dans la
+  gouttière du diff par la relocalisation des notes (`refresh_note_marks`) et
+  listées dans le panneau Notes — **jamais versées dans les notes**, que le
+  coffre recopie. Envoyées à l'agent, elles lui demandent de passer lui-même
+  la remarque `resolved` dans le fichier.
 - **Ce qu'un agent voit de son environnement** est une fiche Markdown
   (`ui::context`), réécrite à chaque relevé dans le coffre du worktree et
   annoncée par `$CLAUDHUB_CONTEXT` : base, commits, changements, agents,
