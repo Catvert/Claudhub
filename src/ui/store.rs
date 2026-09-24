@@ -39,6 +39,10 @@ pub struct WorktreeState {
     pub home_offset: Option<(f32, f32)>,
     /// The size the hand gave its card, when it gave one.
     pub home_size: Option<(f32, f32)>,
+    /// Its card folded to its head.
+    pub home_collapsed: bool,
+    /// Its card taken off the plane, with what hangs from it.
+    pub home_hidden: bool,
     /// The terminals that were open, in order, to open again — see
     /// `ui::revive`.
     pub terminals: Vec<SavedTerminal>,
@@ -251,6 +255,8 @@ pub struct RepoState {
     pub home_offset: Option<(f32, f32)>,
     /// The size the hand gave the git node, when it gave one.
     pub home_size: Option<(f32, f32)>,
+    /// The git node folded to its head.
+    pub home_collapsed: bool,
     /// **Legacy**: what a plugin had remembered about this repository, read
     /// once so `migrate_sentry` can pour Sentry's back into the field above,
     /// then cleared. Nothing writes it any more.
@@ -309,6 +315,8 @@ pub struct SavedTerminal {
     pub size: Option<(f32, f32)>,
     #[serde(default)]
     pub offset: Option<(f32, f32)>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// What starts a kept terminal again.
@@ -337,6 +345,8 @@ pub struct HomeNote {
     pub offset: Option<(f32, f32)>,
     #[serde(default)]
     pub size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// What a note hangs from: a repository's git node, or a worktree's card.

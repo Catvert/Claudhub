@@ -216,7 +216,7 @@ impl ClaudhubApp {
                     .collect(),
             })
             .collect();
-        overview::plan(&groups, &self.overview_moved, &self.overview_sizes)
+        overview::plan(&groups, &self.overview_hand)
     }
 
     fn overview_size(&self) -> (f32, f32) {
@@ -305,11 +305,7 @@ impl ClaudhubApp {
                     rem,
                     child: placed(view.screen(git.rect))
                         .child(self.render_git_node(&git.path, view.zoom, cx))
-                        .child(corner(
-                            cx.entity().downgrade(),
-                            Node::Git(git.path.clone()),
-                            cx,
-                        ))
+                        .children(self.corner_unless_folded(Node::Git(git.path.clone()), cx))
                         .into_any_element(),
                 }
                 .into_any_element()
@@ -323,11 +319,7 @@ impl ClaudhubApp {
                     rem,
                     child: placed(view.screen(card.rect))
                         .child(self.render_worktree_card(&card.path, view.zoom, cx))
-                        .child(corner(
-                            cx.entity().downgrade(),
-                            Node::Worktree(card.path.clone()),
-                            cx,
-                        ))
+                        .children(self.corner_unless_folded(Node::Worktree(card.path.clone()), cx))
                         .into_any_element(),
                 }
                 .into_any_element()
@@ -350,7 +342,7 @@ impl ClaudhubApp {
                     rem,
                     child: placed(view.screen(note.rect))
                         .child(self.render_home_note(note.id, view.zoom, cx))
-                        .child(corner(cx.entity().downgrade(), Node::Note(note.id), cx))
+                        .children(self.corner_unless_folded(Node::Note(note.id), cx))
                         .into_any_element(),
                 }
                 .into_any_element()
@@ -467,7 +459,7 @@ impl ClaudhubApp {
             Drag::Node(node, last) => {
                 let (dx, dy) = moved(last);
                 let zoom = self.overview_view.zoom;
-                let offset = self.overview_moved.entry(node.clone()).or_default();
+                let offset = self.overview_hand.moved.entry(node.clone()).or_default();
                 offset.0 += dx / zoom;
                 offset.1 += dy / zoom;
                 Drag::Node(node, at)
@@ -493,7 +485,11 @@ impl ClaudhubApp {
                             Node::Note(_) => (overview::NOTE, overview::MIN_NOTE),
                             _ => (overview::CARD, overview::MIN_CARD),
                         };
-                        let size = self.overview_sizes.entry(node.clone()).or_insert(default);
+                        let size = self
+                            .overview_hand
+                            .sizes
+                            .entry(node.clone())
+                            .or_insert(default);
                         *size = overview::resized(*size, delta, min);
                     }
                 }
@@ -530,11 +526,11 @@ impl ClaudhubApp {
         cx.notify();
         let (node, offset, size) = match drag {
             Drag::Node(node, _) => {
-                let offset = self.overview_moved.get(&node).copied();
+                let offset = self.overview_hand.moved.get(&node).copied();
                 (node, offset, None)
             }
             Drag::Resize(node, _) => {
-                let size = self.overview_sizes.get(&node).copied();
+                let size = self.overview_hand.sizes.get(&node).copied();
                 (node, None, size)
             }
             Drag::Plane(_) | Drag::Thumb(..) => return,
@@ -579,27 +575,47 @@ impl ClaudhubApp {
         let remembered = store
             .repos
             .iter()
-            .map(|(main, repo)| (Node::Git(main.clone()), repo.home_offset, repo.home_size))
+            .map(|(main, repo)| {
+                (
+                    Node::Git(main.clone()),
+                    repo.home_offset,
+                    repo.home_size,
+                    repo.home_collapsed,
+                    false,
+                )
+            })
             .chain(store.worktrees.iter().map(|(path, worktree)| {
                 (
                     Node::Worktree(path.clone()),
                     worktree.home_offset,
                     worktree.home_size,
+                    worktree.home_collapsed,
+                    worktree.home_hidden,
                 )
             }))
-            .chain(
-                store
-                    .home_notes
-                    .iter()
-                    .map(|note| (Node::Note(note.id), note.offset, note.size)),
-            )
+            .chain(store.home_notes.iter().map(|note| {
+                (
+                    Node::Note(note.id),
+                    note.offset,
+                    note.size,
+                    note.collapsed,
+                    false,
+                )
+            }))
             .collect::<Vec<_>>();
-        for (node, offset, size) in remembered {
+        let hand = &mut self.overview_hand;
+        for (node, offset, size, collapsed, hidden) in remembered {
             if let Some(offset) = offset {
-                self.overview_moved.insert(node.clone(), offset);
+                hand.moved.insert(node.clone(), offset);
             }
             if let Some(size) = size {
-                self.overview_sizes.insert(node, size);
+                hand.sizes.insert(node.clone(), size);
+            }
+            if collapsed {
+                hand.collapsed.insert(node.clone());
+            }
+            if hidden {
+                hand.hidden.insert(node);
             }
         }
     }
@@ -624,9 +640,22 @@ impl ClaudhubApp {
             .chain(plan.tiles.iter().map(|tile| Node::Terminal(tile.id)))
             .chain(plan.notes.iter().map(|note| Node::Note(note.id)))
             .collect();
+        // And what was taken off the plane comes back: a hidden worktree is
+        // in no plan to be read from, so it is found among the repositories.
+        let hidden: Vec<Node> = self
+            .overview_repos()
+            .into_iter()
+            .flat_map(|repo| repo.worktrees.iter())
+            .map(|worktree| Node::Worktree(worktree.path.clone()))
+            .filter(|node| self.overview_hand.hidden.contains(node))
+            .collect();
+        let nodes: Vec<Node> = nodes.into_iter().chain(hidden).collect();
+        self.overview_maximized = None;
         for node in &nodes {
-            self.overview_moved.remove(node);
-            self.overview_sizes.remove(node);
+            self.overview_hand.moved.remove(node);
+            self.overview_hand.sizes.remove(node);
+            self.overview_hand.collapsed.remove(node);
+            self.overview_hand.hidden.remove(node);
             if let Node::Terminal(id) = node {
                 if let Some(terminal) = self
                     .terminals
@@ -644,18 +673,22 @@ impl ClaudhubApp {
                         if let Some(repo) = store.repos.get_mut(main) {
                             repo.home_offset = None;
                             repo.home_size = None;
+                            repo.home_collapsed = false;
                         }
                     }
                     Node::Worktree(path) => {
                         if let Some(worktree) = store.worktrees.get_mut(path) {
                             worktree.home_offset = None;
                             worktree.home_size = None;
+                            worktree.home_collapsed = false;
+                            worktree.home_hidden = false;
                         }
                     }
                     Node::Note(id) => {
                         if let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) {
                             note.offset = None;
                             note.size = None;
+                            note.collapsed = false;
                         }
                     }
                     Node::Terminal(_) => {}
@@ -1025,7 +1058,9 @@ impl ClaudhubApp {
                     }
                 }),
             )
-            .child(head)
+            .child(head.when(detail, |el| {
+                el.child(self.window_controls(Node::Git(main.to_path_buf()), cx))
+            }))
             .child(
                 v_flex()
                     .flex_1()
@@ -1293,7 +1328,9 @@ impl ClaudhubApp {
                     }
                 }),
             )
-            .child(head)
+            .child(head.when(detail, |el| {
+                el.child(self.window_controls(Node::Worktree(path.to_path_buf()), cx))
+            }))
             .child(
                 v_flex()
                     .flex_1()
@@ -1327,6 +1364,10 @@ impl ClaudhubApp {
             .clone()
             .unwrap_or_else(|| view.read(cx).label());
         let detail = zoom >= DETAIL;
+        let folded = self
+            .overview_hand
+            .collapsed
+            .contains(&Node::Terminal(id.as_u64()));
         let worktree = terminal.worktree.clone();
         let go = terminal.worktree.clone();
         let agent = self.agents.get(&terminal.worktree).cloned();
@@ -1391,10 +1432,14 @@ impl ClaudhubApp {
                         .rounded(theme.radius_lg)
                         .overflow_hidden()
                         .bg(theme.background)
-                        .child(head)
+                        .child(head.when(detail, |el| {
+                            el.child(self.window_controls(Node::Terminal(id.as_u64()), cx))
+                        }))
                         // `v_flex` and not `div`: a `div` is a block, and the
                         // terminal's `size_full` of an undefined height is zero.
-                        .child(v_flex().flex_1().min_h_0().child(view)),
+                        .when(!folded, |el| {
+                            el.child(v_flex().flex_1().min_h_0().child(view))
+                        }),
                 )
                 // The outline on top rather than as the box's border: a
                 // border takes its pixel from the terminal's room, and the
@@ -1407,11 +1452,7 @@ impl ClaudhubApp {
                         .border_1()
                         .border_color(if focused { theme.ring } else { theme.border }),
                 )
-                .child(corner(
-                    cx.entity().downgrade(),
-                    Node::Terminal(id.as_u64()),
-                    cx,
-                ))
+                .children(self.corner_unless_folded(Node::Terminal(id.as_u64()), cx))
                 .into_any_element(),
         }
         .into_any_element()
@@ -1624,6 +1665,221 @@ fn grab(
     }
 }
 
+impl ClaudhubApp {
+    /// A node's grip, unless the node is folded to its head: a folded node
+    /// has no size to drag.
+    fn corner_unless_folded(
+        &self,
+        node: Node,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Stateful<gpui_kit::Div>> {
+        (!self.overview_hand.collapsed.contains(&node))
+            .then(|| corner(cx.entity().downgrade(), node, cx))
+    }
+
+    /// A window's three buttons, at the end of a node's head: fold to the
+    /// head, maximise, close. The git node has no cross — it is the tree's
+    /// root, and a plane without it would be a plane without a project.
+    fn window_controls(&self, node: Node, cx: &mut Context<Self>) -> impl IntoElement {
+        let folded = self.overview_hand.collapsed.contains(&node);
+        let maximized = self
+            .overview_maximized
+            .as_ref()
+            .is_some_and(|(shown, _)| *shown == node);
+        let closable = !matches!(node, Node::Git(_));
+        let key = format!("{node:?}");
+        let (fold, grow, close) = (node.clone(), node.clone(), node);
+        h_flex()
+            .flex_none()
+            .ml_1()
+            .gap_0p5()
+            .child(
+                Button::new(SharedString::from(format!("overview-fold-{key}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon(if folded { "chevron-down" } else { "minus" }))
+                    .tooltip(if folded {
+                        tr!("overview-unfold")
+                    } else {
+                        tr!("overview-fold")
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(&fold, cx))),
+            )
+            .child(
+                Button::new(SharedString::from(format!("overview-grow-{key}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon(if maximized { "minimize" } else { "maximize" }))
+                    .tooltip(if maximized {
+                        tr!("overview-unmaximize")
+                    } else {
+                        tr!("overview-maximize")
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_maximize(&grow, window, cx)
+                    })),
+            )
+            .when(closable, |el| {
+                el.child(
+                    Button::new(SharedString::from(format!("overview-close-{key}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("x"))
+                        .tooltip(match close {
+                            Node::Worktree(_) => tr!("overview-hide"),
+                            Node::Note(_) => tr!("overview-note-delete"),
+                            _ => tr!("overview-close"),
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_node(&close, window, cx)
+                        })),
+                )
+            })
+    }
+
+    /// Folds a node to its head, or unfolds it.
+    fn toggle_fold(&mut self, node: &Node, cx: &mut Context<Self>) {
+        if !self.overview_hand.collapsed.remove(node) {
+            self.overview_hand.collapsed.insert(node.clone());
+        }
+        self.remember_folds(node, cx);
+        cx.notify();
+    }
+
+    /// Makes a node take nine tenths of the screen, or gives back the view
+    /// from before — the view, not a node's place: maximising moves nothing
+    /// on the plane, it looks closer.
+    fn toggle_maximize(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
+        let before = match self.overview_maximized.take() {
+            Some((shown, before)) if shown == *node => {
+                self.overview_view = before;
+                cx.notify();
+                return;
+            }
+            // Another node was maximised: the view to go back to is still
+            // the one before the first.
+            Some((_, before)) => before,
+            None => self.overview_view,
+        };
+        self.overview_maximized = Some((node.clone(), before));
+        if self.overview_hand.collapsed.remove(node) {
+            self.remember_folds(node, cx);
+        }
+        let plan = self.overview_plan(cx);
+        if let Some(rect) = plan.rect(node) {
+            self.overview_view = View::focus(rect, self.overview_size(), 0.9);
+        }
+        // A terminal maximised is one to type in.
+        if let Node::Terminal(id) = node {
+            if let Some(terminal) = self
+                .terminals
+                .iter()
+                .find(|t| t.view.entity_id().as_u64() == *id)
+            {
+                window.focus(&terminal.view.focus_handle(cx), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The cross: a terminal closed, a note deleted, a worktree taken off
+    /// the plane — each asked first.
+    fn close_node(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
+        match node {
+            Node::Git(_) => {}
+            Node::Note(id) => self.delete_home_note(*id, window, cx),
+            Node::Terminal(id) => {
+                let Some(terminal) = self
+                    .terminals
+                    .iter()
+                    .find(|t| t.view.entity_id().as_u64() == *id)
+                else {
+                    return;
+                };
+                let view = terminal.view.entity_id();
+                let label = terminal
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| terminal.view.read(cx).label());
+                let busy = terminal.view.read(cx).busy();
+                let entity = cx.entity();
+                window.open_dialog(cx, move |dialog, _, _| {
+                    let entity = entity.clone();
+                    dialog
+                        .title(tr!("overview-close-title"))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_sm().child(label.clone()))
+                                .when(busy, |el| {
+                                    el.child(div().text_xs().child(tr!("overview-close-busy")))
+                                }),
+                        )
+                        .overlay_closable(false)
+                        .close_button(false)
+                        .footer(super::dialogs::confirm())
+                        .on_ok(move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.close_terminal(view, window, cx));
+                            true
+                        })
+                });
+            }
+            Node::Worktree(path) => {
+                let node = node.clone();
+                let (repo, label) = self.project_label(path);
+                let name = match repo {
+                    Some(repo) => format!("{repo} · {label}"),
+                    None => label.to_string(),
+                };
+                let entity = cx.entity();
+                window.open_dialog(cx, move |dialog, _, _| {
+                    let (entity, node) = (entity.clone(), node.clone());
+                    dialog
+                        .title(tr!("overview-hide-title"))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_sm().child(SharedString::from(name.clone())))
+                                .child(div().text_xs().child(tr!("overview-hide-body"))),
+                        )
+                        .overlay_closable(false)
+                        .close_button(false)
+                        .footer(super::dialogs::confirm())
+                        .on_ok(move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.overview_hand.hidden.insert(node.clone());
+                                this.remember_folds(&node, cx);
+                                cx.notify();
+                            });
+                            true
+                        })
+                });
+            }
+        }
+    }
+
+    /// Writes what the hand folded or hid for one node back to the store.
+    /// A terminal's fold goes with the rest of it, in `persist_terminals`.
+    fn remember_folds(&self, node: &Node, cx: &mut Context<Self>) {
+        let folded = self.overview_hand.collapsed.contains(node);
+        let hidden = self.overview_hand.hidden.contains(node);
+        super::store::Store::update_global(cx, |store| match node {
+            Node::Git(main) => store.repos.entry(main.clone()).or_default().home_collapsed = folded,
+            Node::Worktree(path) => {
+                let state = store.worktrees.entry(path.clone()).or_default();
+                state.home_collapsed = folded;
+                state.home_hidden = hidden;
+            }
+            Node::Note(id) => {
+                if let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) {
+                    note.collapsed = folded;
+                }
+            }
+            Node::Terminal(_) => {}
+        });
+    }
+}
+
 /// The `+ note` of a git node's or a card's head.
 fn note_button(app: WeakEntity<ClaudhubApp>, anchor: super::store::HomeAnchor) -> Button {
     let id = SharedString::from(format!("overview-add-note-{anchor:?}"));
@@ -1663,6 +1919,7 @@ impl ClaudhubApp {
                 text: String::new(),
                 offset: None,
                 size: None,
+                collapsed: false,
             });
         });
         self.overview_reveal = Some(Node::Note(id));
@@ -1729,8 +1986,8 @@ impl ClaudhubApp {
                 .on_ok(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
                         this.note_editors.remove(&id);
-                        this.overview_moved.remove(&Node::Note(id));
-                        this.overview_sizes.remove(&Node::Note(id));
+                        this.overview_hand.moved.remove(&Node::Note(id));
+                        this.overview_hand.sizes.remove(&Node::Note(id));
                         super::store::Store::update_global(cx, |store| {
                             store.home_notes.retain(|note| note.id != id);
                         });
@@ -1861,7 +2118,9 @@ impl ClaudhubApp {
             .bg(theme.background)
             // A note is written in and read, not dragged by its body.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(head)
+            .child(head.when(detail, |el| {
+                el.child(self.window_controls(Node::Note(id), cx))
+            }))
             .child(body)
             .into_any_element()
     }

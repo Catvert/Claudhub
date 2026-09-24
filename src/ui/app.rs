@@ -1074,10 +1074,11 @@ pub struct ClaudhubApp {
     /// What the pointer is dragging on the home screen, and where it was at
     /// the last step.
     pub(super) overview_drag: Option<crate::ui::overview_view::Drag>,
-    /// The nodes moved by hand, as offsets from where the layout puts them.
-    pub(super) overview_moved: crate::ui::overview::Moved,
-    /// The git nodes and worktree cards resized by hand.
-    pub(super) overview_sizes: crate::ui::overview::Sizes,
+    /// What the hand decided on the plane: nodes moved, resized, folded,
+    /// hidden — see `overview::Hand`.
+    pub(super) overview_hand: crate::ui::overview::Hand,
+    /// The node maximised, and the view to go back to.
+    pub(super) overview_maximized: Option<(crate::ui::overview::Node, crate::ui::overview::View)>,
     /// True while the commit sheet is open: a commit that lands then closes
     /// it — see `overview_view::CommitSheet`.
     pub(super) commit_sheet: bool,
@@ -1549,8 +1550,8 @@ impl ClaudhubApp {
             overview_viewport: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
             overview_fitted: false,
             overview_drag: None,
-            overview_moved: crate::ui::overview::Moved::new(),
-            overview_sizes: crate::ui::overview::Sizes::new(),
+            overview_hand: crate::ui::overview::Hand::default(),
+            overview_maximized: None,
             commit_sheet: false,
             note_editors: HashMap::new(),
             terminals_revived: std::collections::HashSet::new(),

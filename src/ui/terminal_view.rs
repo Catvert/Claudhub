@@ -2548,8 +2548,14 @@ impl ClaudhubApp {
                     opened.size = size;
                 }
                 let id = opened.view.entity_id().as_u64();
+                if kept.collapsed {
+                    self.overview_hand
+                        .collapsed
+                        .insert(crate::ui::overview::Node::Terminal(id));
+                }
                 if let Some(offset) = kept.offset {
-                    self.overview_moved
+                    self.overview_hand
+                        .moved
                         .insert(crate::ui::overview::Node::Terminal(id), offset);
                 }
             }
@@ -2583,9 +2589,14 @@ impl ClaudhubApp {
                 right: terminal.view_name == crate::ui::panels::TerminalPanel::RIGHT,
                 size: Some(terminal.size),
                 offset: self
-                    .overview_moved
+                    .overview_hand
+                    .moved
                     .get(&crate::ui::overview::Node::Terminal(id))
                     .copied(),
+                collapsed: self
+                    .overview_hand
+                    .collapsed
+                    .contains(&crate::ui::overview::Node::Terminal(id)),
             });
         }
         crate::ui::store::Store::update_global_if(cx, |store| {

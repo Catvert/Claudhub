@@ -618,6 +618,12 @@ worktree.
   enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
   commit du panneau des changements elle-même — même champ, même brouillon.
   Le commit réussi la referme (`commit_sheet`).
+- **Chaque nœud a les trois boutons d'une fenêtre** : replier jusqu'à l'en-tête
+  (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — un **zoom** à
+  90 % de l'écran (`View::focus`), la vue d'avant rendue au second clic, rien
+  ne bouge sur le plan —, et une croix toujours confirmée : un terminal fermé,
+  une note supprimée, un worktree **retiré du plan** avec ce qui en pend
+  (`Hand::hidden`), jamais supprimé ; le nœud git n'en a pas.
 - **Un lien part du côté qui fait face à l'enfant** (`overview::attach`) :
   en dessous tant que l'arbre est tel qu'il l'a posé, par le flanc dès qu'on a
   traîné l'enfant à côté — l'axe où les deux nœuds sont le plus écartés décide.

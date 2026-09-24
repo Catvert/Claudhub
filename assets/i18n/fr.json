@@ -964,5 +964,15 @@
   "overview-note-delete": "Supprimer la note",
   "overview-note-delete-title": "Supprimer cette note ?",
   "overview-note-delete-body": "Son texte n'est gardé nulle part ailleurs.",
-  "overview-note-empty": "Note vide — double-cliquez pour écrire, en Markdown."
+  "overview-note-empty": "Note vide — double-cliquez pour écrire, en Markdown.",
+  "overview-fold": "Replier",
+  "overview-unfold": "Déplier",
+  "overview-maximize": "Agrandir",
+  "overview-unmaximize": "Revenir à la vue d'avant",
+  "overview-close": "Fermer",
+  "overview-hide": "Retirer du plan",
+  "overview-close-title": "Fermer ce terminal ?",
+  "overview-close-busy": "Une commande y tourne encore : elle sera arrêtée.",
+  "overview-hide-title": "Retirer ce worktree du plan ?",
+  "overview-hide-body": "Le worktree n'est pas supprimé et ses terminaux continuent de tourner. « Réinitialiser » le fait revenir."
 }

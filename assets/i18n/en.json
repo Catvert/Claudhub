@@ -964,5 +964,15 @@
   "overview-note-delete": "Delete the note",
   "overview-note-delete-title": "Delete this note?",
   "overview-note-delete-body": "Its text is kept nowhere else.",
-  "overview-note-empty": "Empty note — double-click to write, in Markdown."
+  "overview-note-empty": "Empty note — double-click to write, in Markdown.",
+  "overview-fold": "Fold",
+  "overview-unfold": "Unfold",
+  "overview-maximize": "Maximise",
+  "overview-unmaximize": "Back to the view before",
+  "overview-close": "Close",
+  "overview-hide": "Take off the plane",
+  "overview-close-title": "Close this terminal?",
+  "overview-close-busy": "A command is still running in it: it will be stopped.",
+  "overview-hide-title": "Take this worktree off the plane?",
+  "overview-hide-body": "The worktree is not deleted and its terminals keep running. “Reset” brings it back."
 }

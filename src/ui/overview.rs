@@ -21,7 +21,7 @@
 //!
 //! Pure: the view hands in what is open, this says where it goes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A worktree's card, in plane units — pixels at a zoom of one.
@@ -130,6 +130,19 @@ pub type Moved = HashMap<Node, (f32, f32)>;
 /// The sizes the hand has given git nodes, worktree cards and notes; a
 /// terminal carries its own.
 pub type Sizes = HashMap<Node, (f32, f32)>;
+
+/// Everything the hand has decided about the plane, over what the tree
+/// would do by itself.
+#[derive(Debug, Clone, Default)]
+pub struct Hand {
+    pub moved: Moved,
+    pub sizes: Sizes,
+    /// Folded to their head, like a minimised window: what hangs from them
+    /// comes up under the head.
+    pub collapsed: HashSet<Node>,
+    /// Taken off the plane with everything that hangs from them.
+    pub hidden: HashSet<Node>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -363,7 +376,8 @@ struct Branch {
 }
 
 /// A repository's tree: index 0 is the git node.
-fn tree(group: &Group, sizes: &Sizes) -> Vec<Branch> {
+fn tree(group: &Group, hand: &Hand) -> Vec<Branch> {
+    let sizes = &hand.sizes;
     let size = |node: &Node, default: (f32, f32)| sizes.get(node).copied().unwrap_or(default);
     let main = group.main.to_path_buf();
     let git = Node::Git(main.clone());
@@ -399,6 +413,7 @@ fn tree(group: &Group, sizes: &Sizes) -> Vec<Branch> {
     // guesses left unreached — hangs from the git node.
     let parents = parents(&group.checkouts);
     let mut placed: Vec<Option<usize>> = vec![None; group.checkouts.len()];
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         checkout: usize,
         parent: usize,
@@ -407,6 +422,7 @@ fn tree(group: &Group, sizes: &Sizes) -> Vec<Branch> {
         placed: &mut Vec<Option<usize>>,
         nodes: &mut Vec<Branch>,
         sizes: &Sizes,
+        hidden: &HashSet<Node>,
     ) {
         if placed[checkout].is_some() {
             return;
@@ -414,6 +430,25 @@ fn tree(group: &Group, sizes: &Sizes) -> Vec<Branch> {
         let this = &group.checkouts[checkout];
         let path = this.path.to_path_buf();
         let node = Node::Worktree(path.clone());
+        // Hidden, it goes with everything under it: its branches are marked
+        // placed, so the pass that rescues the unreached does not bring them
+        // back as roots.
+        if hidden.contains(&node) {
+            fn drop_under(
+                checkout: usize,
+                parents: &[Option<usize>],
+                placed: &mut [Option<usize>],
+            ) {
+                placed[checkout] = Some(usize::MAX);
+                for child in (0..parents.len()).filter(|&c| parents[c] == Some(checkout)) {
+                    if placed[child].is_none() {
+                        drop_under(child, parents, placed);
+                    }
+                }
+            }
+            drop_under(checkout, parents, placed);
+            return;
+        }
         let kind = if parent == 0 {
             LinkKind::Root
         } else {
@@ -453,14 +488,40 @@ fn tree(group: &Group, sizes: &Sizes) -> Vec<Branch> {
             nodes[index].children.push(child);
         }
         for child in (0..parents.len()).filter(|&c| parents[c] == Some(checkout)) {
-            visit(child, index, group, parents, placed, nodes, sizes);
+            visit(child, index, group, parents, placed, nodes, sizes, hidden);
         }
     }
+    let hidden = &hand.hidden;
     for root in (0..parents.len()).filter(|&c| parents[c].is_none()) {
-        visit(root, 0, group, &parents, &mut placed, &mut nodes, sizes);
+        visit(
+            root,
+            0,
+            group,
+            &parents,
+            &mut placed,
+            &mut nodes,
+            sizes,
+            hidden,
+        );
     }
     for checkout in 0..parents.len() {
-        visit(checkout, 0, group, &parents, &mut placed, &mut nodes, sizes);
+        visit(
+            checkout,
+            0,
+            group,
+            &parents,
+            &mut placed,
+            &mut nodes,
+            sizes,
+            hidden,
+        );
+    }
+    // A folded node keeps its width and gives its height back: the level
+    // under it comes up.
+    for branch in &mut nodes {
+        if hand.collapsed.contains(&branch.node) {
+            branch.size.1 = HEAD;
+        }
     }
     nodes
 }
@@ -504,12 +565,13 @@ fn levels(nodes: &[Branch]) -> (Vec<usize>, Vec<f32>) {
     (depth, heights)
 }
 
-pub fn plan(groups: &[Group], moved: &Moved, sizes: &Sizes) -> Plan {
+pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
+    let moved = &hand.moved;
     let mut plan = Plan::default();
     let mut bounds: Option<Rect> = None;
     let mut left = 0.;
     for group in groups {
-        let nodes = tree(group, sizes);
+        let nodes = tree(group, hand);
         let widths = widths(&nodes);
         let (depth, heights) = levels(&nodes);
         let tops: Vec<f32> = heights
@@ -679,6 +741,24 @@ impl View {
         }
     }
 
+    /// The zoom and pan that make `rect` take `share` of the viewport, centred
+    /// — a node maximised, like a window.
+    pub fn focus(rect: Rect, viewport: (f32, f32), share: f32) -> View {
+        if rect.w <= 0. || rect.h <= 0. || viewport.0 <= 0. {
+            return View::default();
+        }
+        let zoom = (viewport.0 * share / rect.w)
+            .min(viewport.1 * share / rect.h)
+            .clamp(MIN_ZOOM, MAX_ZOOM);
+        View {
+            zoom,
+            pan: (
+                viewport.0 / 2. - (rect.x + rect.w / 2.) * zoom,
+                viewport.1 / 2. - (rect.y + rect.h / 2.) * zoom,
+            ),
+        }
+    }
+
     /// The least move that brings `rect` into view, at the same zoom. What
     /// does not fit shows its top-left corner: a terminal's head and its
     /// first lines are what one came to.
@@ -770,11 +850,7 @@ mod tests {
         main.terminals = vec![(7, Tile::Small.size())];
         let mut feature = checkout("/r-a", "feature", false, Some("main"));
         feature.terminals = vec![(8, Tile::Large.size())];
-        let plan = plan(
-            &[group("/r", vec![main, feature])],
-            &Moved::new(),
-            &Sizes::new(),
-        );
+        let plan = plan(&[group("/r", vec![main, feature])], &Hand::default());
 
         let git = plan.gits[0].rect;
         let main = plan.card(Path::new("/r")).unwrap();
@@ -854,12 +930,18 @@ mod tests {
         main.terminals = vec![(7, Tile::Small.size())];
         let other = checkout("/r-a", "feature", false, Some("main"));
         let groups = [group("/r", vec![main, other])];
-        let before = plan(&groups, &Moved::new(), &Sizes::new());
+        let before = plan(&groups, &Hand::default());
         let moved = Moved::from([
             (Node::Worktree(PathBuf::from("/r")), (500., 40.)),
             (Node::Terminal(7), (0., 100.)),
         ]);
-        let after = plan(&groups, &moved, &Sizes::new());
+        let after = plan(
+            &groups,
+            &Hand {
+                moved,
+                ..Hand::default()
+            },
+        );
         let card = |p: &Plan, path: &str| p.card(Path::new(path)).unwrap();
         assert_eq!(card(&after, "/r").x, card(&before, "/r").x + 500.);
         // The terminal and the branch under it follow, plus their own offset.
@@ -875,17 +957,86 @@ mod tests {
         let mut main = checkout("/r", "main", true, None);
         main.terminals = vec![(7, Tile::Small.size())];
         let groups = [group("/r", vec![main])];
-        let before = plan(&groups, &Moved::new(), &Sizes::new());
+        let before = plan(&groups, &Hand::default());
         let sizes = Sizes::from([(Node::Worktree(PathBuf::from("/r")), (CARD.0, CARD.1 + 100.))]);
-        let after = plan(&groups, &Moved::new(), &sizes);
+        let after = plan(
+            &groups,
+            &Hand {
+                sizes,
+                ..Hand::default()
+            },
+        );
         assert_eq!(after.tile(7).unwrap().y, before.tile(7).unwrap().y + 100.);
+    }
+
+    #[test]
+    fn a_folded_node_keeps_its_head_and_brings_the_next_level_up() {
+        let mut main = checkout("/r", "main", true, None);
+        main.terminals = vec![(7, Tile::Small.size())];
+        let groups = [group("/r", vec![main])];
+        let before = plan(&groups, &Hand::default());
+        let folded = Hand {
+            collapsed: HashSet::from([Node::Worktree(PathBuf::from("/r"))]),
+            ..Hand::default()
+        };
+        let after = plan(&groups, &folded);
+        let card = after.card(Path::new("/r")).unwrap();
+        assert_eq!((card.w, card.h), (CARD.0, HEAD));
+        assert_eq!(
+            after.tile(7).unwrap().y,
+            before.tile(7).unwrap().y - (CARD.1 - HEAD)
+        );
+    }
+
+    #[test]
+    fn a_hidden_worktree_goes_with_everything_under_it() {
+        let mut feature = checkout("/r-a", "feature", false, Some("main"));
+        feature.terminals = vec![(7, Tile::Small.size())];
+        let fix = checkout("/r-b", "fix", false, Some("feature"));
+        let groups = [group(
+            "/r",
+            vec![checkout("/r", "main", true, None), feature, fix],
+        )];
+        let hand = Hand {
+            hidden: HashSet::from([Node::Worktree(PathBuf::from("/r-a"))]),
+            ..Hand::default()
+        };
+        let plan = plan(&groups, &hand);
+        // Its terminal and the branch cut from it went with it, rather than
+        // coming back as roots under the git node.
+        assert_eq!(plan.cards.len(), 1);
+        assert!(plan.tile(7).is_none());
+    }
+
+    #[test]
+    fn maximising_fills_nine_tenths_of_the_screen_around_the_node() {
+        let rect = Rect {
+            x: 1000.,
+            y: 500.,
+            w: 400.,
+            h: 200.,
+        };
+        let view = View::focus(rect, (1000., 1000.), 0.9);
+        assert_eq!(view.zoom, 2.);
+        let shown = view.screen(rect);
+        assert_eq!(
+            (shown.x + shown.w / 2., shown.y + shown.h / 2.),
+            (500., 500.)
+        );
+        // A tall one: its height is what fills.
+        let tall = Rect {
+            w: 100.,
+            h: 900.,
+            ..rect
+        };
+        assert_eq!(View::focus(tall, (1000., 1000.), 0.9).zoom, 1.);
     }
 
     #[test]
     fn notes_hang_from_the_git_node_beside_the_main_checkout() {
         let mut groups = [group("/r", vec![checkout("/r", "main", true, None)])];
         groups[0].notes = vec![4];
-        let plan = plan(&groups, &Moved::new(), &Sizes::new());
+        let plan = plan(&groups, &Hand::default());
         let note = plan.note(4).unwrap();
         let main = plan.card(Path::new("/r")).unwrap();
         assert_eq!(note.y, main.y);
@@ -900,7 +1051,7 @@ mod tests {
             checkout("/a", "one", false, Some("two")),
             checkout("/b", "two", false, Some("one")),
         ];
-        let plan = plan(&[group("/r", checkouts)], &Moved::new(), &Sizes::new());
+        let plan = plan(&[group("/r", checkouts)], &Hand::default());
         assert_eq!(plan.cards.len(), 2);
     }
 
@@ -911,8 +1062,7 @@ mod tests {
                 group("/a", vec![checkout("/a", "main", true, None)]),
                 group("/b", vec![checkout("/b", "main", true, None)]),
             ],
-            &Moved::new(),
-            &Sizes::new(),
+            &Hand::default(),
         );
         assert_eq!(plan.gits[1].rect.x, GIT.0 + GROUP_GAP);
         assert_eq!(plan.gits[1].rect.y, 0.);
