@@ -950,8 +950,19 @@
   "overview-recent": "Derniers commits",
   "overview-tile-size": "Taille de la carte",
   "overview-all-projects": "Tous les projets",
-  "overview-tidy": "Remettre en ordre",
   "overview-fetch": "Récupérer (fetch)",
   "overview-branches": "%{local} branche(s) locale(s) · %{remote} distante(s)",
-  "overview-idle-branches": "Sans worktree :"
+  "overview-idle-branches": "Sans worktree :",
+  "overview-commit": "Valider…",
+  "overview-commit-title": "Valider — %{name}",
+  "overview-reset": "Réinitialiser",
+  "overview-reset-hint": "Remettre chaque nœud à sa place et à sa taille, puis tout recentrer",
+  "overview-note": "Note",
+  "overview-note-add": "Ajouter une note",
+  "overview-note-edit": "Modifier",
+  "overview-note-done": "Terminer",
+  "overview-note-delete": "Supprimer la note",
+  "overview-note-delete-title": "Supprimer cette note ?",
+  "overview-note-delete-body": "Son texte n'est gardé nulle part ailleurs.",
+  "overview-note-empty": "Note vide — double-cliquez pour écrire, en Markdown."
 }

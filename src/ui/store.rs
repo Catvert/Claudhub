@@ -37,6 +37,8 @@ pub struct WorktreeState {
     /// Where the hand moved this worktree's card on the home screen, as an
     /// offset from where the layout puts it — see `ui::overview`.
     pub home_offset: Option<(f32, f32)>,
+    /// The size the hand gave its card, when it gave one.
+    pub home_size: Option<(f32, f32)>,
     /// The main repository this checkout belongs to.
     ///
     /// It only serves the purge, and is indispensable to it: without it, an
@@ -244,6 +246,8 @@ pub struct RepoState {
     /// Where the hand moved the repository's git node on the home screen, as
     /// an offset from where the layout puts it.
     pub home_offset: Option<(f32, f32)>,
+    /// The size the hand gave the git node, when it gave one.
+    pub home_size: Option<(f32, f32)>,
     /// **Legacy**: what a plugin had remembered about this repository, read
     /// once so `migrate_sentry` can pour Sentry's back into the field above,
     /// then cleared. Nothing writes it any more.
@@ -279,6 +283,31 @@ pub struct Store {
     /// be forgotten. What `forget_missing` drops is a checkout git has just
     /// said is gone.
     pub pinned: Vec<PathBuf>,
+    /// The Markdown notes on the home screen, every repository together —
+    /// see `ui::overview_view`.
+    pub home_notes: Vec<HomeNote>,
+}
+
+/// A Markdown note on the home screen's plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HomeNote {
+    /// Unique among the notes, never reused while the note lives.
+    pub id: u64,
+    pub anchor: HomeAnchor,
+    pub text: String,
+    /// Where the hand moved it, as an offset from where the tree puts it.
+    #[serde(default)]
+    pub offset: Option<(f32, f32)>,
+    #[serde(default)]
+    pub size: Option<(f32, f32)>,
+}
+
+/// What a note hangs from: a repository's git node, or a worktree's card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HomeAnchor {
+    /// By the repository's main path.
+    Repo(PathBuf),
+    Worktree(PathBuf),
 }
 
 impl Store {

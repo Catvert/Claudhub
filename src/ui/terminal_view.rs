@@ -1808,11 +1808,11 @@ pub struct OpenTerminal {
     /// there one below?" holds a `&self` on the application, and reading an
     /// entity from there is one borrow too many.
     pub view_name: &'static str,
-    /// Its card's size on the home screen.
+    /// Its card's size on the home screen, in plane units.
     ///
     /// Here and not in a map keyed by the view: a terminal that closes takes
     /// its size with it, and there is nothing to sweep.
-    pub tile: crate::ui::overview::Tile,
+    pub size: (f32, f32),
 }
 
 impl OpenTerminal {}
@@ -2016,7 +2016,7 @@ impl ClaudhubApp {
             name: None,
             panel: panel.clone(),
             view_name,
-            tile: crate::ui::overview::Tile::default(),
+            size: crate::ui::overview::Tile::default().size(),
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);

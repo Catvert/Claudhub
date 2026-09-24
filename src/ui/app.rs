@@ -1076,6 +1076,16 @@ pub struct ClaudhubApp {
     pub(super) overview_drag: Option<crate::ui::overview_view::Drag>,
     /// The nodes moved by hand, as offsets from where the layout puts them.
     pub(super) overview_moved: crate::ui::overview::Moved,
+    /// The git nodes and worktree cards resized by hand.
+    pub(super) overview_sizes: crate::ui::overview::Sizes,
+    /// True while the commit sheet is open: a commit that lands then closes
+    /// it — see `overview_view::CommitSheet`.
+    pub(super) commit_sheet: bool,
+    /// The home screen's notes being edited, each with its field and the
+    /// subscription that writes it back to the store.
+    pub(super) note_editors: HashMap<u64, (Entity<EditorState>, gpui_kit::Subscription)>,
+    /// A node to bring into view on the next frame — one just created.
+    pub(super) overview_reveal: Option<crate::ui::overview::Node>,
     /// True once the places remembered in the store have been read into
     /// `overview_moved`.
     pub(super) overview_loaded: bool,
@@ -1536,6 +1546,10 @@ impl ClaudhubApp {
             overview_fitted: false,
             overview_drag: None,
             overview_moved: crate::ui::overview::Moved::new(),
+            overview_sizes: crate::ui::overview::Sizes::new(),
+            commit_sheet: false,
+            note_editors: HashMap::new(),
+            overview_reveal: None,
             overview_loaded: false,
             overview_all: false,
             overview_repo: None,
@@ -3077,6 +3091,11 @@ impl ClaudhubApp {
                 self.commit_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                 });
+                // The sheet was opened for this commit, and has done its work.
+                if self.commit_sheet {
+                    self.commit_sheet = false;
+                    window.close_dialog(cx);
+                }
             }
         }
         self.report(

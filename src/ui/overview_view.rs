@@ -27,7 +27,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
-    v_flex, ActiveTheme, Sizable as _,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Element, Focusable as _,
@@ -133,6 +133,8 @@ pub(super) enum Drag {
     Node(Node, gpui_kit::Point<Pixels>),
     /// A scrollbar's thumb.
     Thumb(Axis, gpui_kit::Point<Pixels>),
+    /// A node, by its bottom-right corner.
+    Resize(Node, gpui_kit::Point<Pixels>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,12 +176,21 @@ impl ClaudhubApp {
     }
 
     /// What the plane holds, laid out.
-    fn overview_plan(&self) -> Plan {
+    fn overview_plan(&self, cx: &App) -> Plan {
+        let notes = &super::store::Store::global(cx).home_notes;
+        let hung = |anchor: super::store::HomeAnchor| -> Vec<u64> {
+            notes
+                .iter()
+                .filter(|note| note.anchor == anchor)
+                .map(|note| note.id)
+                .collect()
+        };
         let groups: Vec<Group> = self
             .overview_repos()
             .into_iter()
             .map(|repo| Group {
                 main: &repo.main,
+                notes: hung(super::store::HomeAnchor::Repo(repo.main.clone())),
                 checkouts: repo
                     .worktrees
                     .iter()
@@ -198,13 +209,14 @@ impl ClaudhubApp {
                             .terminals
                             .iter()
                             .filter(|terminal| terminal.worktree == worktree.path)
-                            .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.tile))
+                            .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.size))
                             .collect(),
+                        notes: hung(super::store::HomeAnchor::Worktree(worktree.path.clone())),
                     })
                     .collect(),
             })
             .collect();
-        overview::plan(&groups, &self.overview_moved)
+        overview::plan(&groups, &self.overview_moved, &self.overview_sizes)
     }
 
     fn overview_size(&self) -> (f32, f32) {
@@ -218,7 +230,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let plan = self.overview_plan();
+        let plan = self.overview_plan(cx);
         let size = self.overview_size();
         // Everything in view the first time — and after picking another
         // project — once the canvas has a size: its first frame has none, and
@@ -241,10 +253,20 @@ impl ClaudhubApp {
             }
         }
         self.overview_seen = focused;
+        // A node just created — a note — is brought into view once the plan
+        // has a place for it.
+        if let Some(node) = self.overview_reveal.take() {
+            match plan.rect(&node) {
+                Some(rect) if size.0 > 0. => {
+                    self.overview_view = self.overview_view.reveal(rect, size);
+                }
+                _ => self.overview_reveal = Some(node),
+            }
+        }
         let view = self.overview_view;
         // Every terminal learns the zoom and its card's grid before it paints.
         for terminal in &self.terminals {
-            let (w, h) = terminal.tile.size();
+            let (w, h) = terminal.size;
             let canvas = Canvas {
                 zoom: view.zoom,
                 size: (w, h - overview::HEAD),
@@ -283,6 +305,11 @@ impl ClaudhubApp {
                     rem,
                     child: placed(view.screen(git.rect))
                         .child(self.render_git_node(&git.path, view.zoom, cx))
+                        .child(corner(
+                            cx.entity().downgrade(),
+                            Node::Git(git.path.clone()),
+                            cx,
+                        ))
                         .into_any_element(),
                 }
                 .into_any_element()
@@ -296,6 +323,11 @@ impl ClaudhubApp {
                     rem,
                     child: placed(view.screen(card.rect))
                         .child(self.render_worktree_card(&card.path, view.zoom, cx))
+                        .child(corner(
+                            cx.entity().downgrade(),
+                            Node::Worktree(card.path.clone()),
+                            cx,
+                        ))
                         .into_any_element(),
                 }
                 .into_any_element()
@@ -308,6 +340,20 @@ impl ClaudhubApp {
                 let id = terminal.view.entity_id();
                 let rect = plan.tile(id.as_u64())?;
                 Some(self.render_tile(terminal, view.screen(rect), rem, view.zoom, window, cx))
+            })
+            .collect();
+        let notes: Vec<AnyElement> = plan
+            .notes
+            .iter()
+            .map(|note| {
+                Scaled {
+                    rem,
+                    child: placed(view.screen(note.rect))
+                        .child(self.render_home_note(note.id, view.zoom, cx))
+                        .child(corner(cx.entity().downgrade(), Node::Note(note.id), cx))
+                        .into_any_element(),
+                }
+                .into_any_element()
             })
             .collect();
         let bars = self.render_scrollbars(&plan, view, size, cx);
@@ -374,6 +420,7 @@ impl ClaudhubApp {
             .child(links)
             .children(gits)
             .children(cards)
+            .children(notes)
             .children(tiles)
             .when(empty, |el| {
                 el.child(
@@ -425,9 +472,36 @@ impl ClaudhubApp {
                 offset.1 += dy / zoom;
                 Drag::Node(node, at)
             }
+            Drag::Resize(node, last) => {
+                let (dx, dy) = moved(last);
+                let zoom = self.overview_view.zoom;
+                let delta = (dx / zoom, dy / zoom);
+                match &node {
+                    Node::Terminal(id) => {
+                        if let Some(terminal) = self
+                            .terminals
+                            .iter_mut()
+                            .find(|t| t.view.entity_id().as_u64() == *id)
+                        {
+                            terminal.size =
+                                overview::resized(terminal.size, delta, overview::MIN_TILE);
+                        }
+                    }
+                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) => {
+                        let (default, min) = match node {
+                            Node::Git(_) => (overview::GIT, overview::MIN_GIT),
+                            Node::Note(_) => (overview::NOTE, overview::MIN_NOTE),
+                            _ => (overview::CARD, overview::MIN_CARD),
+                        };
+                        let size = self.overview_sizes.entry(node.clone()).or_insert(default);
+                        *size = overview::resized(*size, delta, min);
+                    }
+                }
+                Drag::Resize(node, at)
+            }
             Drag::Thumb(axis, last) => {
                 let (dx, dy) = moved(last);
-                let plan = self.overview_plan();
+                let plan = self.overview_plan(cx);
                 let bounds = self.overview_view.screen(plan.bounds);
                 let (w, h) = self.overview_size();
                 match axis {
@@ -454,20 +528,44 @@ impl ClaudhubApp {
             return;
         };
         cx.notify();
-        let Drag::Node(node, _) = drag else {
-            return;
-        };
-        let Some(offset) = self.overview_moved.get(&node).copied() else {
-            return;
-        };
-        super::store::Store::update_global(cx, |store| match &node {
-            Node::Git(main) => {
-                store.repos.entry(main.clone()).or_default().home_offset = Some(offset)
+        let (node, offset, size) = match drag {
+            Drag::Node(node, _) => {
+                let offset = self.overview_moved.get(&node).copied();
+                (node, offset, None)
             }
-            Node::Worktree(path) => {
-                store.worktrees.entry(path.clone()).or_default().home_offset = Some(offset)
+            Drag::Resize(node, _) => {
+                let size = self.overview_sizes.get(&node).copied();
+                (node, None, size)
             }
-            Node::Terminal(_) => {}
+            Drag::Plane(_) | Drag::Thumb(..) => return,
+        };
+        if offset.is_none() && size.is_none() {
+            return;
+        }
+        super::store::Store::update_global(cx, |store| {
+            let (home_offset, home_size) = match &node {
+                Node::Git(main) => {
+                    let repo = store.repos.entry(main.clone()).or_default();
+                    (&mut repo.home_offset, &mut repo.home_size)
+                }
+                Node::Worktree(path) => {
+                    let worktree = store.worktrees.entry(path.clone()).or_default();
+                    (&mut worktree.home_offset, &mut worktree.home_size)
+                }
+                Node::Note(id) => {
+                    let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) else {
+                        return;
+                    };
+                    (&mut note.offset, &mut note.size)
+                }
+                Node::Terminal(_) => return,
+            };
+            if offset.is_some() {
+                *home_offset = offset;
+            }
+            if size.is_some() {
+                *home_size = size;
+            }
         });
     }
 
@@ -478,55 +576,89 @@ impl ClaudhubApp {
         }
         self.overview_loaded = true;
         let store = super::store::Store::global(cx);
-        for (main, repo) in &store.repos {
-            if let Some(offset) = repo.home_offset {
-                self.overview_moved.insert(Node::Git(main.clone()), offset);
+        let remembered = store
+            .repos
+            .iter()
+            .map(|(main, repo)| (Node::Git(main.clone()), repo.home_offset, repo.home_size))
+            .chain(store.worktrees.iter().map(|(path, worktree)| {
+                (
+                    Node::Worktree(path.clone()),
+                    worktree.home_offset,
+                    worktree.home_size,
+                )
+            }))
+            .chain(
+                store
+                    .home_notes
+                    .iter()
+                    .map(|note| (Node::Note(note.id), note.offset, note.size)),
+            )
+            .collect::<Vec<_>>();
+        for (node, offset, size) in remembered {
+            if let Some(offset) = offset {
+                self.overview_moved.insert(node.clone(), offset);
             }
-        }
-        for (path, worktree) in &store.worktrees {
-            if let Some(offset) = worktree.home_offset {
-                self.overview_moved
-                    .insert(Node::Worktree(path.clone()), offset);
+            if let Some(size) = size {
+                self.overview_sizes.insert(node, size);
             }
         }
     }
 
-    /// Puts every node of the projects on show back where the layout wants it.
-    fn tidy_overview(&mut self, cx: &mut Context<Self>) {
-        let shown: Vec<(PathBuf, Vec<PathBuf>)> = self
-            .overview_repos()
-            .into_iter()
-            .map(|repo| {
-                (
-                    repo.main.clone(),
-                    repo.worktrees.iter().map(|w| w.path.clone()).collect(),
-                )
-            })
+    /// Puts every node of the projects on show back where the tree wants it,
+    /// at the size it starts at, and fits the whole in view.
+    ///
+    /// The projects on show and not every one: resetting what one is looking
+    /// at is the gesture, and another project's arrangement is not in sight
+    /// to be missed.
+    fn reset_overview(&mut self, cx: &mut Context<Self>) {
+        let plan = self.overview_plan(cx);
+        let nodes: Vec<Node> = plan
+            .gits
+            .iter()
+            .map(|git| Node::Git(git.path.clone()))
+            .chain(
+                plan.cards
+                    .iter()
+                    .map(|card| Node::Worktree(card.path.clone())),
+            )
+            .chain(plan.tiles.iter().map(|tile| Node::Terminal(tile.id)))
+            .chain(plan.notes.iter().map(|note| Node::Note(note.id)))
             .collect();
-        for (main, worktrees) in &shown {
-            self.overview_moved.remove(&Node::Git(main.clone()));
-            for path in worktrees {
-                self.overview_moved.remove(&Node::Worktree(path.clone()));
+        for node in &nodes {
+            self.overview_moved.remove(node);
+            self.overview_sizes.remove(node);
+            if let Node::Terminal(id) = node {
+                if let Some(terminal) = self
+                    .terminals
+                    .iter_mut()
+                    .find(|t| t.view.entity_id().as_u64() == *id)
+                {
+                    terminal.size = overview::Tile::default().size();
+                }
             }
         }
-        let terminals: Vec<u64> = self
-            .terminals
-            .iter()
-            .filter(|t| shown.iter().any(|(_, ws)| ws.contains(&t.worktree)))
-            .map(|t| t.view.entity_id().as_u64())
-            .collect();
-        for id in terminals {
-            self.overview_moved.remove(&Node::Terminal(id));
-        }
         super::store::Store::update_global(cx, |store| {
-            for (main, worktrees) in &shown {
-                if let Some(repo) = store.repos.get_mut(main) {
-                    repo.home_offset = None;
-                }
-                for path in worktrees {
-                    if let Some(worktree) = store.worktrees.get_mut(path) {
-                        worktree.home_offset = None;
+            for node in &nodes {
+                match node {
+                    Node::Git(main) => {
+                        if let Some(repo) = store.repos.get_mut(main) {
+                            repo.home_offset = None;
+                            repo.home_size = None;
+                        }
                     }
+                    Node::Worktree(path) => {
+                        if let Some(worktree) = store.worktrees.get_mut(path) {
+                            worktree.home_offset = None;
+                            worktree.home_size = None;
+                        }
+                    }
+                    Node::Note(id) => {
+                        if let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) {
+                            note.offset = None;
+                            note.size = None;
+                        }
+                    }
+                    Node::Terminal(_) => {}
                 }
             }
         });
@@ -661,12 +793,13 @@ impl ClaudhubApp {
                     }),
             )
             .child(
-                Button::new("overview-tidy")
+                Button::new("overview-reset")
                     .ghost()
                     .small()
                     .icon(icon("layout-dashboard"))
-                    .tooltip(tr!("overview-tidy"))
-                    .on_click(cx.listener(|this, _, _, cx| this.tidy_overview(cx))),
+                    .label(tr!("overview-reset"))
+                    .tooltip(tr!("overview-reset-hint"))
+                    .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx))),
             )
     }
 
@@ -704,20 +837,20 @@ impl ClaudhubApp {
                 let at =
                     |(x, y): (f32, f32)| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
                 for (from, to, kind, on) in links {
+                    // What hangs from a card — a terminal, a note — is drawn
+                    // finer than the tree itself: the branches are the shape,
+                    // the rest is what the shape carries.
+                    let width = match kind {
+                        LinkKind::Root | LinkKind::Branch => width,
+                        LinkKind::Terminal | LinkKind::Note => width * 0.6,
+                    };
+                    // Down out of the parent and down into the child: a
+                    // straight line when one sits under the other, an S when
+                    // it stands aside.
                     let mut path = PathBuilder::stroke(width);
                     path.move_to(at(from));
-                    match kind {
-                        // Out of the parent's side at its head, then down
-                        // into the child: a file tree's elbow, softened.
-                        LinkKind::Branch => path.curve_to(at(to), at((to.0, from.1))),
-                        // Down out of one node and down into the next: an S
-                        // when a hand has moved one aside, a straight line
-                        // when nothing has.
-                        LinkKind::Root | LinkKind::Terminal => {
-                            let middle = (from.1 + to.1) / 2.;
-                            path.cubic_bezier_to(at(to), at((from.0, middle)), at((to.0, middle)));
-                        }
-                    }
+                    let middle = (from.1 + to.1) / 2.;
+                    path.cubic_bezier_to(at(to), at((from.0, middle)), at((to.0, middle)));
                     if let Ok(path) = path.build() {
                         window.paint_path(path, if on { lit } else { quiet });
                     }
@@ -791,7 +924,7 @@ impl ClaudhubApp {
                     .icon(icon("maximize"))
                     .tooltip(tr!("overview-fit"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        let plan = this.overview_plan();
+                        let plan = this.overview_plan(cx);
                         this.overview_view = View::fit(plan.bounds, this.overview_size());
                         cx.notify();
                     })),
@@ -844,7 +977,11 @@ impl ClaudhubApp {
                     .child(SharedString::from(repo.name.clone())),
             )
             .when(detail, |el| {
-                el.child(
+                el.child(note_button(
+                    cx.entity().downgrade(),
+                    super::store::HomeAnchor::Repo(main.to_path_buf()),
+                ))
+                .child(
                     Button::new(SharedString::from(format!(
                         "overview-fetch-{}",
                         main.display()
@@ -982,6 +1119,28 @@ impl ClaudhubApp {
                         .text_xs()
                         .text_color(muted)
                         .child(tr!("overview-main")),
+                )
+            })
+            .when(detail, |el| {
+                el.child(note_button(
+                    cx.entity().downgrade(),
+                    super::store::HomeAnchor::Worktree(path.to_path_buf()),
+                ))
+            })
+            .when(detail && summary.is_some_and(|s| !s.is_empty()), |el| {
+                let commit = path.to_path_buf();
+                el.child(
+                    Button::new(SharedString::from(format!(
+                        "overview-commit-{}",
+                        path.display()
+                    )))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("git-commit-horizontal"))
+                    .tooltip(tr!("overview-commit"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_commit_sheet(&commit, window, cx);
+                    })),
                 )
             })
             .when(detail, |el| {
@@ -1197,7 +1356,7 @@ impl ClaudhubApp {
                     Button::new(("overview-tile-size", id))
                         .ghost()
                         .xsmall()
-                        .label(terminal.tile.label())
+                        .label(overview::Tile::nearest(terminal.size).label())
                         .tooltip(tr!("overview-tile-size"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.cycle_tile(id, cx);
@@ -1242,6 +1401,11 @@ impl ClaudhubApp {
                         .border_1()
                         .border_color(if focused { theme.ring } else { theme.border }),
                 )
+                .child(corner(
+                    cx.entity().downgrade(),
+                    Node::Terminal(id.as_u64()),
+                    cx,
+                ))
                 .into_any_element(),
         }
         .into_any_element()
@@ -1355,7 +1519,7 @@ impl ClaudhubApp {
             .iter_mut()
             .find(|terminal| terminal.view.entity_id() == view)
         {
-            terminal.tile = terminal.tile.next();
+            terminal.size = overview::Tile::nearest(terminal.size).next().size();
             cx.notify();
         }
     }
@@ -1402,6 +1566,42 @@ impl ClaudhubApp {
     }
 }
 
+/// The grip in a node's bottom-right corner: dragged, it resizes the node.
+///
+/// In pixels and not in `rem`, alone of what a node carries: a grip that
+/// shrank with the plane would be a target nobody can hit at a distance, and
+/// resizing from afar is when one wants it.
+fn corner(app: WeakEntity<ClaudhubApp>, node: Node, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let color = cx.theme().muted_foreground.opacity(0.6);
+    let id = SharedString::from(format!("overview-corner-{node:?}"));
+    div()
+        .id(id)
+        .absolute()
+        .right_0()
+        .bottom_0()
+        .size(px(14.))
+        .cursor(gpui_kit::CursorStyle::ResizeUpLeftDownRight)
+        .child(
+            div()
+                .absolute()
+                .right(px(3.))
+                .bottom(px(3.))
+                .size(px(7.))
+                .border_r_2()
+                .border_b_2()
+                .border_color(color),
+        )
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            cx.stop_propagation();
+            if let Some(app) = app.upgrade() {
+                let node = node.clone();
+                app.update(cx, |this, _| {
+                    this.overview_drag = Some(Drag::Resize(node, event.position));
+                });
+            }
+        })
+}
+
 /// A node's head takes the node along: the press starts the drag, and stops
 /// there, the plane's own drag being what a bare press means.
 fn grab(
@@ -1415,6 +1615,367 @@ fn grab(
                 this.overview_drag = Some(Drag::Node(node.clone(), event.position));
             });
         }
+    }
+}
+
+/// The `+ note` of a git node's or a card's head.
+fn note_button(app: WeakEntity<ClaudhubApp>, anchor: super::store::HomeAnchor) -> Button {
+    let id = SharedString::from(format!("overview-add-note-{anchor:?}"));
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(icon("sticky-note"))
+        .tooltip(tr!("overview-note-add"))
+        .on_click(move |_, window, cx| {
+            if let Some(app) = app.upgrade() {
+                let anchor = anchor.clone();
+                app.update(cx, |this, cx| this.add_home_note(anchor, window, cx));
+            }
+        })
+}
+
+impl ClaudhubApp {
+    /// Writes a new note, hung from a git node or a card, and opens it for
+    /// writing — an empty note shown as rendered Markdown is a blank card
+    /// that says nothing of what to do with it.
+    fn add_home_note(
+        &mut self,
+        anchor: super::store::HomeAnchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = super::store::Store::global(cx)
+            .home_notes
+            .iter()
+            .map(|note| note.id)
+            .max()
+            .map_or(1, |id| id + 1);
+        super::store::Store::update_global(cx, |store| {
+            store.home_notes.push(super::store::HomeNote {
+                id,
+                anchor,
+                text: String::new(),
+                offset: None,
+                size: None,
+            });
+        });
+        self.overview_reveal = Some(Node::Note(id));
+        self.edit_home_note(id, window, cx);
+    }
+
+    /// Opens a note for writing: a field of the window's editor, whose every
+    /// change goes back to the store — there is no "save" to forget.
+    fn edit_home_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((editor, _)) = self.note_editors.get(&id) {
+            super::dialogs::focus_field(editor, window, cx);
+            return;
+        }
+        let text = super::store::Store::global(cx)
+            .home_notes
+            .iter()
+            .find(|note| note.id == id)
+            .map(|note| note.text.clone())
+            .unwrap_or_default();
+        let editor = cx.new(|cx| super::surface::plain_editor(window, cx));
+        editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+        let subscription = cx.subscribe(
+            &editor,
+            move |_, editor, event: &gpui_kit::component::input::InputEvent, cx| {
+                if !matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                    return;
+                }
+                let text = editor.read(cx).value().to_string();
+                super::store::Store::update_global_if(cx, |store| {
+                    match store.home_notes.iter_mut().find(|note| note.id == id) {
+                        Some(note) if note.text != text => {
+                            note.text = text;
+                            true
+                        }
+                        _ => false,
+                    }
+                });
+            },
+        );
+        super::dialogs::focus_field(&editor, window, cx);
+        self.note_editors.insert(id, (editor, subscription));
+        cx.notify();
+    }
+
+    /// Back to the rendered note. What was typed is already in the store.
+    fn done_home_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.note_editors.remove(&id);
+        self.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Deletes a note, once asked: it is text someone wrote, and nothing
+    /// else keeps a copy of it.
+    fn delete_home_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let entity = entity.clone();
+            dialog
+                .title(tr!("overview-note-delete-title"))
+                .child(div().text_sm().child(tr!("overview-note-delete-body")))
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::confirm())
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.note_editors.remove(&id);
+                        this.overview_moved.remove(&Node::Note(id));
+                        this.overview_sizes.remove(&Node::Note(id));
+                        super::store::Store::update_global(cx, |store| {
+                            store.home_notes.retain(|note| note.id != id);
+                        });
+                        cx.notify();
+                    });
+                    true
+                })
+        });
+    }
+
+    /// A note: rendered Markdown, or the field it is written in.
+    fn render_home_note(&self, id: u64, zoom: f32, cx: &mut Context<Self>) -> AnyElement {
+        let Some(note) = super::store::Store::global(cx)
+            .home_notes
+            .iter()
+            .find(|note| note.id == id)
+            .cloned()
+        else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let detail = zoom >= DETAIL;
+        let editor = self.note_editors.get(&id).map(|(editor, _)| editor.clone());
+        let editing = editor.is_some();
+        // Its first line, bare of Markdown's marks: what the note is about.
+        let title = note
+            .text
+            .lines()
+            .map(|line| line.trim_start_matches(['#', '>', '-', '*', ' ']).trim())
+            .find(|line| !line.is_empty())
+            .map(|line| SharedString::from(line.to_string()))
+            .unwrap_or_else(|| tr!("overview-note"));
+        let app = cx.entity().downgrade();
+        let head = h_flex()
+            .flex_none()
+            .h(px(overview::HEAD * zoom))
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .bg(theme.warning.opacity(0.18))
+            .cursor_grab()
+            .on_mouse_down(MouseButton::Left, grab(app.clone(), Node::Note(id)))
+            .child(icon("sticky-note").text_color(muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .when(detail, |el| {
+                el.child(
+                    Button::new(("overview-note-edit", id))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon(if editing { "check" } else { "pencil" }))
+                        .tooltip(if editing {
+                            tr!("overview-note-done")
+                        } else {
+                            tr!("overview-note-edit")
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if editing {
+                                this.done_home_note(id, window, cx);
+                            } else {
+                                this.edit_home_note(id, window, cx);
+                            }
+                        })),
+                )
+                .child(
+                    Button::new(("overview-note-delete", id))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("trash-2"))
+                        .tooltip(tr!("overview-note-delete"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.delete_home_note(id, window, cx);
+                        })),
+                )
+            });
+        let body = match editor {
+            Some(editor) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .p_1()
+                .child(
+                    gpui_kit::component::input::Editor::new(&editor)
+                        .text_sm()
+                        .h_full(),
+                )
+                .into_any_element(),
+            None => div()
+                .id(("overview-note-body", id))
+                .flex_1()
+                .min_h_0()
+                .p_2()
+                .overflow_y_scroll()
+                .text_sm()
+                .cursor_text()
+                // Twice to write in it, the gesture of every sticky note.
+                .on_click(
+                    cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                        if event.click_count() >= 2 {
+                            this.edit_home_note(id, window, cx);
+                        }
+                    }),
+                )
+                .map(|el| {
+                    if note.text.trim().is_empty() {
+                        el.text_color(muted).child(tr!("overview-note-empty"))
+                    } else {
+                        el.child(gpui_kit::component::text::TextView::markdown(
+                            ("overview-note-text", id),
+                            note.text.clone(),
+                        ))
+                    }
+                })
+                .into_any_element(),
+        };
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.warning.opacity(0.45))
+            .bg(theme.background)
+            // A note is written in and read, not dragged by its body.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(head)
+            .child(body)
+            .into_any_element()
+    }
+}
+
+/// The commit sheet: a worktree's changes to tick, and the commit box of the
+/// Changes panel under them — the same field, the same buttons, the same
+/// draft, so that what is started here is finished there and back.
+///
+/// **An entity and not a closure**, `SettingsForm`'s reason: `open_dialog`
+/// keeps a `Fn` called back from the root's render, where reading the
+/// application is a panic, and a child's render comes after.
+pub(super) struct CommitSheet {
+    app: WeakEntity<ClaudhubApp>,
+}
+
+impl Render for CommitSheet {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |app, cx| {
+            app.render_commit_sheet(window, cx).into_any_element()
+        })
+    }
+}
+
+impl ClaudhubApp {
+    /// Opens the commit sheet on a worktree, which becomes the one on show:
+    /// the commit box speaks of the active worktree, and the card one pressed
+    /// is the one the sheet is about.
+    fn open_commit_sheet(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.as_deref() != Some(worktree) {
+            self.select_worktree(worktree.to_path_buf(), window, cx);
+        }
+        let (repo, label) = self.project_label(worktree);
+        let name = match repo {
+            Some(repo) => format!("{repo} · {label}"),
+            None => label.to_string(),
+        };
+        let title = tr!("overview-commit-title", { name: name });
+        let app = cx.entity().downgrade();
+        let sheet = cx.new(|_| CommitSheet { app: app.clone() });
+        self.commit_sheet = true;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let app = app.clone();
+            dialog
+                .title(title.clone())
+                .w(px(640.))
+                .child(sheet.clone())
+                .on_close(move |_, _, cx| {
+                    if let Some(app) = app.upgrade() {
+                        app.update(cx, |this, _| this.commit_sheet = false);
+                    }
+                })
+        });
+        super::dialogs::focus_field(&self.commit_input, window, cx);
+        cx.notify();
+    }
+
+    fn render_commit_sheet(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(worktree) = self.active.clone() else {
+            return div().into_any_element();
+        };
+        let files: Vec<crate::git::FileStatus> = self
+            .review
+            .get(&worktree)
+            .map(|review| review.status.files.clone())
+            .unwrap_or_default();
+        let staged = files.iter().filter(|file| file.is_staged()).count();
+        let muted = cx.theme().muted_foreground;
+        let entity = cx.entity();
+        let list = v_flex()
+            .id("commit-sheet-files")
+            .max_h(px(300.))
+            .overflow_y_scroll()
+            .gap_0p5()
+            .when(files.is_empty(), |el| {
+                el.child(div().text_sm().text_color(muted).child(tr!("home-clean")))
+            })
+            .children(files.into_iter().enumerate().map(|(index, file)| {
+                // Ticked when all of it is in the index; a press puts the rest
+                // in, or takes all of it out — the Changes panel's box.
+                let ticked = file.is_staged() && !file.is_unstaged();
+                let conflicted = file.is_conflicted();
+                let (worktree, path, entity) =
+                    (worktree.clone(), file.path.clone(), entity.clone());
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_sm()
+                    .child(
+                        gpui_kit::component::checkbox::Checkbox::new(("commit-sheet-stage", index))
+                            .checked(ticked)
+                            .disabled(conflicted)
+                            .on_click(move |_, _, cx| {
+                                let (worktree, path) = (worktree.clone(), path.clone());
+                                entity.update(cx, |this, cx| {
+                                    this.set_staged(worktree, vec![path], !ticked, cx)
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(conflicted, |el| el.text_color(cx.theme().danger))
+                            .child(SharedString::from(file.path.display().to_string())),
+                    )
+            }));
+        v_flex()
+            .gap_2()
+            .child(list)
+            .child(self.render_commit_box(staged > 0, staged, cx))
+            .into_any_element()
     }
 }
 

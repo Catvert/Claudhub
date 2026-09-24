@@ -950,8 +950,19 @@
   "overview-recent": "Latest commits",
   "overview-tile-size": "Card size",
   "overview-all-projects": "All projects",
-  "overview-tidy": "Tidy up",
   "overview-fetch": "Fetch",
   "overview-branches": "%{local} local branch(es) · %{remote} remote",
-  "overview-idle-branches": "No worktree:"
+  "overview-idle-branches": "No worktree:",
+  "overview-commit": "Commit…",
+  "overview-commit-title": "Commit — %{name}",
+  "overview-reset": "Reset",
+  "overview-reset-hint": "Put every node back in its place and size, then centre everything",
+  "overview-note": "Note",
+  "overview-note-add": "Add a note",
+  "overview-note-edit": "Edit",
+  "overview-note-done": "Done",
+  "overview-note-delete": "Delete the note",
+  "overview-note-delete-title": "Delete this note?",
+  "overview-note-delete-body": "Its text is kept nowhere else.",
+  "overview-note-empty": "Empty note — double-click to write, in Markdown."
 }

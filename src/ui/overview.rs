@@ -1,23 +1,23 @@
 //! The home screen's plane: where every node stands, and how the plane is
 //! looked at.
 //!
-//! **One column per worktree**, read top to bottom: the repository's git node
-//! above them all, then each worktree's card with its terminals stacked under
-//! it in the order they were opened — so that a terminal is read beneath what
-//! it belongs to rather than in a row of every project's shells. A column
-//! stands **lower by one step per branching** — the main checkout first, the
-//! worktrees cut from it a step down — and a line runs from the card of the
-//! branch it started from, the way a file tree says which folder holds which.
+//! **A tree, read top to bottom, each parent centred over its children.** A
+//! repository's git node is the root; under it the checkouts no branch leads
+//! to — the main one — and the notes about the repository; under each
+//! worktree, its notes, its terminals, then the worktrees cut from its branch.
+//! Every node of a level stands on the same line, whatever its size: what is
+//! aligned reads as a level, and a node added later lands in its place in the
+//! tree, aligned with its siblings, with nothing for the hand to tidy.
 //!
-//! **A node moved by hand keeps its place.** What the hand says is an offset
-//! from where the layout would put the node, so a worktree's terminals follow
-//! its card wherever it is dragged — they stand under it until they are
-//! dragged themselves — and a worktree added later still finds a free column.
+//! **A node moved by hand takes its subtree along**, as an offset from where
+//! the tree would put it: a worktree dragged aside keeps its terminals and its
+//! branches under it. `Reset` in the view forgets every offset and size.
 //!
-//! **Zoom is a scale, not a layout.** Zooming out does not repack the columns:
+//! **Zoom is a scale, not a layout.** Zooming out does not repack the tree:
 //! what one reads at a distance has to be where one will find it close up.
 //! And a terminal keeps its grid at every zoom — its font grows and shrinks
-//! with its card, the columns stay — so zooming never reflows a program.
+//! with its card, the lines and columns stay — so zooming never reflows a
+//! program.
 //!
 //! Pure: the view hands in what is open, this says where it goes.
 
@@ -28,35 +28,38 @@ use std::path::{Path, PathBuf};
 pub const CARD: (f32, f32) = (300., 244.);
 /// A repository's git node.
 pub const GIT: (f32, f32) = (300., 150.);
-/// How far a column moves down per branching step.
-const STEP: f32 = 56.;
-/// Between two columns.
-const COLUMN_GAP: f32 = 48.;
-/// Between two nodes of a column.
-const ROW_GAP: f32 = 28.;
-/// Between two repositories, when all of them are shown.
-const GROUP_GAP: f32 = 96.;
-/// How far in from a node's left edge the vertical links run: a column's
-/// nodes are left-aligned, so its links are one straight line.
-const LINK_X: f32 = 28.;
-/// The height of a node's head: what one drags it by, and where a branch's
-/// link leaves its card.
+/// A note's size until the hand gives it another.
+pub const NOTE: (f32, f32) = (280., 200.);
+/// Between two siblings.
+const SIBLING_GAP: f32 = 40.;
+/// Between two levels.
+const LEVEL_GAP: f32 = 64.;
+/// Between two repositories' trees, when all of them are shown.
+const GROUP_GAP: f32 = 160.;
+/// The height of a node's head: what one drags it by.
 pub const HEAD: f32 = 32.;
 
-pub const MIN_ZOOM: f32 = 0.15;
+/// The smallest a node is let be, by kind: a card that still says its name
+/// and branch, a terminal that still holds a prompt.
+pub const MIN_GIT: (f32, f32) = (200., 90.);
+pub const MIN_CARD: (f32, f32) = (220., 140.);
+pub const MIN_TILE: (f32, f32) = (300., 160.);
+pub const MIN_NOTE: (f32, f32) = (160., 90.);
+
+pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 2.;
 /// One press of a zoom button.
 pub const ZOOM_STEP: f32 = 1.25;
 /// Room kept around what `fit` and `reveal` bring into view.
 const MARGIN: f32 = 24.;
 
-/// A terminal card's size.
+/// A terminal card's size presets.
 ///
-/// **Presets and not a free size**, the multiplexer's reason: a card one
-/// drags to a size is one dragged every time, and a terminal wants one of
-/// three things — small to keep an eye on it, medium to read it, large to
-/// work in it. In plane units, so a preset is a number of columns and lines
-/// whatever the zoom.
+/// **Presets beside a free size**: the corner resizes to anything, and the
+/// head's button jumps between the three sizes a terminal usually wants —
+/// small to keep an eye on it, medium to read it, large to work in it. In
+/// plane units, so a preset is a number of columns and lines whatever the
+/// zoom.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tile {
     Small,
@@ -90,9 +93,26 @@ impl Tile {
             Tile::Large => "L",
         }
     }
+
+    /// The preset a size is closest to, by width: what the head's button
+    /// says, a card dragged to any size still reading as one of three.
+    pub fn nearest(size: (f32, f32)) -> Tile {
+        [Tile::Small, Tile::Medium, Tile::Large]
+            .into_iter()
+            .min_by(|a, b| {
+                let gap = |t: &Tile| (t.size().0 - size.0).abs();
+                gap(a).total_cmp(&gap(b))
+            })
+            .unwrap_or_default()
+    }
 }
 
-/// What can be dragged on the plane.
+/// A size dragged by `delta`, never under `min`.
+pub fn resized(size: (f32, f32), delta: (f32, f32), min: (f32, f32)) -> (f32, f32) {
+    ((size.0 + delta.0).max(min.0), (size.1 + delta.1).max(min.1))
+}
+
+/// What stands on the plane.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Node {
     /// A repository's git node, by its main path.
@@ -100,10 +120,16 @@ pub enum Node {
     Worktree(PathBuf),
     /// A terminal, by its view's id: it lives no longer than the process.
     Terminal(u64),
+    /// A note, by the id the store gave it.
+    Note(u64),
 }
 
-/// Where the hand has put nodes, as offsets from where the layout would.
+/// Where the hand has put nodes, as offsets from where the tree would.
 pub type Moved = HashMap<Node, (f32, f32)>;
+
+/// The sizes the hand has given git nodes, worktree cards and notes; a
+/// terminal carries its own.
+pub type Sizes = HashMap<Node, (f32, f32)>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -151,15 +177,18 @@ pub struct Checkout<'a> {
     /// The branch it most likely started from, as `git::outline` guessed it;
     /// `None` until the first reading.
     pub base: Option<&'a str>,
-    /// Its terminals, in the order they were opened.
-    pub terminals: Vec<(u64, Tile)>,
+    /// Its terminals, in the order they were opened, with their size.
+    pub terminals: Vec<(u64, (f32, f32))>,
+    /// The notes hung from it, in the order they were written.
+    pub notes: Vec<u64>,
 }
 
-/// A repository: its git node, and its worktrees, the main one included.
+/// A repository: its git node, its worktrees, and the notes hung from it.
 #[derive(Debug, Clone)]
 pub struct Group<'a> {
     pub main: &'a Path,
     pub checkouts: Vec<Checkout<'a>>,
+    pub notes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,8 +209,10 @@ pub enum LinkKind {
     Root,
     /// From the card of the branch a worktree started from to its card.
     Branch,
-    /// From a card to its first terminal, and from each terminal to the next.
+    /// From a card to one of its terminals.
     Terminal,
+    /// From a git node or a card to a note hung from it.
+    Note,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,8 +220,8 @@ pub struct Link {
     pub from: (f32, f32),
     pub to: (f32, f32),
     pub kind: LinkKind,
-    /// The worktree the link leads into: what says it belongs to the one on
-    /// screen.
+    /// The worktree the link belongs to — the child's, or the parent's for a
+    /// terminal or a note: what says it belongs to the one on screen.
     pub worktree: PathBuf,
 }
 
@@ -200,6 +231,7 @@ pub struct Plan {
     pub gits: Vec<Card>,
     pub cards: Vec<Card>,
     pub tiles: Vec<Placed>,
+    pub notes: Vec<Placed>,
     pub links: Vec<Link>,
     /// Everything, for `fit` and the scrollbars.
     pub bounds: Rect,
@@ -208,6 +240,21 @@ pub struct Plan {
 impl Plan {
     pub fn tile(&self, id: u64) -> Option<Rect> {
         self.tiles.iter().find(|tile| tile.id == id).map(|t| t.rect)
+    }
+
+    /// Where a node stands, whatever its kind.
+    pub fn rect(&self, node: &Node) -> Option<Rect> {
+        match node {
+            Node::Git(path) => self.gits.iter().find(|c| &c.path == path).map(|c| c.rect),
+            Node::Worktree(path) => self.cards.iter().find(|c| &c.path == path).map(|c| c.rect),
+            Node::Terminal(id) => self.tile(*id),
+            Node::Note(id) => self.notes.iter().find(|n| n.id == *id).map(|n| n.rect),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn note(&self, id: u64) -> Option<Rect> {
+        self.notes.iter().find(|note| note.id == id).map(|n| n.rect)
     }
 
     #[cfg(test)]
@@ -251,124 +298,228 @@ pub fn parents(checkouts: &[Checkout]) -> Vec<Option<usize>> {
         .collect()
 }
 
-/// The checkouts in column order, with their depth: each after the one it
-/// branched from, depth first. A cycle — two branches each guessing the
-/// other — cannot come from `parents` through the main checkout, but a
-/// repository without one can have it: what no root reaches is laid out as a
-/// root of its own, so nothing is lost.
-fn lanes(parents: &[Option<usize>]) -> Vec<(usize, usize)> {
-    let mut order = Vec::with_capacity(parents.len());
-    let mut placed = vec![false; parents.len()];
-    fn visit(
-        node: usize,
-        depth: usize,
-        parents: &[Option<usize>],
-        placed: &mut [bool],
-        order: &mut Vec<(usize, usize)>,
-    ) {
-        if placed[node] {
-            return;
-        }
-        placed[node] = true;
-        order.push((node, depth));
-        for child in (0..parents.len()).filter(|&c| parents[c] == Some(node)) {
-            visit(child, depth + 1, parents, placed, order);
-        }
-    }
-    for root in (0..parents.len()).filter(|&n| parents[n].is_none()) {
-        visit(root, 0, parents, &mut placed, &mut order);
-    }
-    for node in 0..parents.len() {
-        visit(node, 0, parents, &mut placed, &mut order);
-    }
-    order
+/// One node of a repository's tree, before it is placed.
+struct Branch {
+    node: Node,
+    size: (f32, f32),
+    /// How it hangs from its parent.
+    kind: LinkKind,
+    worktree: PathBuf,
+    children: Vec<usize>,
 }
 
-pub fn plan(groups: &[Group], moved: &Moved) -> Plan {
+/// A repository's tree: index 0 is the git node.
+fn tree(group: &Group, sizes: &Sizes) -> Vec<Branch> {
+    let size = |node: &Node, default: (f32, f32)| sizes.get(node).copied().unwrap_or(default);
+    let main = group.main.to_path_buf();
+    let git = Node::Git(main.clone());
+    let mut nodes = vec![Branch {
+        size: size(&git, GIT),
+        node: git,
+        kind: LinkKind::Root,
+        worktree: main.clone(),
+        children: Vec::new(),
+    }];
+    let add = |nodes: &mut Vec<Branch>, parent: usize, branch: Branch| {
+        nodes.push(branch);
+        let index = nodes.len() - 1;
+        nodes[parent].children.push(index);
+        index
+    };
+    for &id in &group.notes {
+        let node = Node::Note(id);
+        add(
+            &mut nodes,
+            0,
+            Branch {
+                size: size(&node, NOTE),
+                node,
+                kind: LinkKind::Note,
+                worktree: main.clone(),
+                children: Vec::new(),
+            },
+        );
+    }
+    // The worktrees, each under the one it branched from, depth first; what
+    // no branch leads to — the main checkout, and whatever a cycle of
+    // guesses left unreached — hangs from the git node.
+    let parents = parents(&group.checkouts);
+    let mut placed: Vec<Option<usize>> = vec![None; group.checkouts.len()];
+    fn visit(
+        checkout: usize,
+        parent: usize,
+        group: &Group,
+        parents: &[Option<usize>],
+        placed: &mut Vec<Option<usize>>,
+        nodes: &mut Vec<Branch>,
+        sizes: &Sizes,
+    ) {
+        if placed[checkout].is_some() {
+            return;
+        }
+        let this = &group.checkouts[checkout];
+        let path = this.path.to_path_buf();
+        let node = Node::Worktree(path.clone());
+        let kind = if parent == 0 {
+            LinkKind::Root
+        } else {
+            LinkKind::Branch
+        };
+        nodes.push(Branch {
+            size: sizes.get(&node).copied().unwrap_or(CARD),
+            node,
+            kind,
+            worktree: path.clone(),
+            children: Vec::new(),
+        });
+        let index = nodes.len() - 1;
+        nodes[parent].children.push(index);
+        placed[checkout] = Some(index);
+        for &id in &this.notes {
+            let node = Node::Note(id);
+            nodes.push(Branch {
+                size: sizes.get(&node).copied().unwrap_or(NOTE),
+                node,
+                kind: LinkKind::Note,
+                worktree: path.clone(),
+                children: Vec::new(),
+            });
+            let child = nodes.len() - 1;
+            nodes[index].children.push(child);
+        }
+        for &(id, size) in &this.terminals {
+            nodes.push(Branch {
+                size,
+                node: Node::Terminal(id),
+                kind: LinkKind::Terminal,
+                worktree: path.clone(),
+                children: Vec::new(),
+            });
+            let child = nodes.len() - 1;
+            nodes[index].children.push(child);
+        }
+        for child in (0..parents.len()).filter(|&c| parents[c] == Some(checkout)) {
+            visit(child, index, group, parents, placed, nodes, sizes);
+        }
+    }
+    for root in (0..parents.len()).filter(|&c| parents[c].is_none()) {
+        visit(root, 0, group, &parents, &mut placed, &mut nodes, sizes);
+    }
+    for checkout in 0..parents.len() {
+        visit(checkout, 0, group, &parents, &mut placed, &mut nodes, sizes);
+    }
+    nodes
+}
+
+/// How wide each node's subtree is: its own width, or its children side by
+/// side if that is wider.
+fn widths(nodes: &[Branch]) -> Vec<f32> {
+    fn width(index: usize, nodes: &[Branch], out: &mut [f32]) -> f32 {
+        let children: f32 = nodes[index]
+            .children
+            .iter()
+            .map(|&child| width(child, nodes, out))
+            .sum::<f32>()
+            + SIBLING_GAP * nodes[index].children.len().saturating_sub(1) as f32;
+        out[index] = nodes[index].size.0.max(children);
+        out[index]
+    }
+    let mut out = vec![0.; nodes.len()];
+    if !nodes.is_empty() {
+        width(0, nodes, &mut out);
+    }
+    out
+}
+
+/// Every node's depth, and each level's height: the tallest node on it.
+fn levels(nodes: &[Branch]) -> (Vec<usize>, Vec<f32>) {
+    let mut depth = vec![0; nodes.len()];
+    let mut heights: Vec<f32> = Vec::new();
+    let mut stack = vec![0];
+    while let Some(index) = stack.pop() {
+        let d = depth[index];
+        if heights.len() <= d {
+            heights.resize(d + 1, 0.);
+        }
+        heights[d] = heights[d].max(nodes[index].size.1);
+        for &child in &nodes[index].children {
+            depth[child] = d + 1;
+            stack.push(child);
+        }
+    }
+    (depth, heights)
+}
+
+pub fn plan(groups: &[Group], moved: &Moved, sizes: &Sizes) -> Plan {
     let mut plan = Plan::default();
     let mut bounds: Option<Rect> = None;
-    fn grow(rect: Rect, bounds: &mut Option<Rect>) {
-        *bounds = Some(match bounds {
-            Some(b) => b.union(&rect),
-            None => rect,
-        });
-    }
-    let offset = |node: Node| moved.get(&node).copied().unwrap_or((0., 0.));
-    let add = |a: (f32, f32), b: (f32, f32)| (a.0 + b.0, a.1 + b.1);
-    let mut top = 0.;
+    let mut left = 0.;
     for group in groups {
-        let git = Rect {
-            x: 0.,
-            y: top,
-            w: GIT.0,
-            h: GIT.1,
-        }
-        .moved(offset(Node::Git(group.main.to_path_buf())));
-        grow(git, &mut bounds);
-        plan.gits.push(Card {
-            path: group.main.to_path_buf(),
-            rect: git,
-        });
-        let first_card = top + GIT.1 + 2. * ROW_GAP;
-        let mut bottom = top + GIT.1;
-        let parents = parents(&group.checkouts);
-        let mut rects: Vec<Option<Rect>> = vec![None; group.checkouts.len()];
-        let mut x = 0.;
-        for (index, depth) in lanes(&parents) {
-            let checkout = &group.checkouts[index];
-            let own = offset(Node::Worktree(checkout.path.to_path_buf()));
-            let card = Rect {
-                x,
-                y: first_card + depth as f32 * STEP,
-                w: CARD.0,
-                h: CARD.1,
+        let nodes = tree(group, sizes);
+        let widths = widths(&nodes);
+        let (depth, heights) = levels(&nodes);
+        let tops: Vec<f32> = heights
+            .iter()
+            .scan(0., |top, height| {
+                let this = *top;
+                *top += height + LEVEL_GAP;
+                Some(this)
+            })
+            .collect();
+        // Placed from the root down: each node centred in the room its
+        // subtree was given, its children side by side under it, and the
+        // hand's offset carried to everything below the node it was put on.
+        let mut rects: Vec<Rect> = vec![Rect::default(); nodes.len()];
+        let mut stack = vec![(0, left, (0., 0.))];
+        while let Some((index, room_left, inherited)) = stack.pop() {
+            let branch = &nodes[index];
+            let own = moved.get(&branch.node).copied().unwrap_or((0., 0.));
+            let offset = (inherited.0 + own.0, inherited.1 + own.1);
+            let rect = Rect {
+                x: room_left + (widths[index] - branch.size.0) / 2.,
+                y: tops[depth[index]],
+                w: branch.size.0,
+                h: branch.size.1,
             }
-            .moved(own);
-            rects[index] = Some(card);
-            grow(card, &mut bounds);
-            bottom = f32::max(bottom, card.bottom());
-            plan.cards.push(Card {
-                path: checkout.path.to_path_buf(),
-                rect: card,
+            .moved(offset);
+            rects[index] = rect;
+            let children_width: f32 = branch.children.iter().map(|&c| widths[c]).sum::<f32>()
+                + SIBLING_GAP * branch.children.len().saturating_sub(1) as f32;
+            let mut x = room_left + (widths[index] - children_width) / 2.;
+            for &child in &branch.children {
+                stack.push((child, x, offset));
+                x += widths[child] + SIBLING_GAP;
+            }
+        }
+        for (index, branch) in nodes.iter().enumerate() {
+            let rect = rects[index];
+            bounds = Some(match bounds {
+                Some(b) => b.union(&rect),
+                None => rect,
             });
-            match parents[index].and_then(|p| rects[p]) {
-                Some(parent) => plan.links.push(Link {
-                    from: (parent.right(), parent.y + HEAD / 2.),
-                    to: (card.x + LINK_X, card.y),
-                    kind: LinkKind::Branch,
-                    worktree: checkout.path.to_path_buf(),
-                }),
-                None => plan.links.push(Link {
-                    from: (git.x + LINK_X, git.bottom()),
-                    to: (card.x + LINK_X, card.y),
-                    kind: LinkKind::Root,
-                    worktree: checkout.path.to_path_buf(),
-                }),
-            }
-            // The column's own width, before any hand moved it: the next
-            // column goes where it would have, whatever this one did.
-            let mut width = CARD.0;
-            let mut y = first_card + depth as f32 * STEP + CARD.1 + ROW_GAP;
-            let mut previous = card;
-            for &(id, tile) in &checkout.terminals {
-                let (w, h) = tile.size();
-                let rect = Rect { x, y, w, h }.moved(add(own, offset(Node::Terminal(id))));
+            for &child in &branch.children {
+                let to = rects[child];
                 plan.links.push(Link {
-                    from: (previous.x + LINK_X, previous.bottom()),
-                    to: (rect.x + LINK_X, rect.y),
-                    kind: LinkKind::Terminal,
-                    worktree: checkout.path.to_path_buf(),
+                    from: (rect.x + rect.w / 2., rect.bottom()),
+                    to: (to.x + to.w / 2., to.y),
+                    kind: nodes[child].kind,
+                    worktree: nodes[child].worktree.clone(),
                 });
-                plan.tiles.push(Placed { id, rect });
-                grow(rect, &mut bounds);
-                bottom = f32::max(bottom, rect.bottom());
-                previous = rect;
-                y += h + ROW_GAP;
-                width = width.max(w);
             }
-            x += width + COLUMN_GAP;
+            match &branch.node {
+                Node::Git(path) => plan.gits.push(Card {
+                    path: path.clone(),
+                    rect,
+                }),
+                Node::Worktree(path) => plan.cards.push(Card {
+                    path: path.clone(),
+                    rect,
+                }),
+                Node::Terminal(id) => plan.tiles.push(Placed { id: *id, rect }),
+                Node::Note(id) => plan.notes.push(Placed { id: *id, rect }),
+            }
         }
-        top = bottom + GROUP_GAP;
+        left += widths.first().copied().unwrap_or(0.) + GROUP_GAP;
     }
     plan.bounds = bounds.unwrap_or_default();
     plan
@@ -445,8 +596,8 @@ impl View {
         }
     }
 
-    /// Everything in view, and never larger than life: a plane smaller than
-    /// the canvas stays at a zoom of one, in its top-left corner.
+    /// Everything in view, centred, and never larger than life: a plane
+    /// smaller than the canvas stays at a zoom of one.
     pub fn fit(bounds: Rect, viewport: (f32, f32)) -> View {
         if bounds.w <= 0. || bounds.h <= 0. {
             return View::default();
@@ -458,9 +609,17 @@ impl View {
         let zoom = (room.0 / bounds.w)
             .min(room.1 / bounds.h)
             .clamp(MIN_ZOOM, 1.);
+        // Centred on both axes; a plane still taller than the canvas at the
+        // smallest zoom shows its top — the git nodes, where it starts.
+        let centre = |start: f32, len: f32, room: f32| room / 2. - (start + len / 2.) * zoom;
+        let y = if bounds.h * zoom <= viewport.1 - 2. * MARGIN {
+            centre(bounds.y, bounds.h, viewport.1)
+        } else {
+            MARGIN - bounds.y * zoom
+        };
         View {
             zoom,
-            pan: (MARGIN - bounds.x * zoom, MARGIN - bounds.y * zoom),
+            pan: (centre(bounds.x, bounds.w, viewport.0), y),
         }
     }
 
@@ -511,7 +670,20 @@ mod tests {
             is_main,
             base,
             terminals: Vec::new(),
+            notes: Vec::new(),
         }
+    }
+
+    fn group<'a>(main: &'a str, checkouts: Vec<Checkout<'a>>) -> Group<'a> {
+        Group {
+            main: Path::new(main),
+            checkouts,
+            notes: Vec::new(),
+        }
+    }
+
+    fn centre(rect: Rect) -> f32 {
+        rect.x + rect.w / 2.
     }
 
     #[test]
@@ -532,101 +704,140 @@ mod tests {
         );
     }
 
+    /// Git on top, the main checkout under it, and under the main checkout
+    /// its note, its terminals and its branches, side by side on one line —
+    /// each parent centred over what hangs from it.
     #[test]
-    fn lanes_go_depth_first_and_a_cycle_loses_nothing() {
-        assert_eq!(
-            lanes(&[None, Some(0), Some(1), Some(0)]),
-            vec![(0, 0), (1, 1), (2, 2), (3, 1)]
-        );
-        // No main checkout, and two branches each guessing the other.
-        assert_eq!(lanes(&[Some(1), Some(0)]), vec![(0, 0), (1, 1)]);
-    }
-
-    fn group<'a>(main: &'a str, checkouts: Vec<Checkout<'a>>) -> Group<'a> {
-        Group {
-            main: Path::new(main),
-            checkouts,
-        }
-    }
-
-    #[test]
-    fn a_column_is_its_card_then_its_terminals_and_is_as_wide_as_its_widest() {
+    fn the_tree_goes_down_and_centres_each_parent() {
         let mut main = checkout("/r", "main", true, None);
-        main.terminals = vec![(7, Tile::Small), (8, Tile::Large)];
-        let feature = checkout("/r-a", "feature", false, Some("main"));
-        let plan = plan(&[group("/r", vec![main, feature])], &Moved::new());
+        main.notes = vec![5];
+        main.terminals = vec![(7, Tile::Small.size())];
+        let mut feature = checkout("/r-a", "feature", false, Some("main"));
+        feature.terminals = vec![(8, Tile::Large.size())];
+        let plan = plan(
+            &[group("/r", vec![main, feature])],
+            &Moved::new(),
+            &Sizes::new(),
+        );
 
         let git = plan.gits[0].rect;
-        let card = plan.card(Path::new("/r")).unwrap();
-        assert_eq!((card.x, card.y), (0., GIT.1 + 2. * ROW_GAP));
+        let main = plan.card(Path::new("/r")).unwrap();
+        let note = plan.note(5).unwrap();
         let small = plan.tile(7).unwrap();
+        let feature = plan.card(Path::new("/r-a")).unwrap();
         let large = plan.tile(8).unwrap();
-        assert_eq!((small.x, small.y), (0., card.bottom() + ROW_GAP));
-        assert_eq!((large.x, large.y), (0., small.bottom() + ROW_GAP));
 
-        // The branch in the next column, past the widest terminal of this
-        // one, and a step lower.
-        let branch = plan.card(Path::new("/r-a")).unwrap();
-        assert_eq!(branch.x, Tile::Large.size().0 + COLUMN_GAP);
-        assert_eq!(branch.y, card.y + STEP);
+        // Levels: git, main, then its children, then the branch's terminal.
+        assert_eq!(git.y, 0.);
+        assert_eq!(main.y, GIT.1 + LEVEL_GAP);
+        let third = main.bottom() + LEVEL_GAP;
+        assert_eq!((note.y, small.y, feature.y), (third, third, third));
+        // The level under is as low as the tallest of the third: a terminal.
+        assert_eq!(large.y, third + Tile::Small.size().1 + LEVEL_GAP);
 
-        // The git node leads to the main card, the main card's head to the
-        // branch's top, and each terminal hangs under the one before: one
-        // straight line down the column.
-        let kinds: Vec<_> = plan.links.iter().map(|l| l.kind).collect();
+        // In order, left to right, one gap apart — the branch's room being
+        // its terminal's width.
+        assert_eq!(small.x, note.right() + SIBLING_GAP);
+        let branch_room = Tile::Large.size().0;
         assert_eq!(
-            kinds,
-            [
-                LinkKind::Root,
-                LinkKind::Terminal,
-                LinkKind::Terminal,
-                LinkKind::Branch
-            ]
+            feature.x,
+            small.right() + SIBLING_GAP + (branch_room - CARD.0) / 2.
         );
-        assert_eq!(plan.links[0].from, (LINK_X, git.bottom()));
-        assert!(plan.links[1..3].iter().all(|l| l.from.0 == l.to.0));
-        assert_eq!(plan.links[3].from, (card.right(), card.y + HEAD / 2.));
-        assert_eq!(plan.links[3].to, (branch.x + LINK_X, branch.y));
-        assert_eq!(plan.bounds.bottom(), large.bottom());
+        // Each parent centred over its children, and git over main.
+        assert_eq!(
+            centre(main),
+            (note.x + small.right() + SIBLING_GAP + branch_room) / 2.
+        );
+        assert_eq!(centre(git), centre(main));
+        assert_eq!(centre(feature), centre(large));
+
+        // From the middle of a parent's bottom to the middle of a child's top.
+        let to_small = plan
+            .links
+            .iter()
+            .find(|l| l.kind == LinkKind::Terminal && l.to.1 == small.y)
+            .unwrap();
+        assert_eq!(to_small.from, (centre(main), main.bottom()));
+        assert_eq!(to_small.to, (centre(small), small.y));
+        assert_eq!(to_small.worktree, PathBuf::from("/r"));
     }
 
     #[test]
-    fn a_moved_card_takes_its_terminals_and_leaves_the_next_column_in_place() {
+    fn a_moved_node_takes_its_subtree_along() {
         let mut main = checkout("/r", "main", true, None);
-        main.terminals = vec![(7, Tile::Small)];
-        let other = checkout("/r-a", "feature", false, None);
+        main.terminals = vec![(7, Tile::Small.size())];
+        let other = checkout("/r-a", "feature", false, Some("main"));
         let groups = [group("/r", vec![main, other])];
-        let before = plan(&groups, &Moved::new());
+        let before = plan(&groups, &Moved::new(), &Sizes::new());
         let moved = Moved::from([
             (Node::Worktree(PathBuf::from("/r")), (500., 40.)),
             (Node::Terminal(7), (0., 100.)),
         ]);
-        let after = plan(&groups, &moved);
-        let card = |p: &Plan| p.card(Path::new("/r")).unwrap();
-        assert_eq!(card(&after).x, card(&before).x + 500.);
-        // The terminal follows its card, plus its own offset.
+        let after = plan(&groups, &moved, &Sizes::new());
+        let card = |p: &Plan, path: &str| p.card(Path::new(path)).unwrap();
+        assert_eq!(card(&after, "/r").x, card(&before, "/r").x + 500.);
+        // The terminal and the branch under it follow, plus their own offset.
         assert_eq!(after.tile(7).unwrap().x, before.tile(7).unwrap().x + 500.);
         assert_eq!(after.tile(7).unwrap().y, before.tile(7).unwrap().y + 140.);
-        // The next column does not move for it.
-        assert_eq!(
-            after.card(Path::new("/r-a")),
-            before.card(Path::new("/r-a"))
-        );
-        // And the links follow what moved.
-        assert_eq!(after.links[0].to.0, card(&after).x + LINK_X);
+        assert_eq!(card(&after, "/r-a").x, card(&before, "/r-a").x + 500.);
+        // The git node above does not.
+        assert_eq!(after.gits[0].rect, before.gits[0].rect);
     }
 
     #[test]
-    fn repositories_stack() {
+    fn a_resized_node_widens_its_room_and_lowers_the_next_level() {
+        let mut main = checkout("/r", "main", true, None);
+        main.terminals = vec![(7, Tile::Small.size())];
+        let groups = [group("/r", vec![main])];
+        let before = plan(&groups, &Moved::new(), &Sizes::new());
+        let sizes = Sizes::from([(Node::Worktree(PathBuf::from("/r")), (CARD.0, CARD.1 + 100.))]);
+        let after = plan(&groups, &Moved::new(), &sizes);
+        assert_eq!(after.tile(7).unwrap().y, before.tile(7).unwrap().y + 100.);
+    }
+
+    #[test]
+    fn notes_hang_from_the_git_node_beside_the_main_checkout() {
+        let mut groups = [group("/r", vec![checkout("/r", "main", true, None)])];
+        groups[0].notes = vec![4];
+        let plan = plan(&groups, &Moved::new(), &Sizes::new());
+        let note = plan.note(4).unwrap();
+        let main = plan.card(Path::new("/r")).unwrap();
+        assert_eq!(note.y, main.y);
+        assert_eq!(main.x, note.right() + SIBLING_GAP);
+        assert!(plan.links.iter().any(|l| l.kind == LinkKind::Note));
+    }
+
+    #[test]
+    fn a_cycle_of_guesses_loses_nothing() {
+        // No main checkout, and two branches each guessing the other.
+        let checkouts = vec![
+            checkout("/a", "one", false, Some("two")),
+            checkout("/b", "two", false, Some("one")),
+        ];
+        let plan = plan(&[group("/r", checkouts)], &Moved::new(), &Sizes::new());
+        assert_eq!(plan.cards.len(), 2);
+    }
+
+    #[test]
+    fn repositories_stand_side_by_side() {
         let plan = plan(
             &[
                 group("/a", vec![checkout("/a", "main", true, None)]),
                 group("/b", vec![checkout("/b", "main", true, None)]),
             ],
             &Moved::new(),
+            &Sizes::new(),
         );
-        let first = plan.card(Path::new("/a")).unwrap();
-        assert_eq!(plan.gits[1].rect.y, first.bottom() + GROUP_GAP);
+        assert_eq!(plan.gits[1].rect.x, GIT.0 + GROUP_GAP);
+        assert_eq!(plan.gits[1].rect.y, 0.);
+    }
+
+    #[test]
+    fn a_resize_stops_at_the_smallest_size() {
+        assert_eq!(resized((400., 300.), (50., -20.), MIN_TILE), (450., 280.));
+        assert_eq!(resized((400., 300.), (-500., -500.), MIN_TILE), MIN_TILE);
+        assert_eq!(Tile::nearest((700., 1.)), Tile::Medium);
+        assert_eq!(Tile::nearest((10., 1.)), Tile::Small);
     }
 
     #[test]
@@ -652,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn fitting_shows_everything_and_never_magnifies() {
+    fn fitting_centres_everything_and_never_magnifies() {
         let bounds = Rect {
             x: 0.,
             y: 0.,
@@ -661,13 +872,17 @@ mod tests {
         };
         let view = View::fit(bounds, (1048., 1048.));
         assert_eq!(view.zoom, 0.5);
-        assert!(view.screen(bounds).right() <= 1048. - MARGIN + 0.01);
+        let shown = view.screen(bounds);
+        assert_eq!(shown.x + shown.w / 2., 524.);
+        assert_eq!(shown.y + shown.h / 2., 524.);
         let small = Rect {
             w: 100.,
             h: 100.,
             ..bounds
         };
-        assert_eq!(View::fit(small, (1048., 1048.)).zoom, 1.);
+        let view = View::fit(small, (1048., 1048.));
+        assert_eq!(view.zoom, 1.);
+        assert_eq!(view.screen(small).x, 474.);
     }
 
     #[test]
@@ -697,16 +912,11 @@ mod tests {
 
     #[test]
     fn the_thumb_measures_the_plane_and_the_viewport_together() {
-        // Everything in view: no bar.
         assert_eq!(thumb((10., 900.), 1000.), None);
-        // Twice the viewport, scrolled to the start.
         assert_eq!(thumb((0., 2000.), 1000.), Some((0., 500.)));
-        // Scrolled halfway.
         assert_eq!(thumb((-1000., 1000.), 1000.), Some((500., 500.)));
-        // Panned past the end: the empty room counts — 2500 in all, of
-        // which the viewport is the last thousand but one hundred.
+        // Panned past the end: the empty room counts — 2500 in all.
         assert_eq!(thumb((-1500., 500.), 1000.), Some((600., 400.)));
-        // A thumb dragged one pixel moves the plane by the scale of the bar.
         assert_eq!(thumb_ratio((0., 2000.), 1000.), 2.);
     }
 

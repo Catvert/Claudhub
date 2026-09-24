@@ -202,8 +202,10 @@ src/
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
-    overview.rs     l'accueil : où va chaque nœud du plan, et le zoom — pur, testé
-    overview_view.rs l'accueil peint : cartes, terminaux, liens, gestes du plan
+    overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
+                    zoom — pur, testé
+    overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
+                    et la feuille de commit
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global
@@ -580,29 +582,40 @@ racine, où lire l'entité racine est une panique.
 pur et testé), et c'est ce qu'une aire de dock ne sait pas faire : surveiller
 cinq agents demande de voir cinq terminaux *en même temps*, là où un groupe
 d'onglets en montre un. Il remplace tout ce qui est sous la barre de titre par
-un **plan** qu'on déplace et qu'on zoome : le nœud git d'un dépôt en haut, puis
-**une colonne par worktree** — sa carte (branche, changements, commits depuis
-sa base, `git::outline`), et ses terminaux empilés dessous. Une colonne descend
-d'un cran par embranchement, et un trait part de la carte de la branche dont
-elle est issue. Il a remplacé le multiplexeur, qui répondait à la moitié de la
-question : lequel des agents a fini, mais pas où en est chaque worktree.
+un **plan** qu'on déplace et qu'on zoome, où chaque dépôt est **un arbre de haut
+en bas** : le nœud git à la racine, puis le checkout principal et les notes du
+dépôt ; sous chaque worktree, ses notes, ses terminaux vivants, puis les
+worktrees tirés de sa branche. Chaque parent est centré sur ses enfants et
+chaque niveau sur une ligne : un nœud qui arrive prend sa place dans l'arbre,
+aligné, sans rien à ranger. Il a remplacé le multiplexeur, qui répondait à la
+moitié de la question : lequel des agents a fini, mais pas où en est chaque
+worktree.
 
-- **Le zoom est une échelle, pas une disposition.** Le texte des cartes suit
-  parce que tout y est en `rem` et que le plan prête à chaque nœud un `rem` à
+- **Le zoom est une échelle, pas une disposition.** Le texte des nœuds suit
+  parce que tout y est en `rem` et que le plan prête à chacun un `rem` à
   l'échelle (`Scaled`, `Window::with_rem_size`) ; la police des terminaux suit
   par `TerminalView::set_canvas`, et **leur grille ne bouge pas** : elle se
   calcule sur la taille logique de la carte, jamais sur les pixels couverts, que
   l'arrondi ferait varier d'une ligne — chacune un `SIGWINCH`.
-- **Un nœud déplacé à la main garde sa place** comme un décalage par rapport à
-  la disposition (`overview::Moved`) : un terminal suit sa carte tant qu'on ne
-  l'a pas déplacé lui-même. Git et worktrees sont retenus dans le magasin, les
-  terminaux non — ils ne survivent pas au processus.
+- **Déplacer un nœud emmène son sous-arbre**, retenu comme un décalage par
+  rapport à l'arbre (`overview::Moved`) ; la poignée d'un coin le
+  redimensionne (`overview::Sizes`, un terminal portant sa taille). Git,
+  worktrees et notes sont retenus dans le magasin, les terminaux non — ils ne
+  survivent pas au processus. « Réinitialiser » oublie tout, pour les projets
+  affichés.
 - **Le bouton du milieu déplace le plan partout**, pris en phase de capture
   avant qu'un terminal n'y colle : sur cet écran, on colle par `Ctrl+Maj+V`.
   Ctrl+molette zoome autour du pointeur ; un terminal laisse passer ce cran
   (`set_canvas`), sinon il changerait la police de tous.
 - **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
   worktrees d'un code ne se lisent pas parmi ceux d'un autre.
+- **Les notes sont du Markdown dans le magasin** (`Store::home_notes`),
+  accrochées à un dépôt ou à un worktree ; chaque frappe y retourne, il n'y a
+  pas d'« enregistrer » à oublier.
+- **Valider depuis une carte** ouvre une feuille (`CommitSheet`, une entité
+  enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
+  commit du panneau des changements elle-même — même champ, même brouillon.
+  Le commit réussi la referme (`commit_sheet`).
 - Le plan **suit le focus** (`View::reveal`) quand la main passe à un autre
   terminal, jamais à chaque image. Un clic sur une carte la sélectionne, un
   double clic y emmène (`work_in_worktree`) : quitter l'écran est le seul geste
