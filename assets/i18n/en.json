@@ -991,5 +991,8 @@
   "skill-update-repo": "Update in the repository",
   "skill-update-user": "Update for me",
   "skill-remove-repo": "Remove from the repository",
-  "skill-remove-user": "Remove for me"
+  "skill-remove-user": "Remove for me",
+  "review-open-count": "%{open} / %{all} open",
+  "review-resolve": "Mark resolved",
+  "review-reopen": "Reopen"
 }

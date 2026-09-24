@@ -595,6 +595,168 @@ impl ClaudhubApp {
             })
     }
 
+    /// A review read: its summary, then its findings — each a place one
+    /// clicks to open and a tick that resolves it in the file.
+    fn render_review_body(&self, entry: &CanvasEntry, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (summary, found) = canvas::findings(&entry.node.body);
+        let path = entry.path.clone();
+        let worktree = self
+            .canvas_entry(&entry.path)
+            .map(|(worktree, _)| worktree.clone());
+        let rows: Vec<AnyElement> =
+            found
+                .into_iter()
+                .map(|finding| {
+                    let color = match finding.severity.as_deref() {
+                        Some("blocker") => theme.danger,
+                        Some("warning") => theme.warning,
+                        Some("suggestion") => theme.info,
+                        _ => theme.muted_foreground,
+                    };
+                    let place = if finding.start == finding.end {
+                        format!("{}:{}", finding.path, finding.start)
+                    } else {
+                        format!("{}:{}-{}", finding.path, finding.start, finding.end)
+                    };
+                    let resolved = finding.resolved();
+                    let open = (worktree.clone(), finding.clone());
+                    let tick = (path.clone(), finding.at);
+                    let first = finding.text.lines().next().unwrap_or_default().to_string();
+                    v_flex()
+                        .gap_0p5()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .when(resolved, |el| el.opacity(0.5))
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .text_xs()
+                                .child(div().flex_none().size(px(7.)).rounded_full().bg(color))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "review-open-{}-{}",
+                                            path.display(),
+                                            finding.at
+                                        )))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_color(theme.link)
+                                        .cursor_pointer()
+                                        .child(SharedString::from(place))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            let (worktree, finding) = open.clone();
+                                            if let Some(worktree) = worktree {
+                                                this.open_finding(&worktree, &finding, window, cx);
+                                            }
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "review-tick-{}-{}",
+                                        path.display(),
+                                        finding.at
+                                    )))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(icon(if resolved { "undo-2" } else { "check" }))
+                                    .tooltip(if resolved {
+                                        tr!("review-reopen")
+                                    } else {
+                                        tr!("review-resolve")
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let (path, at) = tick.clone();
+                                        let status = if resolved { "open" } else { "resolved" };
+                                        this.set_finding_status(&path, at, status, cx);
+                                    })),
+                                ),
+                        )
+                        .when(!first.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(SharedString::from(first)),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect();
+        div()
+            .id(SharedString::from(format!(
+                "overview-review-{}",
+                entry.path.display()
+            )))
+            .flex_1()
+            .min_h_0()
+            .p_2()
+            .overflow_y_scroll()
+            .text_sm()
+            .child(gpui_kit::component::text::TextView::markdown(
+                SharedString::from(format!("overview-review-summary-{}", entry.path.display())),
+                summary,
+            ))
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// Goes to a finding: its worktree, its file, its line.
+    fn open_finding(
+        &mut self,
+        worktree: &Path,
+        finding: &canvas::Finding,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.work_in_worktree(worktree, window, cx);
+        self.open_at(
+            PathBuf::from(&finding.path),
+            Some(super::explorer::Landing::Position {
+                line: finding.start.saturating_sub(1),
+                character: 0,
+            }),
+            cx,
+        );
+    }
+
+    /// Resolves or reopens one finding, in the file — where a teammate's
+    /// pull will see it — and the review with it once none is left open.
+    fn set_finding_status(&mut self, path: &Path, at: usize, status: &str, cx: &mut Context<Self>) {
+        let Some((worktree, entry)) = self.canvas.iter_mut().find_map(|(worktree, entries)| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.path == path)
+                .map(|entry| (worktree.clone(), entry))
+        }) else {
+            return;
+        };
+        let mut node = entry.node.clone();
+        node.body = canvas::set_status(&node.body, at, status);
+        let (_, found) = canvas::findings(&node.body);
+        node.status = Some(if found.iter().all(canvas::Finding::resolved) {
+            "resolved".into()
+        } else {
+            "open".into()
+        });
+        let text = canvas::render(&node);
+        let expect = entry.digest;
+        entry.digest = crate::files::digest(&text);
+        entry.node = node;
+        self.git.send(Cmd::WriteCanvasFile {
+            worktree,
+            path: path.to_path_buf(),
+            text,
+            expect: Some(expect),
+        });
+        cx.notify();
+    }
+
     /// A note: rendered Markdown, or the field it is written in.
     pub(super) fn render_home_note(
         &self,
@@ -617,6 +779,10 @@ impl ClaudhubApp {
             .map(SharedString::from)
             .unwrap_or_else(|| tr!("overview-note"));
         let review = entry.node.kind == canvas::Kind::Review;
+        let open_findings = review.then(|| {
+            let (_, found) = canvas::findings(&entry.node.body);
+            (found.iter().filter(|f| !f.resolved()).count(), found.len())
+        });
         // Who wrote it, in a shared file: the point of sharing is reading a
         // colleague's.
         let byline = entry
@@ -646,6 +812,20 @@ impl ClaudhubApp {
             .child(icon(if review { "file-text" } else { "sticky-note" }).text_color(muted))
             .when(entry.private, |el| {
                 el.child(icon("eye-off").text_color(muted))
+            })
+            // A review says how much of it is still to do.
+            .when_some(open_findings, |el, (open, all)| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(if open > 0 {
+                            theme.warning
+                        } else {
+                            theme.success
+                        })
+                        .child(tr!("review-open-count", { open: open, all: all })),
+                )
             })
             .child(
                 div()
@@ -718,6 +898,7 @@ impl ClaudhubApp {
                         .h_full(),
                 )
                 .into_any_element(),
+            None if review => self.render_review_body(&entry, cx),
             None => div()
                 .id(SharedString::from(format!(
                     "overview-note-body-{}",

@@ -237,6 +237,185 @@ pub fn file_name(stamp: &str, title: &str, taken: &[String]) -> String {
     name
 }
 
+/// A finding of a review: a place in the code, what is said of it, and
+/// where it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// Relative to the repository's root, as the review wrote it.
+    pub path: String,
+    /// One-based, as a review writes them; `end` is `start` for one line.
+    pub start: u32,
+    pub end: u32,
+    pub severity: Option<String>,
+    pub status: Option<String>,
+    /// The quoted lines, when the review quoted them.
+    pub excerpt: Option<String>,
+    pub text: String,
+    /// The line of the body its `### ` heading is on: what `set_status`
+    /// finds it again by.
+    pub at: usize,
+}
+
+impl Finding {
+    pub fn resolved(&self) -> bool {
+        self.status.as_deref() == Some("resolved")
+    }
+}
+
+fn fence(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("```") || line.starts_with("~~~")
+}
+
+/// `src/a.rs:42` or `src/a.rs:40-44`, and whatever follows a space.
+fn place(heading: &str) -> Option<(String, u32, u32)> {
+    let first = heading.split_whitespace().next()?;
+    let (path, lines) = first.rsplit_once(':')?;
+    let (start, end) = match lines.split_once('-') {
+        Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+        None => {
+            let line = lines.parse().ok()?;
+            (line, line)
+        }
+    };
+    (!path.is_empty()).then(|| (path.to_string(), start, end))
+}
+
+/// A review's body read: its summary — what comes before `## Findings` —
+/// and its findings, one per `### path:line` heading under it. What does not
+/// read as a place is left in the text rather than guessed at.
+pub fn findings(body: &str) -> (String, Vec<Finding>) {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut in_fence = false;
+    let mut start = None;
+    for (index, line) in lines.iter().enumerate() {
+        if fence(line) {
+            in_fence = !in_fence;
+        }
+        if !in_fence && line.trim().eq_ignore_ascii_case("## findings") {
+            start = Some(index);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return (body.to_string(), Vec::new());
+    };
+    let summary = lines[..start].join("\n").trim_end().to_string();
+    let mut found: Vec<Finding> = Vec::new();
+    let mut in_fence = false;
+    // Where the finding being read stands: its metadata is done once a blank
+    // line or a fence has been met.
+    let mut meta = false;
+    let mut excerpt: Option<Vec<&str>> = None;
+    for (index, line) in lines.iter().enumerate().skip(start + 1) {
+        if !in_fence && line.starts_with("## ") && !line.starts_with("### ") {
+            break;
+        }
+        if !in_fence && line.starts_with("### ") {
+            if let Some((path, first, last)) = place(&line[4..]) {
+                found.push(Finding {
+                    path,
+                    start: first,
+                    end: last,
+                    severity: None,
+                    status: None,
+                    excerpt: None,
+                    text: String::new(),
+                    at: index,
+                });
+                meta = true;
+                excerpt = None;
+                continue;
+            }
+        }
+        let Some(finding) = found.last_mut() else {
+            continue;
+        };
+        if fence(line) {
+            in_fence = !in_fence;
+            meta = false;
+            match (in_fence, finding.excerpt.is_none()) {
+                // The first fenced block is the excerpt.
+                (true, true) if excerpt.is_none() => excerpt = Some(Vec::new()),
+                (false, _) if excerpt.is_some() => {
+                    finding.excerpt = excerpt.take().map(|l| l.join("\n"));
+                }
+                _ => {
+                    finding.text.push_str(line);
+                    finding.text.push('\n');
+                }
+            }
+            continue;
+        }
+        if let Some(lines) = excerpt.as_mut() {
+            lines.push(line);
+            continue;
+        }
+        if meta {
+            if line.trim().is_empty() {
+                meta = false;
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                match key.trim() {
+                    "severity" => {
+                        finding.severity = value;
+                        continue;
+                    }
+                    "status" => {
+                        finding.status = value;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            meta = false;
+        }
+        finding.text.push_str(line);
+        finding.text.push('\n');
+    }
+    for finding in &mut found {
+        finding.text = finding.text.trim().to_string();
+    }
+    (summary, found)
+}
+
+/// The body with one finding's `status:` set — the line changed in place,
+/// or added under the heading when there was none. Everything else is left
+/// as written.
+pub fn set_status(body: &str, at: usize, status: &str) -> String {
+    let mut lines: Vec<String> = body.lines().map(str::to_string).collect();
+    if at >= lines.len() {
+        return body.to_string();
+    }
+    let mut index = at + 1;
+    let mut replaced = false;
+    while index < lines.len() {
+        let line = &lines[index];
+        if line.trim().is_empty() || fence(line) || line.starts_with('#') {
+            break;
+        }
+        if line
+            .split_once(':')
+            .is_some_and(|(key, _)| key.trim() == "status")
+        {
+            lines[index] = format!("status: {status}");
+            replaced = true;
+            break;
+        }
+        index += 1;
+    }
+    if !replaced {
+        lines.insert(at + 1, format!("status: {status}"));
+    }
+    let mut out = lines.join("\n");
+    if body.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// Where a checkout's shared notes live.
 pub fn shared_dir(checkout: &Path) -> PathBuf {
     crate::wslpath::join(&crate::wslpath::join(checkout, DIR), NOTES)
@@ -294,6 +473,47 @@ mod tests {
         assert_eq!(node.heading().as_deref(), Some("Cache — to check"));
         node.title = Some("Given".into());
         assert_eq!(node.heading().as_deref(), Some("Given"));
+    }
+
+    const REVIEW: &str = "A careful change.\n\n## Findings\n\n### src/cache.rs:42\nseverity: warning\nstatus: open\n\n```rust\nlet key = format!(\"{}\", id);\n### not a heading inside a fence\n```\n\nThe key is built twice.\n\n### src/api.rs:10-12 — routes\nseverity: suggestion\n\nSplit this.\n\n### no place here\nstray line\n";
+
+    #[test]
+    fn a_review_reads_as_its_summary_and_its_findings() {
+        let (summary, found) = findings(REVIEW);
+        assert_eq!(summary, "A careful change.");
+        assert_eq!(found.len(), 2);
+        let first = &found[0];
+        assert_eq!(
+            (first.path.as_str(), first.start, first.end),
+            ("src/cache.rs", 42, 42)
+        );
+        assert_eq!(first.severity.as_deref(), Some("warning"));
+        assert_eq!(first.status.as_deref(), Some("open"));
+        assert_eq!(
+            first.excerpt.as_deref(),
+            Some("let key = format!(\"{}\", id);\n### not a heading inside a fence")
+        );
+        assert_eq!(first.text, "The key is built twice.");
+        let second = &found[1];
+        assert_eq!((second.start, second.end), (10, 12));
+        assert_eq!(second.status, None);
+        // A heading that is no place stays in the text of the one before.
+        assert!(second.text.contains("### no place here"));
+        assert!(findings("No findings at all.").1.is_empty());
+    }
+
+    #[test]
+    fn resolving_a_finding_changes_its_line_and_nothing_else() {
+        let (_, found) = findings(REVIEW);
+        let resolved = set_status(REVIEW, found[0].at, "resolved");
+        assert_eq!(resolved.lines().count(), REVIEW.lines().count());
+        assert!(findings(&resolved).1[0].resolved());
+        // Without a status line, one is added under the heading.
+        let second = set_status(&resolved, found[1].at, "resolved");
+        let again = findings(&second).1;
+        assert!(again.iter().all(Finding::resolved));
+        assert_eq!(second.lines().count(), REVIEW.lines().count() + 1);
+        assert_eq!(again[0].text, "The key is built twice.");
     }
 
     #[test]

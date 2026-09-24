@@ -991,5 +991,8 @@
   "skill-update-repo": "Mettre à jour dans le dépôt",
   "skill-update-user": "Mettre à jour pour moi",
   "skill-remove-repo": "Retirer du dépôt",
-  "skill-remove-user": "Retirer pour moi"
+  "skill-remove-user": "Retirer pour moi",
+  "review-open-count": "%{open} / %{all} ouvertes",
+  "review-resolve": "Marquer résolue",
+  "review-reopen": "Rouvrir"
 }
