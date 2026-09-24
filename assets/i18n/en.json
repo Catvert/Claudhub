@@ -974,5 +974,8 @@
   "overview-close-title": "Close this terminal?",
   "overview-close-busy": "A command is still running in it: it will be stopped.",
   "overview-hide-title": "Take this worktree off the plane?",
-  "overview-hide-body": "The worktree is not deleted and its terminals keep running. “Reset” brings it back."
+  "overview-hide-body": "The worktree is not deleted and its terminals keep running. “Reset” brings it back.",
+  "overview-note-no-vault": "No notes vault is set: a private note has nowhere to go.",
+  "overview-note-share": "Share: keep the note in the repository (.claudhub/)",
+  "overview-note-keep": "Keep to myself: move the note to the vault, out of the repository"
 }

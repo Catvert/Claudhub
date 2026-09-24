@@ -149,6 +149,7 @@ src/
     search.rs   `git grep` : les arguments, le parsage, les plafonds
     snapshot.rs le point de relecture : l'état du worktree en commit, sans
                 toucher l'index de l'utilisateur
+  canvas.rs     un nœud de l'accueil sur disque : l'en-tête, le nom du fichier — pur
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent,
                 ont fini ou attendent — le mot de l'agent fusionné à la devinette
   agent_hooks.rs  les hooks de Claude Code : la ligne shell qui écrit, le fichier
@@ -202,6 +203,7 @@ src/
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
+    canvas_view.rs  les notes de l'accueil : les fichiers lus, écrits, déplacés
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
                     zoom — pur, testé
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
@@ -611,9 +613,15 @@ worktree.
   (`set_canvas`), sinon il changerait la police de tous.
 - **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
   worktrees d'un code ne se lisent pas parmi ceux d'un autre.
-- **Les notes sont du Markdown dans le magasin** (`Store::home_notes`),
-  accrochées à un dépôt ou à un worktree ; chaque frappe y retourne, il n'y a
-  pas d'« enregistrer » à oublier.
+- **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
+  Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
+  **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
+  lise chez un collègue — ou dans le coffre du worktree pour une note privée.
+  Le disque fait foi : un agent y écrit, la vue relit (surveillance du
+  checkout, relevé de l'accueil) ; la main y retourne après une pause, **à la
+  condition** que le fichier soit toujours celui lu. La mise en page reste
+  locale (`Store::home_places`, par chemin). Le worker crée la note — nom
+  libre sur le disque, signée du `user.name` du checkout.
 - **Valider depuis une carte** ouvre une feuille (`CommitSheet`, une entité
   enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
   commit du panneau des changements elle-même — même champ, même brouillon.

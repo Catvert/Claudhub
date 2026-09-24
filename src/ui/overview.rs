@@ -139,8 +139,8 @@ pub enum Node {
     Worktree(PathBuf),
     /// A terminal, by its view's id: it lives no longer than the process.
     Terminal(u64),
-    /// A note, by the id the store gave it.
-    Note(u64),
+    /// A note, by its file's path.
+    Note(PathBuf),
 }
 
 /// Where the hand has put nodes, as offsets from where the tree would.
@@ -211,8 +211,8 @@ pub struct Checkout<'a> {
     pub base: Option<&'a str>,
     /// Its terminals, in the order they were opened, with their size.
     pub terminals: Vec<(u64, (f32, f32))>,
-    /// The notes hung from it, in the order they were written.
-    pub notes: Vec<u64>,
+    /// The notes hung from it, by file, in the order they were written.
+    pub notes: Vec<PathBuf>,
 }
 
 /// A repository: its git node, its worktrees, and the notes hung from it.
@@ -220,7 +220,7 @@ pub struct Checkout<'a> {
 pub struct Group<'a> {
     pub main: &'a Path,
     pub checkouts: Vec<Checkout<'a>>,
-    pub notes: Vec<u64>,
+    pub notes: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,7 +324,7 @@ pub struct Plan {
     pub gits: Vec<Card>,
     pub cards: Vec<Card>,
     pub tiles: Vec<Placed>,
-    pub notes: Vec<Placed>,
+    pub notes: Vec<Card>,
     pub links: Vec<Link>,
     /// Everything, for `fit` and the scrollbars.
     pub bounds: Rect,
@@ -341,13 +341,13 @@ impl Plan {
             Node::Git(path) => self.gits.iter().find(|c| &c.path == path).map(|c| c.rect),
             Node::Worktree(path) => self.cards.iter().find(|c| &c.path == path).map(|c| c.rect),
             Node::Terminal(id) => self.tile(*id),
-            Node::Note(id) => self.notes.iter().find(|n| n.id == *id).map(|n| n.rect),
+            Node::Note(path) => self.notes.iter().find(|n| &n.path == path).map(|n| n.rect),
         }
     }
 
     #[cfg(test)]
-    pub fn note(&self, id: u64) -> Option<Rect> {
-        self.notes.iter().find(|note| note.id == id).map(|n| n.rect)
+    pub fn note(&self, path: &str) -> Option<Rect> {
+        self.rect(&Node::Note(PathBuf::from(path)))
     }
 
     #[cfg(test)]
@@ -420,8 +420,8 @@ fn tree(group: &Group, hand: &Hand) -> Vec<Branch> {
         nodes[parent].children.push(index);
         index
     };
-    for &id in &group.notes {
-        let node = Node::Note(id);
+    for path in &group.notes {
+        let node = Node::Note(path.clone());
         add(
             &mut nodes,
             0,
@@ -490,8 +490,8 @@ fn tree(group: &Group, hand: &Hand) -> Vec<Branch> {
         let index = nodes.len() - 1;
         nodes[parent].children.push(index);
         placed[checkout] = Some(index);
-        for &id in &this.notes {
-            let node = Node::Note(id);
+        for path in &this.notes {
+            let node = Node::Note(path.clone());
             nodes.push(Branch {
                 size: sizes.get(&node).copied().unwrap_or(NOTE),
                 node,
@@ -660,7 +660,10 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
                     rect,
                 }),
                 Node::Terminal(id) => plan.tiles.push(Placed { id: *id, rect }),
-                Node::Note(id) => plan.notes.push(Placed { id: *id, rect }),
+                Node::Note(path) => plan.notes.push(Card {
+                    path: path.clone(),
+                    rect,
+                }),
             }
         }
         left += widths.first().copied().unwrap_or(0.) + GROUP_GAP;
@@ -898,7 +901,7 @@ mod tests {
     #[test]
     fn the_tree_goes_down_and_centres_each_parent() {
         let mut main = checkout("/r", "main", true, None);
-        main.notes = vec![5];
+        main.notes = vec![PathBuf::from("/r/.claudhub/notes/5.md")];
         main.terminals = vec![(7, Tile::Small.size())];
         let mut feature = checkout("/r-a", "feature", false, Some("main"));
         feature.terminals = vec![(8, Tile::Large.size())];
@@ -906,7 +909,7 @@ mod tests {
 
         let git = plan.gits[0].rect;
         let main = plan.card(Path::new("/r")).unwrap();
-        let note = plan.note(5).unwrap();
+        let note = plan.note("/r/.claudhub/notes/5.md").unwrap();
         let small = plan.tile(7).unwrap();
         let feature = plan.card(Path::new("/r-a")).unwrap();
         let large = plan.tile(8).unwrap();
@@ -1120,9 +1123,9 @@ mod tests {
     #[test]
     fn notes_hang_from_the_git_node_beside_the_main_checkout() {
         let mut groups = [group("/r", vec![checkout("/r", "main", true, None)])];
-        groups[0].notes = vec![4];
+        groups[0].notes = vec![PathBuf::from("/r/.claudhub/notes/4.md")];
         let plan = plan(&groups, &Hand::default());
-        let note = plan.note(4).unwrap();
+        let note = plan.note("/r/.claudhub/notes/4.md").unwrap();
         let main = plan.card(Path::new("/r")).unwrap();
         assert_eq!(note.y, main.y);
         assert_eq!(main.x, note.right() + SIBLING_GAP);

@@ -665,6 +665,30 @@ pub enum Cmd {
         text: String,
         expect: Option<u64>,
     },
+    /// The home screen's nodes of a worktree: its shared folder
+    /// (`.claudhub/notes` in the checkout) and its private one (in the vault),
+    /// `true` for the private. See `crate::canvas`.
+    ReadCanvas {
+        worktree: WorktreeId,
+        dirs: Vec<(PathBuf, bool)>,
+    },
+    /// Writes a new note into a folder: the worker picks a free name on the
+    /// disk and signs it with the checkout's `user.name` — two things only it
+    /// can know.
+    CreateCanvasNote {
+        worktree: WorktreeId,
+        dir: PathBuf,
+        anchor: crate::canvas::Anchor,
+    },
+    /// Writes a node file unless it changed since it was read — an agent may
+    /// be writing the same file. Empty text deletes it: `WriteVaultFile`'s
+    /// rules, for a file that may be in the checkout.
+    WriteCanvasFile {
+        worktree: WorktreeId,
+        path: PathBuf,
+        text: String,
+        expect: Option<u64>,
+    },
     /// Launches the external editor on a file, at a given line.
     ///
     /// The command template travels here for the same reason as
@@ -1019,6 +1043,9 @@ impl Cmd {
             Self::ReadNotes { .. } => "ReadNotes",
             Self::WriteNotes { .. } => "WriteNotes",
             Self::WriteVaultFile { .. } => "WriteVaultFile",
+            Self::ReadCanvas { .. } => "ReadCanvas",
+            Self::CreateCanvasNote { .. } => "CreateCanvasNote",
+            Self::WriteCanvasFile { .. } => "WriteCanvasFile",
             Self::OpenExternal { .. } => "OpenExternal",
             Self::Watch { .. } => "Watch",
             Self::Unwatch { .. } => "Unwatch",
@@ -1458,6 +1485,17 @@ pub enum Evt {
     /// relaunch.
     ServerLost {
         message: String,
+    },
+    /// A worktree's node files: full path, private or not, and text.
+    CanvasRead {
+        worktree: WorktreeId,
+        files: Vec<(PathBuf, bool, String)>,
+    },
+    /// A node file was written; `created` names the note just made, for the
+    /// view to open it for writing once it has been read.
+    CanvasWritten {
+        worktree: WorktreeId,
+        created: Option<PathBuf>,
     },
     /// The notes folder's content: file name and text.
     NotesRead {

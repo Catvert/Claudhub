@@ -11,6 +11,7 @@ mod base_select;
 mod blade;
 mod branch_picker;
 mod branches;
+mod canvas_view;
 mod conflicts;
 mod db;
 mod db_query;

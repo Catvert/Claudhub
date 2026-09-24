@@ -974,5 +974,8 @@
   "overview-close-title": "Fermer ce terminal ?",
   "overview-close-busy": "Une commande y tourne encore : elle sera arrêtée.",
   "overview-hide-title": "Retirer ce worktree du plan ?",
-  "overview-hide-body": "Le worktree n'est pas supprimé et ses terminaux continuent de tourner. « Réinitialiser » le fait revenir."
+  "overview-hide-body": "Le worktree n'est pas supprimé et ses terminaux continuent de tourner. « Réinitialiser » le fait revenir.",
+  "overview-note-no-vault": "Aucun coffre de notes n'est réglé : une note privée n'a nulle part où aller.",
+  "overview-note-share": "Partager : ranger la note dans le dépôt (.claudhub/)",
+  "overview-note-keep": "Garder pour moi : ranger la note dans le coffre, hors du dépôt"
 }
