@@ -133,6 +133,8 @@ pub struct TerminalView {
     /// command. Recorded at opening, like `agent`, and for the same reason —
     /// nothing about the running process says it afterwards.
     runs_command: bool,
+    /// Set while the home screen shows it — see `set_canvas`.
+    canvas: Option<Canvas>,
 }
 
 /// The pty's child has exited, and the tab was a shell — nothing to keep.
@@ -268,7 +270,26 @@ impl TerminalView {
             label,
             agent,
             runs_command,
+            canvas: None,
         }
+    }
+
+    /// Puts the terminal on the home screen's plane, or takes it off.
+    ///
+    /// **Zooming scales the terminal, it does not reflow it.** The font
+    /// follows the zoom, and the grid is worked out from the card's size in
+    /// plane units — never from the pixels it covers, which the zoom changes
+    /// and the layout rounds: at a fifth of the size, one pixel of rounding is
+    /// five of the plane, and a line would come and go at every notch, each
+    /// one a `SIGWINCH` a program redraws on.
+    pub fn set_canvas(&mut self, canvas: Option<Canvas>) {
+        if self.canvas == canvas {
+            return;
+        }
+        self.canvas = canvas;
+        // Measured again at the next frame, against the new font.
+        self.font_size = px(0.);
+        self.bounds = Bounds::default();
     }
 
     pub fn is_agent(&self) -> bool {
@@ -346,7 +367,8 @@ impl TerminalView {
     /// the shell would keep believing in the old column width.
     fn sync_font(&mut self, cx: &App) {
         let settings = Settings::global(cx);
-        let font_size = px(settings.terminal.font_size);
+        let zoom = self.canvas.map_or(1., |canvas| canvas.zoom);
+        let font_size = px(settings.terminal.font_size * zoom);
         let font_family = settings.terminal_font();
         if font_size == self.font_size && font_family == self.font_family.as_ref() {
             return;
@@ -490,13 +512,25 @@ impl TerminalView {
         let line_height = window.line_height().max(px(1.));
 
         self.cell = gpui_kit::size(cell_width.max(px(1.)), line_height);
-        let (columns, lines) = grid_size(bounds.size, self.cell);
+        // On the plane, the grid is the card's and the cell the one of the
+        // unzoomed font: the same answer at every zoom — see `set_canvas`.
+        let (space, cell) = match self.canvas {
+            Some(canvas) => (
+                gpui_kit::size(px(canvas.size.0), px(canvas.size.1)),
+                gpui_kit::size(
+                    self.cell.width / canvas.zoom,
+                    self.cell.height / canvas.zoom,
+                ),
+            ),
+            None => (bounds.size, self.cell),
+        };
+        let (columns, lines) = grid_size(space, cell);
         self.request_size(
             TermSize::new(
                 columns,
                 lines,
-                f32::from(cell_width) as u16,
-                f32::from(line_height) as u16,
+                f32::from(cell.width) as u16,
+                f32::from(cell.height) as u16,
             ),
             cx,
         );
@@ -910,6 +944,11 @@ impl TerminalView {
         let line_height = window.line_height().max(px(1.));
         let delta = event.delta.pixel_delta(line_height);
         if delta.y == px(0.) && delta.x != px(0.) {
+            return;
+        }
+        // On the home screen the zoom is the plane's, and it goes through
+        // untouched: the terminal's own would change every terminal's font.
+        if self.canvas.is_some() && event.modifiers.secondary() {
             return;
         }
         cx.stop_propagation();
@@ -1769,14 +1808,22 @@ pub struct OpenTerminal {
     /// there one below?" holds a `&self` on the application, and reading an
     /// entity from there is one borrow too many.
     pub view_name: &'static str,
-    /// How wide its column is in the multiplexer, as a share of the window.
+    /// Its card's size on the home screen.
     ///
     /// Here and not in a map keyed by the view: a terminal that closes takes
-    /// its width with it, and there is nothing to sweep.
-    pub column: crate::ui::multiplex::Width,
+    /// its size with it, and there is nothing to sweep.
+    pub tile: crate::ui::overview::Tile,
 }
 
 impl OpenTerminal {}
+
+/// A terminal as the home screen holds it: the plane's zoom, and the size of
+/// its grid in plane units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Canvas {
+    pub zoom: f32,
+    pub size: (f32, f32),
+}
 
 impl ClaudhubApp {
     /// How a worktree is named where there is no room for a path: the
@@ -1969,7 +2016,7 @@ impl ClaudhubApp {
             name: None,
             panel: panel.clone(),
             view_name,
-            column: crate::ui::multiplex::Width::default(),
+            tile: crate::ui::overview::Tile::default(),
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);
@@ -2476,7 +2523,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// Goes to work in a project picked from the multiplexer.
+    /// Goes to work in a project picked from the home screen.
     ///
     /// Three things in one gesture, and none can be dropped: the worktree
     /// becomes the one being looked at — every dock only ever shows its own —,
@@ -2492,12 +2539,11 @@ impl ClaudhubApp {
         self.select_worktree(worktree.to_path_buf(), window, cx);
         self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
         self.bring_half_forward(crate::ui::panels::TerminalPanel::NAME, cx);
-        // And the grid goes away: one came to it to find out which of the
-        // agents had finished, and this is the answer being acted on. Leaving
-        // it up would show the eleven other checkouts' shells beside the one
+        // And the home screen goes away: one came to it to find out which of
+        // the agents had finished, and this is the answer being acted on.
+        // Leaving it up would show the eleven other checkouts beside the one
         // just chosen.
-        self.multiplex = false;
-        cx.notify();
+        self.leave_overview(cx);
     }
 
     /// The most recent agent terminal still running on this worktree.

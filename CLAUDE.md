@@ -142,6 +142,8 @@ src/
     branch.rs   `for-each-ref` → branches, amont, divergence
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
+    outline.rs  ce qu'une carte de l'accueil dit d'une branche : base, commits,
+                écart à l'amont
     tags.rs     les tags : lecture, création, publication, suppression
     stash.rs    la pile des remisages : la lire, y poser, en reprendre
     search.rs   `git grep` : les arguments, le parsage, les plafonds
@@ -200,7 +202,8 @@ src/
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
-    multiplex.rs    tous les terminaux en colonnes : un écran, pas un panneau
+    overview.rs     l'accueil : où va chaque nœud du plan, et le zoom — pur, testé
+    overview_view.rs l'accueil peint : cartes, terminaux, liens, gestes du plan
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global
@@ -290,7 +293,7 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   se disputeraient le verrou des références.
 - **Hooks du projet** (un worker) : `wt new/rm/up/down`. Pas avec les lectures
   (un `up` démarre des conteneurs), pas avec le réseau.
-- **Fond** (un worker) : résumés, agents, relevé de `wt`, ses questions et les
+- **Fond** (un worker) : résumés, aperçus des cartes de l'accueil, agents, relevé de `wt`, ses questions et les
   liens de son `[open] source` (des shells du projet), recettes d'un `justfile`,
   `gh` de la PR et des exécutions CI. Ne doit jamais passer devant un diff
   qu'on vient
@@ -573,48 +576,37 @@ précisément ce qui l'efface. Il garde l'identifiant de l'éditeur
 une fermeture : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
 racine, où lire l'entité racine est une panique.
 
-**Le multiplexeur est un écran** (`ui::multiplex`), et c'est ce qu'une aire de
-dock ne sait pas faire : surveiller cinq agents demande de voir cinq terminaux
-*en même temps*, là où un groupe d'onglets en montre un. Il remplace tout ce
-qui est sous la barre de titre — bandeaux, docks, barre d'état — par des tuiles,
-tous worktrees confondus, chacune disant à quel projet elle appartient.
-**Des colonnes pleine hauteur dans une bande qui défile en largeur**, comme
-niri, et non une grille : une grille de neuf donnait à chaque terminal un
-tiers de la hauteur, douze lignes de transcription, là où une colonne garde
-toutes les lignes et paie en largeur, l'axe qu'un terminal a en trop. La
-largeur d'une colonne est un **préréglage** (`multiplex::Width` — un tiers,
-la moitié, deux tiers, tout ; pur, testé), une part de la fenêtre que le bouton
-de l'en-tête fait tourner, jamais une poignée : une taille qu'on tire se
-retire à chaque fois. La bande **suit le focus**, en glissant par le même lissage
-(`multiplex::reveal` calcule la destination, `motion::push` y va) et non par
-`scroll_to_item`, qui saute ; lu au rendu et non écrit à
-chaque geste — un clic sur la surface d'un terminal le focalise aussi, et ce
-clic est au programme. Un cran **latéral** de la molette traverse le terminal
-(seul cran qu'il laisse passer) et fait glisser la bande depuis n'importe où ;
-un cran vertical sur un en-tête aussi, gpui le tournant vers le seul axe qui
-déborde — lissé comme les listes du dock, par `motion::Axes::Horizontal`. Deux chevrons de l'en-tête déplacent une colonne d'un
-pas (`multiplex::shift`, sans boucler), et une tuile se prend aussi par son
-en-tête pour se déposer sur une autre et **échanger** leurs places ; les deux
-réordonnent `terminals` lui-même
-— l'ordre des terminaux est un seul, celui que `Ctrl+PageUp` parcourt aussi.
-Deux **bandeaux fixes** encadrent la bande, un par bout, et ne défilent
-jamais : un chevron qui la fait glisser d'une demi-colonne — la moitié de la
-colonne **qui entre** de ce côté (`multiplex::half_column`, pur), un tiers et
-deux tiers n'ayant pas la même moitié — et un `+` qui ouvre un terminal à ce
-bout. Un cran de molette est le même pas, pris sur la colonne avant que gpui
-n'applique ses trois hauteurs de ligne — en demandant
-d'abord **sur quel worktree** : le `+` du dock ouvre sur le worktree regardé,
-et cet écran les regarde tous. Rien d'autre que des colonnes ne se tient dans
-la bande : un `+` qui la terminait prenait le rang d'une colonne neuve, et ses
-bornes périmées avec.
-Le clavier est
-remis des deux côtés de la bascule, ce qui avait le focus n'étant plus peint
-après. Chaque tuile a la
-flèche qui y emmène (`work_in_worktree`) : on vient là pour savoir lequel des
-agents a fini, et agir sur la réponse c'est aller dans ce worktree en quittant
-les colonnes. Il a remplacé `terminals_everywhere`, l'état qui montrait les
-terminaux de tous les worktrees dans le dock — ce que le multiplexeur fait
-mieux, et un état sans commande pour l'atteindre est du code mort.
+**L'accueil est un écran** (`ui::overview_view`, disposé par `ui::overview`,
+pur et testé), et c'est ce qu'une aire de dock ne sait pas faire : surveiller
+cinq agents demande de voir cinq terminaux *en même temps*, là où un groupe
+d'onglets en montre un. Il remplace tout ce qui est sous la barre de titre par
+un **plan** qu'on déplace et qu'on zoome : le nœud git d'un dépôt en haut, puis
+**une colonne par worktree** — sa carte (branche, changements, commits depuis
+sa base, `git::outline`), et ses terminaux empilés dessous. Une colonne descend
+d'un cran par embranchement, et un trait part de la carte de la branche dont
+elle est issue. Il a remplacé le multiplexeur, qui répondait à la moitié de la
+question : lequel des agents a fini, mais pas où en est chaque worktree.
+
+- **Le zoom est une échelle, pas une disposition.** Le texte des cartes suit
+  parce que tout y est en `rem` et que le plan prête à chaque nœud un `rem` à
+  l'échelle (`Scaled`, `Window::with_rem_size`) ; la police des terminaux suit
+  par `TerminalView::set_canvas`, et **leur grille ne bouge pas** : elle se
+  calcule sur la taille logique de la carte, jamais sur les pixels couverts, que
+  l'arrondi ferait varier d'une ligne — chacune un `SIGWINCH`.
+- **Un nœud déplacé à la main garde sa place** comme un décalage par rapport à
+  la disposition (`overview::Moved`) : un terminal suit sa carte tant qu'on ne
+  l'a pas déplacé lui-même. Git et worktrees sont retenus dans le magasin, les
+  terminaux non — ils ne survivent pas au processus.
+- **Le bouton du milieu déplace le plan partout**, pris en phase de capture
+  avant qu'un terminal n'y colle : sur cet écran, on colle par `Ctrl+Maj+V`.
+  Ctrl+molette zoome autour du pointeur ; un terminal laisse passer ce cran
+  (`set_canvas`), sinon il changerait la police de tous.
+- **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
+  worktrees d'un code ne se lisent pas parmi ceux d'un autre.
+- Le plan **suit le focus** (`View::reveal`) quand la main passe à un autre
+  terminal, jamais à chaque image. Un clic sur une carte la sélectionne, un
+  double clic y emmène (`work_in_worktree`) : quitter l'écran est le seul geste
+  qui perd la vue, et un clic qui a manqué le fond ne doit pas le payer.
 
 La disposition est enregistrée dans `<config>/layout.json`, une seule.
 `LAYOUT_VERSION` la fait écarter quand les panneaux changent de nom, et c'est le
@@ -651,8 +643,8 @@ Sept pièges du dock, tous rencontrés :
 un shell **d'un clic**, sans menu : il en a porté un — le shell, l'autre côté,
 puis un profil d'agent par entrée — et c'était un second geste devant celui
 qu'on fait quatre-vingt-dix-neuf fois sur cent. L'agent se lance depuis la
-barre de titre ; seul le `+` du multiplexeur garde son menu, qui existe pour
-nommer un worktree d'abord et offre les profils tant qu'il y est. Le `+`
+barre de titre ; seul le `+` d'une carte de l'accueil garde un menu — le
+shell et les profils d'agent —, la carte nommant déjà le worktree. Le `+`
 d'une barre d'onglets ouvre dans **sa** vue, celui de la barre d'état dans
 celle du réglage. Il se pose **après le
 dernier onglet** (`tab_bar_trailing`) et non au bout de la barre : le geste est
@@ -1055,7 +1047,7 @@ phase de **capture**, un terminal consommant ce qu'on lui donne) : sans quoi
 `AB` serait le geste exactement. Corollaire : il ne se personnalise pas et ne
 s'éteint pas, donc la fenêtre d'aide l'écrit à la main, sur la ligne de
 `Ctrl+P` puisque c'est le même geste. Une exception, dans le code et non dans
-une table : il se tait sur le multiplexeur, où deux Maj sont une hésitation
+une table : il se tait sur l'accueil, où deux Maj sont une hésitation
 au clavier d'un shell — `Ctrl+P` y reste.
 
 **Les bases** (`db/`, `db.rs`, `db_query.rs`) — un seul pilote, `sqlx`.

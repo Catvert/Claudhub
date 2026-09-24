@@ -29,7 +29,7 @@ impl ClaudhubApp {
     /// there every transition is said.
     pub(super) fn agent_sessions_heard(&mut self, sessions: Vec<Record>, cx: &mut Context<Self>) {
         for told in self.agents.hear(sessions, Instant::now()) {
-            if !self.multiplex && self.active.as_deref() == Some(told.worktree.as_path()) {
+            if !self.overview && self.active.as_deref() == Some(told.worktree.as_path()) {
                 continue;
             }
             let place = self.agent_place(&told.worktree);

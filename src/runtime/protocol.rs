@@ -151,6 +151,12 @@ pub enum Cmd {
     LoadSummaries {
         worktrees: Vec<WorktreeId>,
     },
+    /// What the home screen's cards say of each branch: its base, what it
+    /// added, how far from its upstream — `git::outline`. Asked while the
+    /// screen is up, never otherwise.
+    LoadOutlines {
+        worktrees: Vec<WorktreeId>,
+    },
     /// Looks for the coding agents running in these checkouts.
     ScanAgents {
         worktrees: Vec<WorktreeId>,
@@ -950,6 +956,7 @@ impl Cmd {
             Self::LoadTags { .. } => "LoadTags",
             Self::LoadRemoteTags { .. } => "LoadRemoteTags",
             Self::LoadSummaries { .. } => "LoadSummaries",
+            Self::LoadOutlines { .. } => "LoadOutlines",
             Self::ScanAgents { .. } => "ScanAgents",
             Self::LoadHistory { .. } => "LoadHistory",
             Self::LoadCommitDetail { .. } => "LoadCommitDetail",
@@ -1142,6 +1149,9 @@ pub enum Evt {
     },
     Summaries {
         summaries: Vec<(WorktreeId, Summary)>,
+    },
+    Outlines {
+        outlines: Vec<(WorktreeId, crate::git::Outline)>,
     },
     /// The repository has just been fetched without being asked. What it carries
     /// is not a result but an occasion: the ahead and behind counts may have

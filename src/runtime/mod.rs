@@ -113,6 +113,7 @@ fn is_background(cmd: &Cmd) -> bool {
     matches!(
         cmd,
         Cmd::LoadSummaries { .. }
+            | Cmd::LoadOutlines { .. }
             | Cmd::ScanAgents { .. }
             | Cmd::WtScan { .. }
             | Cmd::WtLinks { .. }
@@ -725,6 +726,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             }
         }
         Cmd::LoadSummaries { worktrees } => summaries(worktrees),
+        Cmd::LoadOutlines { worktrees } => vec![Evt::Outlines {
+            outlines: in_lanes(worktrees, |worktree| {
+                crate::git::outline::outline(worktree, OUTLINE_COMMITS).ok()
+            }),
+        }],
         Cmd::ScanAgents {
             worktrees,
             programs,
@@ -1477,24 +1483,33 @@ fn history(worktree: PathBuf, range: LogRange, limit: usize) -> Vec<Evt> {
 ///
 /// The order is the caller's, whatever the lanes finish in.
 fn summaries(worktrees: Vec<PathBuf>) -> Vec<Evt> {
+    // A worktree deleted under our feet is not an error to display: it will
+    // disappear from the list at the next `git worktree list`.
+    let summaries = in_lanes(worktrees, |worktree| status::summary(worktree).ok());
+    vec![Evt::Summaries { summaries }]
+}
+
+/// The commits a home card lists — the room it has.
+const OUTLINE_COMMITS: usize = 5;
+
+/// Reads something of every worktree, four at a time: the sweep covers every
+/// open checkout, and one after the other a dozen of them add up.
+fn in_lanes<T: Send>(
+    worktrees: Vec<PathBuf>,
+    read: impl Fn(&Path) -> Option<T> + Sync,
+) -> Vec<(PathBuf, T)> {
     const LANES: usize = 4;
 
     let lane = worktrees.len().div_ceil(LANES).max(1);
-    let summaries = std::thread::scope(|scope| {
+    let read = &read;
+    std::thread::scope(|scope| {
         let threads: Vec<_> = worktrees
             .chunks(lane)
             .map(|chunk| {
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .filter_map(|worktree| {
-                            // A worktree deleted under our feet is not an error
-                            // to display: it will disappear from the list at
-                            // the next `git worktree list`.
-                            status::summary(worktree)
-                                .ok()
-                                .map(|summary| (worktree.clone(), summary))
-                        })
+                        .filter_map(|worktree| read(worktree).map(|it| (worktree.clone(), it)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -1503,8 +1518,7 @@ fn summaries(worktrees: Vec<PathBuf>) -> Vec<Evt> {
             .into_iter()
             .flat_map(|thread| thread.join().unwrap_or_default())
             .collect()
-    });
-    vec![Evt::Summaries { summaries }]
+    })
 }
 
 fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {

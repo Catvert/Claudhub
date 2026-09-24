@@ -34,6 +34,9 @@ const SAVE_DELAY: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorktreeState {
+    /// Where the hand moved this worktree's card on the home screen, as an
+    /// offset from where the layout puts it — see `ui::overview`.
+    pub home_offset: Option<(f32, f32)>,
     /// The main repository this checkout belongs to.
     ///
     /// It only serves the purge, and is indispensable to it: without it, an
@@ -238,6 +241,9 @@ pub struct RepoState {
     /// live in `settings.json` — the organisation and the token belong to the
     /// machine, the project belongs to the code.
     pub sentry_project: Option<String>,
+    /// Where the hand moved the repository's git node on the home screen, as
+    /// an offset from where the layout puts it.
+    pub home_offset: Option<(f32, f32)>,
     /// **Legacy**: what a plugin had remembered about this repository, read
     /// once so `migrate_sentry` can pour Sentry's back into the field above,
     /// then cleared. Nothing writes it any more.
