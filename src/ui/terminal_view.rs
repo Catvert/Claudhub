@@ -348,6 +348,11 @@ impl TerminalView {
         self.runs_command || self.terminal.busy()
     }
 
+    /// The pty's child: the agent itself, for an agent's tab on Linux.
+    pub fn child(&self) -> Option<u32> {
+        self.terminal.child()
+    }
+
     pub fn label(&self) -> SharedString {
         // The kept `SharedString` and not `Terminal::title`: the dock asks
         // every tab for its title at every frame, and that one would copy the
@@ -1808,6 +1813,11 @@ pub struct OpenTerminal {
     /// there one below?" holds a `&self` on the application, and reading an
     /// entity from there is one borrow too many.
     pub view_name: &'static str,
+    /// What starts it again after a restart — `None` for a terminal launched
+    /// on a command, which is not started again (see `ui::revive`).
+    pub relaunch: Option<crate::ui::store::Relaunch>,
+    /// The agent's conversation, once the hooks have named it.
+    pub session: Option<String>,
     /// Its card's size on the home screen, in plane units.
     ///
     /// Here and not in a map keyed by the view: a terminal that closes takes
@@ -1937,6 +1947,18 @@ impl ClaudhubApp {
         // the pty: `open` falls back on the settings' program when nothing was
         // asked for, and that fallback is the shell.
         let runs_command = launch.command.is_some();
+        // What would start it again: a shell, or an agent's own command —
+        // without a `--resume` of this run, the session being added back on
+        // the way out.
+        let relaunch = match &launch.command {
+            None => Some(crate::ui::store::Relaunch::Shell),
+            Some((program, args)) if launch.agent => Some(crate::ui::store::Relaunch::Agent {
+                profile: launch.label.to_string(),
+                program: program.clone(),
+                args: crate::ui::revive::without_resume(args),
+            }),
+            Some(_) => None,
+        };
         let view = cx.new(|cx| {
             TerminalView::attach(
                 terminal,
@@ -1965,6 +1987,9 @@ impl ClaudhubApp {
             self.show_panel(crate::ui::panels::TerminalPanel::name_of(placement), cx);
         }
         self.install_terminal(worktree.to_path_buf(), view, placement, window, cx);
+        if let Some(opened) = self.terminals.last_mut() {
+            opened.relaunch = relaunch;
+        }
     }
 
     /// Puts a terminal's panel into the dock, and shows it.
@@ -2016,6 +2041,8 @@ impl ClaudhubApp {
             name: None,
             panel: panel.clone(),
             view_name,
+            relaunch: None,
+            session: None,
             size: crate::ui::overview::Tile::default().size(),
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
@@ -2449,6 +2476,171 @@ impl ClaudhubApp {
         if self.terminals_in(worktree, view).next().is_none() {
             let launch = Launch::shell().at(crate::ui::panels::TerminalPanel::placement_of(view));
             self.open_terminal(worktree, launch, window, cx);
+        }
+    }
+
+    /// Opens again the terminals a worktree had when the window was closed,
+    /// where they were — once per worktree and per run.
+    pub(super) fn revive_terminals(
+        &mut self,
+        worktrees: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::store::Relaunch;
+        for worktree in worktrees {
+            if !self.terminals_revived.insert(worktree.clone()) {
+                continue;
+            }
+            let kept = crate::ui::store::Store::global(cx)
+                .worktrees
+                .get(worktree)
+                .map(|state| state.terminals.clone())
+                .unwrap_or_default();
+            for kept in kept {
+                let launch = match &kept.relaunch {
+                    Relaunch::Shell => Launch::shell(),
+                    Relaunch::Agent {
+                        profile,
+                        program,
+                        args,
+                    } => {
+                        let found = Settings::global(cx)
+                            .terminal
+                            .agents
+                            .iter()
+                            .find(|p| p.label() == profile)
+                            .cloned();
+                        let mut launch = match found {
+                            Some(profile) => Launch::agent(&profile),
+                            // The profile is gone: its command as it was.
+                            None => Launch {
+                                command: Some((program.clone(), args.clone())),
+                                env: HashMap::new(),
+                                label: SharedString::from(profile.clone()),
+                                agent: true,
+                                placement: None,
+                            },
+                        };
+                        if let Some((program, args)) = launch.command.as_mut() {
+                            *args =
+                                crate::ui::revive::resumed(program, args, kept.session.as_deref());
+                        }
+                        launch
+                    }
+                };
+                let placement = if kept.right {
+                    crate::ui::settings::TerminalPlacement::Right
+                } else {
+                    crate::ui::settings::TerminalPlacement::Bottom
+                };
+                let before = self.terminals.len();
+                self.open_terminal(worktree, launch.at(placement), window, cx);
+                if self.terminals.len() == before {
+                    continue;
+                }
+                let Some(opened) = self.terminals.last_mut() else {
+                    continue;
+                };
+                opened.name = kept.name.clone().map(SharedString::from);
+                opened.session = kept.session.clone();
+                if let Some(size) = kept.size {
+                    opened.size = size;
+                }
+                let id = opened.view.entity_id().as_u64();
+                if let Some(offset) = kept.offset {
+                    self.overview_moved
+                        .insert(crate::ui::overview::Node::Terminal(id), offset);
+                }
+            }
+        }
+    }
+
+    /// Writes the open terminals back to the store, per worktree — only for
+    /// the worktrees whose kept terminals have been opened again, and only
+    /// what can be started again: a shell or an agent still running.
+    pub(super) fn persist_terminals(&mut self, cx: &mut Context<Self>) {
+        let mut kept: HashMap<PathBuf, Vec<crate::ui::store::SavedTerminal>> = self
+            .terminals_revived
+            .iter()
+            .map(|worktree| (worktree.clone(), Vec::new()))
+            .collect();
+        for terminal in &self.terminals {
+            let Some(list) = kept.get_mut(&terminal.worktree) else {
+                continue;
+            };
+            let Some(relaunch) = terminal.relaunch.clone() else {
+                continue;
+            };
+            if terminal.view.read(cx).has_exited() {
+                continue;
+            }
+            let id = terminal.view.entity_id().as_u64();
+            list.push(crate::ui::store::SavedTerminal {
+                relaunch,
+                name: terminal.name.as_ref().map(|name| name.to_string()),
+                session: terminal.session.clone(),
+                right: terminal.view_name == crate::ui::panels::TerminalPanel::RIGHT,
+                size: Some(terminal.size),
+                offset: self
+                    .overview_moved
+                    .get(&crate::ui::overview::Node::Terminal(id))
+                    .copied(),
+            });
+        }
+        crate::ui::store::Store::update_global_if(cx, |store| {
+            let mut changed = false;
+            for (worktree, list) in kept {
+                let present = store.worktrees.contains_key(&worktree);
+                if !present && list.is_empty() {
+                    continue;
+                }
+                let entry = store.worktrees.entry(worktree).or_default();
+                if entry.terminals != list {
+                    entry.terminals = list;
+                    changed = true;
+                }
+            }
+            changed
+        });
+    }
+
+    /// Names the conversation each agent terminal runs, from what the hooks
+    /// said — see `revive::sessions`.
+    pub(super) fn terminal_sessions_heard(
+        &mut self,
+        records: &[crate::agent_hooks::Record],
+        cx: &mut Context<Self>,
+    ) {
+        let agents: Vec<usize> = self
+            .terminals
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t.relaunch, Some(crate::ui::store::Relaunch::Agent { .. })))
+            .filter(|(_, t)| !t.view.read(cx).has_exited())
+            .map(|(index, _)| index)
+            .collect();
+        if agents.is_empty() {
+            return;
+        }
+        let open: Vec<crate::ui::revive::Open> = agents
+            .iter()
+            .map(|&index| crate::ui::revive::Open {
+                worktree: self.terminals[index].worktree.clone(),
+                pid: self.terminals[index].view.read(cx).child(),
+            })
+            .collect();
+        let heard: Vec<crate::ui::revive::Heard> = records
+            .iter()
+            .map(|record| crate::ui::revive::Heard {
+                session: record.session.clone(),
+                worktree: record.worktree.clone(),
+                pid: record.pid,
+                age_ms: record.age_ms,
+            })
+            .collect();
+        for (index, session) in crate::ui::revive::sessions(&open, &heard) {
+            self.terminals[agents[index]].session = Some(session);
         }
     }
 

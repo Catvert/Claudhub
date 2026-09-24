@@ -28,6 +28,7 @@ impl ClaudhubApp {
     /// them all, and the column one would need may be scrolled away — so
     /// there every transition is said.
     pub(super) fn agent_sessions_heard(&mut self, sessions: Vec<Record>, cx: &mut Context<Self>) {
+        self.terminal_sessions_heard(&sessions, cx);
         for told in self.agents.hear(sessions, Instant::now()) {
             if !self.overview && self.active.as_deref() == Some(told.worktree.as_path()) {
                 continue;

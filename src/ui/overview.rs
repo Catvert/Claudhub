@@ -215,10 +215,64 @@ pub enum LinkKind {
     Note,
 }
 
+/// A side of a node, where a link leaves or arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl Side {
+    /// The way out of the node through this side.
+    pub fn outward(self) -> (f32, f32) {
+        match self {
+            Side::Top => (0., -1.),
+            Side::Bottom => (0., 1.),
+            Side::Left => (-1., 0.),
+            Side::Right => (1., 0.),
+        }
+    }
+
+    fn middle(self, rect: Rect) -> (f32, f32) {
+        match self {
+            Side::Top => (rect.x + rect.w / 2., rect.y),
+            Side::Bottom => (rect.x + rect.w / 2., rect.bottom()),
+            Side::Left => (rect.x, rect.y + rect.h / 2.),
+            Side::Right => (rect.right(), rect.y + rect.h / 2.),
+        }
+    }
+}
+
+/// Where a link between two nodes leaves the one and reaches the other: the
+/// two sides that face each other, on the axis where the nodes stand furthest
+/// apart. A child under its parent hangs from the bottom — the tree as laid
+/// out; dragged beside it, it is reached from the side it went to, and the
+/// line no longer crosses the card to get there.
+pub fn attach(parent: Rect, child: Rect) -> ((f32, f32), Side, (f32, f32), Side) {
+    let apart_y = (child.y - parent.bottom()).max(parent.y - child.bottom());
+    let apart_x = (child.x - parent.right()).max(parent.x - child.right());
+    let (from, to) = if apart_y >= apart_x {
+        if child.y + child.h / 2. >= parent.y + parent.h / 2. {
+            (Side::Bottom, Side::Top)
+        } else {
+            (Side::Top, Side::Bottom)
+        }
+    } else if child.x + child.w / 2. >= parent.x + parent.w / 2. {
+        (Side::Right, Side::Left)
+    } else {
+        (Side::Left, Side::Right)
+    };
+    (from.middle(parent), from, to.middle(child), to)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Link {
     pub from: (f32, f32),
     pub to: (f32, f32),
+    pub from_side: Side,
+    pub to_side: Side,
     pub kind: LinkKind,
     /// The worktree the link belongs to — the child's, or the parent's for a
     /// terminal or a note: what says it belongs to the one on screen.
@@ -498,10 +552,12 @@ pub fn plan(groups: &[Group], moved: &Moved, sizes: &Sizes) -> Plan {
                 None => rect,
             });
             for &child in &branch.children {
-                let to = rects[child];
+                let (from, from_side, to, to_side) = attach(rect, rects[child]);
                 plan.links.push(Link {
-                    from: (rect.x + rect.w / 2., rect.bottom()),
-                    to: (to.x + to.w / 2., to.y),
+                    from,
+                    to,
+                    from_side,
+                    to_side,
                     kind: nodes[child].kind,
                     worktree: nodes[child].worktree.clone(),
                 });
@@ -760,6 +816,36 @@ mod tests {
         assert_eq!(to_small.from, (centre(main), main.bottom()));
         assert_eq!(to_small.to, (centre(small), small.y));
         assert_eq!(to_small.worktree, PathBuf::from("/r"));
+    }
+
+    #[test]
+    fn a_link_leaves_by_the_side_facing_its_child() {
+        let parent = Rect {
+            x: 0.,
+            y: 0.,
+            w: 100.,
+            h: 100.,
+        };
+        let at = |x, y| Rect {
+            x,
+            y,
+            w: 100.,
+            h: 100.,
+        };
+        // Under it: the tree as laid out.
+        let (from, from_side, to, to_side) = attach(parent, at(0., 300.));
+        assert_eq!((from_side, to_side), (Side::Bottom, Side::Top));
+        assert_eq!((from, to), ((50., 100.), (50., 300.)));
+        // Dragged to its right, a little lower: from the side, into the side.
+        let (from, from_side, to, to_side) = attach(parent, at(400., 50.));
+        assert_eq!((from_side, to_side), (Side::Right, Side::Left));
+        assert_eq!((from, to), ((100., 50.), (400., 100.)));
+        // To the left, and above.
+        assert_eq!(attach(parent, at(-400., 0.)).1, Side::Left);
+        assert_eq!(attach(parent, at(0., -300.)).1, Side::Top);
+        // Diagonal: the axis they are furthest apart on decides.
+        assert_eq!(attach(parent, at(500., 200.)).1, Side::Right);
+        assert_eq!(attach(parent, at(200., 500.)).1, Side::Bottom);
     }
 
     #[test]

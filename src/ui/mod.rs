@@ -49,6 +49,7 @@ mod rails;
 mod refine;
 mod repos;
 mod review;
+mod revive;
 mod scroll;
 mod search;
 mod search_view;

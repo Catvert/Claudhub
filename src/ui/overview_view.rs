@@ -121,7 +121,7 @@ impl Element for Scaled {
 
 /// A link as the canvas paints it: its two ends on screen, its kind, and
 /// whether it leads into the worktree on show.
-type Segment = ((f32, f32), (f32, f32), LinkKind, bool);
+type Segment = (overview::Link, bool);
 
 /// What the pointer is dragging on the home screen.
 #[derive(Clone, Debug)]
@@ -820,12 +820,11 @@ impl ClaudhubApp {
             .links
             .iter()
             .map(|link| {
-                (
-                    view.point(link.from),
-                    view.point(link.to),
-                    link.kind,
-                    active.as_deref() == Some(link.worktree.as_path()),
-                )
+                let on = active.as_deref() == Some(link.worktree.as_path());
+                let mut link = link.clone();
+                link.from = view.point(link.from);
+                link.to = view.point(link.to);
+                (link, on)
             })
             .collect();
         let quiet = cx.theme().border;
@@ -836,21 +835,28 @@ impl ClaudhubApp {
             move |bounds, _, window, _| {
                 let at =
                     |(x, y): (f32, f32)| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
-                for (from, to, kind, on) in links {
+                for (link, on) in links {
                     // What hangs from a card — a terminal, a note — is drawn
                     // finer than the tree itself: the branches are the shape,
                     // the rest is what the shape carries.
-                    let width = match kind {
+                    let width = match link.kind {
                         LinkKind::Root | LinkKind::Branch => width,
                         LinkKind::Terminal | LinkKind::Note => width * 0.6,
                     };
-                    // Down out of the parent and down into the child: a
-                    // straight line when one sits under the other, an S when
-                    // it stands aside.
+                    // Out of the parent through the side facing the child,
+                    // and into the child through the side facing back: each
+                    // end leaves square to its side, half the way across.
+                    let (from, to) = (link.from, link.to);
+                    let reach = ((to.0 - from.0).abs().max((to.1 - from.1).abs()) / 2.).max(12.);
+                    let out = link.from_side.outward();
+                    let back = link.to_side.outward();
                     let mut path = PathBuilder::stroke(width);
                     path.move_to(at(from));
-                    let middle = (from.1 + to.1) / 2.;
-                    path.cubic_bezier_to(at(to), at((from.0, middle)), at((to.0, middle)));
+                    path.cubic_bezier_to(
+                        at(to),
+                        at((from.0 + out.0 * reach, from.1 + out.1 * reach)),
+                        at((to.0 + back.0 * reach, to.1 + back.1 * reach)),
+                    );
                     if let Ok(path) = path.build() {
                         window.paint_path(path, if on { lit } else { quiet });
                     }

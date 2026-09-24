@@ -39,6 +39,9 @@ pub struct WorktreeState {
     pub home_offset: Option<(f32, f32)>,
     /// The size the hand gave its card, when it gave one.
     pub home_size: Option<(f32, f32)>,
+    /// The terminals that were open, in order, to open again — see
+    /// `ui::revive`.
+    pub terminals: Vec<SavedTerminal>,
     /// The main repository this checkout belongs to.
     ///
     /// It only serves the purge, and is indispensable to it: without it, an
@@ -286,6 +289,40 @@ pub struct Store {
     /// The Markdown notes on the home screen, every repository together —
     /// see `ui::overview_view`.
     pub home_notes: Vec<HomeNote>,
+}
+
+/// A terminal as it is kept across a restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedTerminal {
+    pub relaunch: Relaunch,
+    /// The name given by hand.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The agent's conversation, to resume.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Beside the code rather than under it.
+    #[serde(default)]
+    pub right: bool,
+    /// Its card on the home screen: size, and where the hand put it.
+    #[serde(default)]
+    pub size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub offset: Option<(f32, f32)>,
+}
+
+/// What starts a kept terminal again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Relaunch {
+    Shell,
+    /// An agent, by its profile's name — looked up again, so a profile edited
+    /// since is the one that starts — and its command, for when the profile
+    /// is gone.
+    Agent {
+        profile: String,
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 /// A Markdown note on the home screen's plane.

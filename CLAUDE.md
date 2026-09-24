@@ -206,6 +206,8 @@ src/
                     zoom — pur, testé
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
                     et la feuille de commit
+    revive.rs       les terminaux qui survivent à la fenêtre : quelle session
+                    Claude un onglet porte, la commande qui la reprend — pur
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global
@@ -616,6 +618,9 @@ worktree.
   enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
   commit du panneau des changements elle-même — même champ, même brouillon.
   Le commit réussi la referme (`commit_sheet`).
+- **Un lien part du côté qui fait face à l'enfant** (`overview::attach`) :
+  en dessous tant que l'arbre est tel qu'il l'a posé, par le flanc dès qu'on a
+  traîné l'enfant à côté — l'axe où les deux nœuds sont le plus écartés décide.
 - Le plan **suit le focus** (`View::reveal`) quand la main passe à un autre
   terminal, jamais à chaque image. Un clic sur une carte la sélectionne, un
   double clic y emmène (`work_in_worktree`) : quitter l'écran est le seul geste
@@ -668,6 +673,15 @@ l'autre. **Sans frère, la cible se dit quand même** (`dock_layout::target_for`
 sur le `home` de la table) : sans cible, `add_panel_view` laisse le panneau dans
 le **premier** groupe de la zone, qui est justement la moitié dont les terminaux
 ont été sortis.
+
+**Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal` dans
+le magasin) : un shell ou un agent encore vivant revient au démarrage, à sa
+place et à sa taille, et Claude **dans sa conversation** (`--resume`) — la
+session est celle des hooks dont le pid est l'enfant du pty. Un onglet lancé
+sur une commande ne revient pas : relancer un `just deploy` parce qu'on a
+fermé la fenêtre dessus serait un redémarrage que personne n'a demandé. Rien
+n'est écrit pour un worktree dont les terminaux n'ont pas encore été rouverts
+(`terminals_revived`) : un dépôt qui n'a pas répondu serait écrit vide.
 
 **Les terminaux sont des panneaux** : un par terminal, rendant sa propre
 `Entity<TerminalView>`. La place se garde par l'invisibilité, pas par un

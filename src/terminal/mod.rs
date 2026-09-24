@@ -312,6 +312,18 @@ impl Terminal {
     /// Off Linux it always answers no: reading a foreground group is `/proc`,
     /// and the Windows build's terminals are the one thing that stays on the
     /// Windows side.
+    /// The pty's child, where there is one to name — see `ui::revive`.
+    pub fn child(&self) -> Option<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.child)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     pub fn busy(&self) -> bool {
         if self.exited {
             return false;

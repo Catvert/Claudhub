@@ -1084,6 +1084,10 @@ pub struct ClaudhubApp {
     /// The home screen's notes being edited, each with its field and the
     /// subscription that writes it back to the store.
     pub(super) note_editors: HashMap<u64, (Entity<EditorState>, gpui_kit::Subscription)>,
+    /// The worktrees whose kept terminals have been opened again: those, and
+    /// only those, have their open terminals written back — a worktree whose
+    /// repository has not answered yet would otherwise be written empty.
+    pub(super) terminals_revived: std::collections::HashSet<PathBuf>,
     /// A node to bring into view on the next frame — one just created.
     pub(super) overview_reveal: Option<crate::ui::overview::Node>,
     /// True once the places remembered in the store have been read into
@@ -1549,6 +1553,7 @@ impl ClaudhubApp {
             overview_sizes: crate::ui::overview::Sizes::new(),
             commit_sheet: false,
             note_editors: HashMap::new(),
+            terminals_revived: std::collections::HashSet::new(),
             overview_reveal: None,
             overview_loaded: false,
             overview_all: false,
@@ -1801,6 +1806,10 @@ impl ClaudhubApp {
                     .update(cx, |this, cx| {
                         this.scan_now(tick.is_multiple_of(SUMMARY_EVERY), cx);
                         this.auto_fetch_now(cx);
+                        // The open terminals, as they would come back: a
+                        // write only when something moved, and at most this
+                        // old when the window is closed.
+                        this.persist_terminals(cx);
                     })
                     .is_ok();
                 if !alive {
@@ -2604,6 +2613,9 @@ impl ClaudhubApp {
             self.forget_missing_worktrees(&main, cx);
             self.ensure_wt_project(&main);
             self.git.send(Cmd::LoadBranches { main });
+            // Before the session's terminal below, which opens a shell only
+            // where there is none: the kept ones count.
+            self.revive_terminals(&paths, window, cx);
         }
         // A weaker candidate never displaces a firmer one, and re-selecting is
         // free: `select_worktree` returns at once when the path is already the
