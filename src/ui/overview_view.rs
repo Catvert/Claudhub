@@ -331,57 +331,93 @@ impl ClaudhubApp {
         .size_full();
 
         let links = self.render_links(&plan, view, cx);
-        let gits: Vec<AnyElement> = plan
+        let gits: Vec<(Node, AnyElement)> = plan
             .gits
             .iter()
             .map(|git| {
-                Scaled {
+                let element = Scaled {
                     rem,
                     child: placed(view.screen(git.rect))
                         .child(self.render_git_node(&git.path, view.zoom, cx))
                         .children(self.corner_unless_folded(Node::Git(git.path.clone()), cx))
                         .into_any_element(),
                 }
-                .into_any_element()
+                .into_any_element();
+                (Node::Git(git.path.clone()), element)
             })
             .collect();
-        let cards: Vec<AnyElement> = plan
+        let cards: Vec<(Node, AnyElement)> = plan
             .cards
             .iter()
             .map(|card| {
-                Scaled {
+                let element = Scaled {
                     rem,
                     child: placed(view.screen(card.rect))
                         .child(self.render_worktree_card(&card.path, view.zoom, cx))
                         .children(self.corner_unless_folded(Node::Worktree(card.path.clone()), cx))
                         .into_any_element(),
                 }
-                .into_any_element()
+                .into_any_element();
+                (Node::Worktree(card.path.clone()), element)
             })
             .collect();
-        let tiles: Vec<AnyElement> = self
+        let tiles: Vec<(Node, AnyElement)> = self
             .terminals
             .iter()
             .filter_map(|terminal| {
                 let id = terminal.view.entity_id();
                 let rect = plan.tile(id.as_u64())?;
-                Some(self.render_tile(terminal, view.screen(rect), rem, view.zoom, window, cx))
+                let element =
+                    self.render_tile(terminal, view.screen(rect), rem, view.zoom, window, cx);
+                Some((Node::Terminal(id.as_u64()), element))
             })
             .collect();
-        let notes: Vec<AnyElement> = plan
+        let notes: Vec<(Node, AnyElement)> = plan
             .notes
             .iter()
             .map(|note| {
-                Scaled {
+                let element = Scaled {
                     rem,
                     child: placed(view.screen(note.rect))
                         .child(self.render_home_note(&note.path, view.zoom, cx))
                         .children(self.corner_unless_folded(Node::Note(note.path.clone()), cx))
                         .into_any_element(),
                 }
-                .into_any_element()
+                .into_any_element();
+                (Node::Note(note.path.clone()), element)
             })
             .collect();
+        // The maximised node is painted last, over a veil across the rest of
+        // the plane: a node grown to the screen is a window in front, and the
+        // order of kinds — terminals after notes — put a terminal over it.
+        let maximized = self.overview_maximized.as_ref().map(|m| m.node.clone());
+        let mut on_top = None;
+        let mut nodes: Vec<AnyElement> = Vec::new();
+        for (node, element) in gits.into_iter().chain(cards).chain(notes).chain(tiles) {
+            if maximized.as_ref() == Some(&node) {
+                on_top = Some((node, element));
+            } else {
+                nodes.push(element);
+            }
+        }
+        let veil = on_top.as_ref().map(|(node, _)| {
+            let node = node.clone();
+            div()
+                .id("overview-veil")
+                .absolute()
+                .inset_0()
+                .bg(super::theme::gutter(cx).opacity(0.82))
+                // A press beside the window gives the view back, as beside a
+                // modal; and nothing under the veil takes it meanwhile.
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_maximize(&node, window, cx);
+                    }),
+                )
+        });
         let bars = match self.overview_maximized {
             Some(_) => Vec::new(),
             None => self.render_scrollbars(&plan, view, size, cx),
@@ -452,10 +488,9 @@ impl ClaudhubApp {
             .child(measure)
             .child(grid)
             .child(links)
-            .children(gits)
-            .children(cards)
-            .children(notes)
-            .children(tiles)
+            .children(nodes)
+            .children(veil)
+            .children(on_top.map(|(_, element)| element))
             .when(empty, |el| {
                 el.child(
                     v_flex()
