@@ -631,6 +631,14 @@ worktree.
   listées dans le panneau Notes — **jamais versées dans les notes**, que le
   coffre recopie. Envoyées à l'agent, elles lui demandent de passer lui-même
   la remarque `resolved` dans le fichier.
+- **Le `+` d'une carte ou du nœud git** ajoute dessous : un terminal, un
+  agent, une note vide, ou une note ou un diagramme **écrits par l'agent** sur
+  une demande. Claudhub nomme le fichier d'avance et le dit à l'agent avec le
+  format entier (`canvas::generation_prompt`, la skill pouvant manquer) ; son
+  terminal est un nœud où on le voit travailler, et **cède la place** au
+  résultat une fois le fichier là et le tour de l'agent fini — le `status` que
+  Claude écrit pour son pid. Ce terminal n'est pas retenu : rouvert, il
+  relancerait la demande.
 - **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
   sa branche fusionnée (plus aucun commit d'avance sur sa base) :
   `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de
@@ -657,9 +665,11 @@ worktree.
   Le commit réussi la referme (`commit_sheet`).
 - **Chaque nœud a les trois boutons d'une fenêtre** : replier jusqu'à l'en-tête
   (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — taille et vue
-  d'avant rendues au second clic —, et une croix toujours confirmée : un terminal fermé,
-  une note supprimée, un worktree **retiré du plan** avec ce qui en pend
-  (`Hand::hidden`), jamais supprimé ; le nœud git n'en a pas. **Un dialogue
+  d'avant rendues au second clic —, et une croix qui demande : un terminal
+  fermé ; une note, une revue ou un diagramme **masqué** (le fichier reste) ou
+  supprimé avec son image ; un worktree masqué avec ce qui en pend, ou supprimé
+  par le geste des worktrees ; le nœud git n'en a pas. Ce qui est masqué
+  (`Hand::hidden`, retenu) revient par le menu « Masqués » de la barre. **Un dialogue
   ouvert depuis un nœud prend le focus** (`focus_dialog`, différé) : ses
   boutons dispatchent `Confirm` depuis le focus, resté dans le terminal où la
   croix a été pressée — et OK ne faisait rien. Agrandir

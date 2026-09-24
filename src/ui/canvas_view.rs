@@ -22,7 +22,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     div, prelude::*, px, AnyElement, App, Context, Entity, Focusable as _, MouseButton,
-    SharedString, WeakEntity, Window,
+    SharedString, Window,
 };
 
 use super::app::ClaudhubApp;
@@ -85,20 +85,16 @@ fn picture_of(entry: &CanvasEntry) -> Option<PathBuf> {
     Some(crate::wslpath::join(dir, image))
 }
 
-/// The `+ note` of a git node's or a card's head.
-pub(super) fn note_button(app: WeakEntity<ClaudhubApp>, hang: Hang) -> Button {
-    let id = SharedString::from(format!("overview-add-note-{hang:?}"));
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .icon(icon("sticky-note"))
-        .tooltip(tr!("overview-note-add"))
-        .on_click(move |_, _, cx| {
-            if let Some(app) = app.upgrade() {
-                let hang = hang.clone();
-                app.update(cx, |this, cx| this.add_home_note(hang, cx));
-            }
-        })
+/// A note or a diagram an agent is writing: its terminal on the plane, and
+/// the file it was asked for. Once the file is there and the agent's turn is
+/// over, the terminal goes and the node takes its place.
+pub(crate) struct Generation {
+    pub terminal: gpui_kit::EntityId,
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    /// A diagram's picture, which has to be there too.
+    pub picture: Option<PathBuf>,
+    pub ready: bool,
 }
 
 impl ClaudhubApp {
@@ -189,6 +185,20 @@ impl ClaudhubApp {
         }
         // The order they were written in: the names start with their date.
         entries.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
+        // A file an agent was asked for has arrived — its picture with it,
+        // for a diagram: its terminal may go once the agent's turn is over.
+        for generation in self
+            .generations
+            .iter_mut()
+            .filter(|g| g.worktree == worktree)
+        {
+            let written = entries.iter().any(|entry| entry.path == generation.target);
+            let drawn = generation
+                .picture
+                .as_ref()
+                .is_none_or(|picture| pictures.iter().any(|(path, _, _)| path == picture));
+            generation.ready = written && drawn;
+        }
         self.canvas.insert(worktree.clone(), entries);
         // The worktree on show marks its reviews' findings in its diff.
         if self.active.as_deref() == Some(worktree.as_path()) {
@@ -228,6 +238,158 @@ impl ClaudhubApp {
             },
         );
         cx.notify();
+    }
+
+    /// Asks for the request a generated note or diagram is written from.
+    pub(super) fn ask_generation(
+        &mut self,
+        hang: Hang,
+        kind: canvas::Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, placeholder) = match kind {
+            canvas::Kind::Diagram => (
+                tr!("generate-diagram-title"),
+                tr!("generate-diagram-placeholder"),
+            ),
+            _ => (tr!("generate-note-title"), tr!("generate-note-placeholder")),
+        };
+        self.open_text_dialog(
+            title,
+            placeholder,
+            window,
+            cx,
+            move |this, request, window, cx| {
+                if !request.trim().is_empty() {
+                    this.generate_node(hang.clone(), kind, request, window, cx);
+                }
+            },
+        );
+    }
+
+    /// Starts the configured agent on a request, in a terminal of the
+    /// worktree — on the plane, where it can be watched working — told the
+    /// exact file to write, in the format a node reads.
+    fn generate_node(
+        &mut self,
+        hang: Hang,
+        kind: canvas::Kind,
+        request: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = super::settings::Settings::global(cx)
+            .terminal
+            .default_profile()
+            .cloned()
+        else {
+            self.announce_error(tr!("generate-no-agent"), cx);
+            return;
+        };
+        let (worktree, anchor) = match hang {
+            Hang::Repo(main) => (main, Anchor::Repo),
+            Hang::Worktree(worktree) => (worktree, Anchor::Worktree),
+        };
+        let dir = canvas::shared_dir(&worktree);
+        let now = chrono::Local::now();
+        let taken: Vec<String> = self
+            .canvas
+            .get(&worktree)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .collect();
+        let name = canvas::file_name(&now.format("%Y-%m-%d-%H%M").to_string(), &request, &taken);
+        let target = crate::wslpath::join(&dir, &name);
+        let picture = (kind == canvas::Kind::Diagram)
+            .then(|| crate::wslpath::join(&dir, name.replace(".md", ".svg")));
+        let prompt = canvas::generation_prompt(
+            kind,
+            anchor,
+            &target.display().to_string(),
+            picture.as_ref().map(|p| p.display().to_string()).as_deref(),
+            &now.to_rfc3339(),
+            &request,
+        );
+        let mut launch = super::terminal_view::Launch::agent(&profile);
+        if let Some((program, args)) = launch.command.as_mut() {
+            // Writing the file it was asked for is the whole job: a
+            // permission asked for it would stop the agent on a question.
+            if super::revive::is_claude(program) {
+                args.extend(["--permission-mode".to_string(), "acceptEdits".to_string()]);
+            }
+            args.push(prompt);
+        }
+        let before = self.terminals.len();
+        self.open_terminal(&worktree, launch, window, cx);
+        if self.terminals.len() == before {
+            return;
+        }
+        let Some(opened) = self.terminals.last_mut() else {
+            return;
+        };
+        opened.name = Some(match kind {
+            canvas::Kind::Diagram => tr!("generate-diagram-running"),
+            _ => tr!("generate-note-running"),
+        });
+        // A run with a purpose, not a terminal to bring back: kept, it would
+        // be started again at the next launch, request and all.
+        opened.relaunch = None;
+        let terminal = opened.view.entity_id();
+        self.overview_reveal = Some(Node::Terminal(terminal.as_u64()));
+        self.generations.push(Generation {
+            terminal,
+            worktree,
+            target,
+            picture,
+            ready: false,
+        });
+        cx.notify();
+    }
+
+    /// The agent's turn is over and its file is there: the terminal goes,
+    /// and the node it wrote takes its place on screen. A terminal the hand
+    /// closed first drops its wait.
+    pub(super) fn settle_generations(
+        &mut self,
+        processes: &[crate::agent::ClaudeProcess],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut done = Vec::new();
+        self.generations.retain(|generation| {
+            let Some(terminal) = self
+                .terminals
+                .iter()
+                .find(|t| t.view.entity_id() == generation.terminal)
+            else {
+                return false;
+            };
+            if !generation.ready {
+                return true;
+            }
+            let view = terminal.view.read(cx);
+            let idle = view.has_exited()
+                || view.child().is_some_and(|pid| {
+                    processes
+                        .iter()
+                        .any(|p| p.pid == pid && p.status.as_deref() == Some("idle"))
+                });
+            if idle {
+                done.push((generation.terminal, generation.target.clone()));
+            }
+            !idle
+        });
+        for (terminal, target) in done {
+            self.close_terminal(terminal, window, cx);
+            self.overview_reveal = Some(Node::Note(target));
+        }
     }
 
     /// A node file was written: read the worktree again, and remember the
@@ -574,38 +736,102 @@ impl ClaudhubApp {
                 .close_button(false)
                 .footer(super::dialogs::confirm())
                 .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.note_editors.remove(&path);
-                        let node = Node::Note(path.clone());
-                        this.forget_node(&node, cx);
-                        if let Some((worktree, entry)) = this.canvas_entry(&path) {
-                            let worktree = worktree.clone();
-                            // A picture of its own has no text read to guard
-                            // the delete with: asked, it goes.
-                            let expect = (!entry.standalone).then_some(entry.digest);
-                            // A diagram's picture goes with its node: left
-                            // behind, it would come back as a node of its own.
-                            let picture = picture_of(entry).filter(|p| *p != path);
-                            this.git.send(Cmd::WriteCanvasFile {
-                                worktree: worktree.clone(),
-                                path: path.clone(),
-                                text: String::new(),
-                                expect,
-                            });
-                            if let Some(picture) = picture {
-                                this.git.send(Cmd::DeleteCanvasPicture {
-                                    worktree,
-                                    path: picture,
-                                });
-                            }
-                        }
-                        cx.notify();
-                    });
+                    entity.update(cx, |this, cx| this.delete_note_files(&path, cx));
                     true
                 })
         });
         // See `close_node`: the buttons dispatch from the focus.
         window.defer(cx, |window, cx| window.focus_dialog(cx));
+    }
+
+    /// The cross of a note, a review or a diagram: take it off the plane and
+    /// keep its file — the « Hidden » menu brings it back — or delete the
+    /// file, its picture with it.
+    pub(super) fn close_home_note(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, entry)) = self.canvas_entry(path) else {
+            return;
+        };
+        let name = entry
+            .node
+            .heading()
+            .unwrap_or_else(|| path.display().to_string());
+        let shared = !entry.private;
+        let entity = cx.entity();
+        let path = path.to_path_buf();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (hide, delete) = (
+                (entity.clone(), path.clone()),
+                (entity.clone(), path.clone()),
+            );
+            dialog
+                .title(tr!("overview-close-note-title"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(SharedString::from(name.clone())))
+                        .child(div().text_xs().child(if shared {
+                            tr!("overview-close-note-shared")
+                        } else {
+                            tr!("overview-close-note-private")
+                        })),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::choose(
+                    tr!("overview-hide-button"),
+                    tr!("overview-delete-file"),
+                    move |_, cx| {
+                        let (entity, path) = delete.clone();
+                        entity.update(cx, |this, cx| this.delete_note_files(&path, cx));
+                    },
+                ))
+                .on_ok(move |_, _, cx| {
+                    let (entity, path) = hide.clone();
+                    entity.update(cx, |this, cx| {
+                        let node = Node::Note(path.clone());
+                        this.note_editors.remove(&path);
+                        this.overview_hand.hidden.insert(node.clone());
+                        this.remember_folds(&node, cx);
+                        cx.notify();
+                    });
+                    true
+                })
+        });
+        window.defer(cx, |window, cx| window.focus_dialog(cx));
+    }
+
+    /// Deletes a node's file — and a diagram's picture with it: left behind,
+    /// it would come back as a node of its own.
+    fn delete_note_files(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.note_editors.remove(path);
+        let node = Node::Note(path.to_path_buf());
+        self.overview_hand.hidden.remove(&node);
+        self.forget_node(&node, cx);
+        if let Some((worktree, entry)) = self.canvas_entry(path) {
+            let worktree = worktree.clone();
+            // A picture of its own has no text read to guard the delete with:
+            // asked, it goes.
+            let expect = (!entry.standalone).then_some(entry.digest);
+            let picture = picture_of(entry).filter(|p| p != path);
+            self.git.send(Cmd::WriteCanvasFile {
+                worktree: worktree.clone(),
+                path: path.to_path_buf(),
+                text: String::new(),
+                expect,
+            });
+            if let Some(picture) = picture {
+                self.git.send(Cmd::DeleteCanvasPicture {
+                    worktree,
+                    path: picture,
+                });
+            }
+        }
+        cx.notify();
     }
 
     /// Writes each worktree's context sheet, where its vault is: what the

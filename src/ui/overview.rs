@@ -422,6 +422,9 @@ fn tree(group: &Group, hand: &Hand) -> Vec<Branch> {
     };
     for path in &group.notes {
         let node = Node::Note(path.clone());
+        if hand.hidden.contains(&node) {
+            continue;
+        }
         add(
             &mut nodes,
             0,
@@ -492,6 +495,9 @@ fn tree(group: &Group, hand: &Hand) -> Vec<Branch> {
         placed[checkout] = Some(index);
         for path in &this.notes {
             let node = Node::Note(path.clone());
+            if hidden.contains(&node) {
+                continue;
+            }
             nodes.push(Branch {
                 size: sizes.get(&node).copied().unwrap_or(NOTE),
                 node,
@@ -1094,6 +1100,31 @@ mod tests {
             h: 900.,
         };
         assert_eq!(View::focus(rect, (2000., 1000.), 0.9).zoom, 1.);
+    }
+
+    #[test]
+    fn a_hidden_note_leaves_the_plane_and_its_neighbours_close_up() {
+        let mut main = checkout("/r", "main", true, None);
+        main.notes = vec![
+            PathBuf::from("/r/.claudhub/notes/a.md"),
+            PathBuf::from("/r/.claudhub/notes/b.md"),
+        ];
+        let mut groups = [group("/r", vec![main])];
+        groups[0].notes = vec![PathBuf::from("/r/.claudhub/notes/repo.md")];
+        let hand = Hand {
+            hidden: HashSet::from([
+                Node::Note(PathBuf::from("/r/.claudhub/notes/a.md")),
+                Node::Note(PathBuf::from("/r/.claudhub/notes/repo.md")),
+            ]),
+            ..Hand::default()
+        };
+        let plan = plan(&groups, &hand);
+        assert_eq!(plan.notes.len(), 1);
+        assert!(plan.note("/r/.claudhub/notes/b.md").is_some());
+        // The one left stands centred under its card, alone.
+        let card = plan.card(Path::new("/r")).unwrap();
+        let note = plan.note("/r/.claudhub/notes/b.md").unwrap();
+        assert_eq!(note.x + note.w / 2., card.x + card.w / 2.);
     }
 
     #[test]

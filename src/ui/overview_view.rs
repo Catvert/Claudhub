@@ -36,7 +36,7 @@ use gpui_kit::{
 };
 
 use super::app::ClaudhubApp;
-use super::canvas_view::{note_button, Hang};
+use super::canvas_view::Hang;
 use super::icons::icon;
 use super::overview::{self, Checkout, Group, LinkKind, Node, Plan, Rect, View};
 use super::terminal_view::{Canvas, Launch};
@@ -646,7 +646,7 @@ impl ClaudhubApp {
                     place.offset,
                     place.size,
                     place.collapsed,
-                    false,
+                    place.hidden,
                 )
             }))
             .collect::<Vec<_>>();
@@ -699,6 +699,7 @@ impl ClaudhubApp {
                     offset: note.offset,
                     size: note.size,
                     collapsed: note.collapsed,
+                    hidden: false,
                 };
                 super::store::Store::update_global(cx, |store| {
                     store.home_places.insert(path.clone(), place);
@@ -737,11 +738,9 @@ impl ClaudhubApp {
         // And what was taken off the plane comes back: a hidden worktree is
         // in no plan to be read from, so it is found among the repositories.
         let hidden: Vec<Node> = self
-            .overview_repos()
+            .hidden_nodes(cx)
             .into_iter()
-            .flat_map(|repo| repo.worktrees.iter())
-            .map(|worktree| Node::Worktree(worktree.path.clone()))
-            .filter(|node| self.overview_hand.hidden.contains(node))
+            .map(|(node, _)| node)
             .collect();
         let nodes: Vec<Node> = nodes.into_iter().chain(hidden).collect();
         self.overview_maximized = None;
@@ -915,6 +914,7 @@ impl ClaudhubApp {
                         })
                     }),
             )
+            .children(self.render_hidden_menu(cx))
             .child(self.render_skill_button(cx))
             .child(
                 Button::new("overview-reset")
@@ -1122,26 +1122,23 @@ impl ClaudhubApp {
                     .child(SharedString::from(repo.name.clone())),
             )
             .when(detail, |el| {
-                el.child(note_button(
-                    cx.entity().downgrade(),
-                    Hang::Repo(main.to_path_buf()),
-                ))
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "overview-fetch-{}",
-                        main.display()
-                    )))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("refresh-cw"))
-                    .tooltip(tr!("overview-fetch"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.git.send(crate::runtime::Cmd::Fetch {
-                            worktree: fetch.clone(),
-                        });
-                        cx.notify();
-                    })),
-                )
+                el.child(self.add_menu(Hang::Repo(main.to_path_buf()), cx))
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "overview-fetch-{}",
+                            main.display()
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("refresh-cw"))
+                        .tooltip(tr!("overview-fetch"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.git.send(crate::runtime::Cmd::Fetch {
+                                worktree: fetch.clone(),
+                            });
+                            cx.notify();
+                        })),
+                    )
             });
         v_flex()
             .id(SharedString::from(format!(
@@ -1268,12 +1265,6 @@ impl ClaudhubApp {
                         .child(tr!("overview-main")),
                 )
             })
-            .when(detail, |el| {
-                el.child(note_button(
-                    cx.entity().downgrade(),
-                    Hang::Worktree(path.to_path_buf()),
-                ))
-            })
             // A branch with commits its base does not have can be merged from
             // here — the card is where one sees how far ahead it is.
             .when_some(
@@ -1325,7 +1316,7 @@ impl ClaudhubApp {
                             path.display()
                         )))
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(self.new_terminal_button(path, cx)),
+                        .child(self.add_menu(Hang::Worktree(path.to_path_buf()), cx)),
                 )
                 .child(
                     Button::new(SharedString::from(format!(
@@ -1589,53 +1580,72 @@ impl ClaudhubApp {
         .into_any_element()
     }
 
-    /// A `+` on a worktree's card: a shell, or one of the agent profiles.
-    fn new_terminal_button(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// The `+` of a card or of the git node: what can be added under it — a
+    /// terminal, an agent, a note written by hand, or a note or a diagram an
+    /// agent writes from a request (`canvas_view::generate_node`).
+    fn add_menu(&self, hang: Hang, cx: &mut Context<Self>) -> AnyElement {
         let app = cx.entity().downgrade();
-        let path = path.to_path_buf();
-        let id = SharedString::from(format!("overview-new-{}", path.display()));
-        if super::settings::Settings::global(cx)
-            .terminal
-            .agents
-            .is_empty()
-        {
-            return Button::new(id)
-                .ghost()
-                .xsmall()
-                .icon(icon("plus"))
-                .tooltip(tr!("terminal-new"))
-                .on_click(move |_, window, cx| {
-                    open_on(&app, &path, Launch::shell(), window, cx);
-                })
-                .into_any_element();
-        }
+        let worktree = match &hang {
+            Hang::Repo(main) => main.clone(),
+            Hang::Worktree(worktree) => worktree.clone(),
+        };
+        let id = SharedString::from(format!("overview-add-{hang:?}"));
         Button::new(id)
             .ghost()
             .xsmall()
             .icon(icon("plus"))
-            .tooltip(tr!("terminal-new"))
+            .tooltip(tr!("overview-add"))
             .dropdown_menu(move |menu, _, cx| {
                 let profiles = super::settings::Settings::global(cx)
                     .terminal
                     .agents
                     .clone();
-                let shell = (app.clone(), path.clone());
+                let shell = (app.clone(), worktree.clone());
                 let menu = menu.item(
                     PopupMenuItem::new(tr!("terminal-new"))
-                        .icon(icon("plus"))
+                        .icon(icon("square-terminal"))
                         .on_click(move |_, window, cx| {
                             open_on(&shell.0, &shell.1, Launch::shell(), window, cx);
                         }),
                 );
-                profiles.into_iter().fold(menu, |menu, profile| {
-                    let (app, path) = (app.clone(), path.clone());
+                let menu = profiles.into_iter().fold(menu, |menu, profile| {
+                    let (app, worktree) = (app.clone(), worktree.clone());
                     let label = SharedString::from(profile.label().to_string());
                     menu.item(PopupMenuItem::new(label).icon(icon("bot")).on_click(
                         move |_, window, cx| {
-                            open_on(&app, &path, Launch::agent(&profile), window, cx);
+                            open_on(&app, &worktree, Launch::agent(&profile), window, cx);
                         },
                     ))
-                })
+                });
+                let item = |label: SharedString,
+                            glyph: &'static str,
+                            kind: Option<crate::canvas::Kind>| {
+                    let (app, hang) = (app.clone(), hang.clone());
+                    PopupMenuItem::new(label)
+                        .icon(icon(glyph))
+                        .on_click(move |_, window, cx| {
+                            let Some(app) = app.upgrade() else {
+                                return;
+                            };
+                            let hang = hang.clone();
+                            app.update(cx, |this, cx| match kind {
+                                None => this.add_home_note(hang, cx),
+                                Some(kind) => this.ask_generation(hang, kind, window, cx),
+                            });
+                        })
+                };
+                menu.separator()
+                    .item(item(tr!("overview-add-note"), "sticky-note", None))
+                    .item(item(
+                        tr!("overview-add-note-prompt"),
+                        "sparkles",
+                        Some(crate::canvas::Kind::Note),
+                    ))
+                    .item(item(
+                        tr!("overview-add-diagram-prompt"),
+                        "image",
+                        Some(crate::canvas::Kind::Diagram),
+                    ))
             })
             .into_any_element()
     }
@@ -2016,7 +2026,7 @@ impl ClaudhubApp {
     fn close_node(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
         match node {
             Node::Git(_) => {}
-            Node::Note(path) => self.delete_home_note(path, window, cx),
+            Node::Note(path) => self.close_home_note(path, window, cx),
             Node::Terminal(id) => {
                 let Some(terminal) = self
                     .terminals
@@ -2065,11 +2075,48 @@ impl ClaudhubApp {
                     Some(repo) => format!("{repo} · {label}"),
                     None => label.to_string(),
                 };
+                // The main checkout is the repository itself: hidden, never
+                // removed from here.
+                let removable = self
+                    .repos
+                    .worktree(path)
+                    .is_some_and(|w| !w.is_main)
+                    .then(|| self.main_of(path))
+                    .flatten();
                 let entity = cx.entity();
+                let target = path.clone();
                 window.open_dialog(cx, move |dialog, _, _| {
                     let (entity, node) = (entity.clone(), node.clone());
+                    let footer = match removable.clone() {
+                        Some(main) => {
+                            let (entity, target) = (entity.clone(), target.clone());
+                            super::dialogs::choose(
+                                tr!("overview-hide-button"),
+                                tr!("overview-remove-worktree"),
+                                move |window, cx| {
+                                    // Opened once this dialog has gone: the
+                                    // button dismisses the dialog on top when
+                                    // it is done, which would be this one.
+                                    let (entity, main, target) =
+                                        (entity.clone(), main.clone(), target.clone());
+                                    window.defer(cx, move |window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.confirm_remove_worktree(
+                                                main.clone(),
+                                                target.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        window.defer(cx, |window, cx| window.focus_dialog(cx));
+                                    });
+                                },
+                            )
+                        }
+                        None => super::dialogs::submit(tr!("overview-hide-button")),
+                    };
                     dialog
-                        .title(tr!("overview-hide-title"))
+                        .title(tr!("overview-close-worktree-title"))
                         .child(
                             v_flex()
                                 .gap_1()
@@ -2078,7 +2125,7 @@ impl ClaudhubApp {
                         )
                         .overlay_closable(false)
                         .close_button(false)
-                        .footer(super::dialogs::confirm())
+                        .footer(footer)
                         .on_ok(move |_, _, cx| {
                             entity.update(cx, |this, cx| {
                                 this.overview_hand.hidden.insert(node.clone());
@@ -2094,9 +2141,101 @@ impl ClaudhubApp {
         }
     }
 
+    /// The nodes taken off the plane in the projects on show, with the name
+    /// the « Hidden » menu gives them.
+    pub(super) fn hidden_nodes(&self, cx: &App) -> Vec<(Node, SharedString)> {
+        let _ = cx;
+        let mut hidden = Vec::new();
+        for repo in self.overview_repos() {
+            for worktree in &repo.worktrees {
+                let node = Node::Worktree(worktree.path.clone());
+                if self.overview_hand.hidden.contains(&node) {
+                    let (repo, label) = self.project_label(&worktree.path);
+                    let name = match repo {
+                        Some(repo) => format!("{repo} · {label}"),
+                        None => label.to_string(),
+                    };
+                    hidden.push((node, SharedString::from(name)));
+                }
+                for entry in self.canvas.get(&worktree.path).into_iter().flatten() {
+                    let node = Node::Note(entry.path.clone());
+                    if self.overview_hand.hidden.contains(&node)
+                        && !hidden.iter().any(|(n, _)| *n == node)
+                    {
+                        let name = entry.node.heading().unwrap_or_else(|| {
+                            entry
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        });
+                        hidden.push((node, SharedString::from(name)));
+                    }
+                }
+            }
+        }
+        hidden
+    }
+
+    /// Puts a hidden node back on the plane, and brings it into view.
+    fn unhide(&mut self, node: &Node, cx: &mut Context<Self>) {
+        if self.overview_hand.hidden.remove(node) {
+            self.remember_folds(node, cx);
+            self.overview_reveal = Some(node.clone());
+            cx.notify();
+        }
+    }
+
+    /// « Hidden (n) »: what was taken off the plane, one entry each to bring
+    /// it back, and all of it at once. Absent while nothing is hidden.
+    pub(super) fn render_hidden_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let hidden = self.hidden_nodes(cx);
+        if hidden.is_empty() {
+            return None;
+        }
+        let app = cx.entity().downgrade();
+        let count = hidden.len();
+        Some(
+            Button::new("overview-hidden")
+                .ghost()
+                .small()
+                .icon(icon("eye-off"))
+                .label(tr!("overview-hidden", { count: count }))
+                .dropdown_menu(move |menu, _, _| {
+                    let every: Vec<Node> = hidden.iter().map(|(node, _)| node.clone()).collect();
+                    let all = app.clone();
+                    let menu = hidden.iter().cloned().fold(menu, |menu, (node, name)| {
+                        let app = app.clone();
+                        menu.item(PopupMenuItem::new(name).icon(icon("eye")).on_click(
+                            move |_, _, cx| {
+                                if let Some(app) = app.upgrade() {
+                                    let node = node.clone();
+                                    app.update(cx, |this, cx| this.unhide(&node, cx));
+                                }
+                            },
+                        ))
+                    });
+                    menu.separator()
+                        .item(PopupMenuItem::new(tr!("overview-unhide-all")).on_click(
+                            move |_, _, cx| {
+                                if let Some(app) = all.upgrade() {
+                                    let every = every.clone();
+                                    app.update(cx, |this, cx| {
+                                        for node in &every {
+                                            this.unhide(node, cx);
+                                        }
+                                    });
+                                }
+                            },
+                        ))
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Writes what the hand folded or hid for one node back to the store.
     /// A terminal's fold goes with the rest of it, in `persist_terminals`.
-    fn remember_folds(&self, node: &Node, cx: &mut Context<Self>) {
+    pub(super) fn remember_folds(&self, node: &Node, cx: &mut Context<Self>) {
         let folded = self.overview_hand.collapsed.contains(node);
         let hidden = self.overview_hand.hidden.contains(node);
         super::store::Store::update_global(cx, |store| match node {
@@ -2107,7 +2246,9 @@ impl ClaudhubApp {
                 state.home_hidden = hidden;
             }
             Node::Note(path) => {
-                store.home_places.entry(path.clone()).or_default().collapsed = folded
+                let place = store.home_places.entry(path.clone()).or_default();
+                place.collapsed = folded;
+                place.hidden = hidden;
             }
             Node::Terminal(_) => {}
         });
