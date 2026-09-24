@@ -745,6 +745,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             Evt::AgentSessions {
                 sessions: crate::agent_hooks::read(&worktrees),
             },
+            // And what Claude says of its own processes: the conversation each
+            // pid is in, hooks or not.
+            Evt::ClaudeProcesses {
+                processes: crate::agent::claude_processes(),
+            },
         ],
         // A read of the refs, in the reads' queue: it is `for-each-ref` walking
         // the graph once, the same order of work as the status beside it, and

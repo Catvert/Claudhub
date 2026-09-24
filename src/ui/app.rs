@@ -2285,6 +2285,7 @@ impl ClaudhubApp {
             Evt::Summaries { summaries } => {
                 self.summaries.extend(summaries);
             }
+            Evt::ClaudeProcesses { processes } => self.claude_processes_heard(&processes, cx),
             Evt::Outlines { outlines } => {
                 self.outlines.extend(outlines);
                 cx.notify();

@@ -2700,6 +2700,44 @@ impl ClaudhubApp {
         records: &[crate::agent_hooks::Record],
         cx: &mut Context<Self>,
     ) {
+        let heard: Vec<crate::ui::revive::Heard> = records
+            .iter()
+            .map(|record| crate::ui::revive::Heard {
+                session: record.session.clone(),
+                worktree: record.worktree.clone(),
+                pid: record.pid,
+                age_ms: record.age_ms,
+            })
+            .collect();
+        self.name_sessions(&heard, false, cx);
+    }
+
+    /// The same from Claude's own process files: by pid only, which is
+    /// certain — see `revive::by_pid`. Heard after the hooks at every sweep,
+    /// so a pid Claude names wins over a guess.
+    pub(super) fn claude_processes_heard(
+        &mut self,
+        processes: &[crate::agent::ClaudeProcess],
+        cx: &mut Context<Self>,
+    ) {
+        let heard: Vec<crate::ui::revive::Heard> = processes
+            .iter()
+            .map(|process| crate::ui::revive::Heard {
+                session: process.session.clone(),
+                worktree: process.cwd.clone(),
+                pid: Some(process.pid),
+                age_ms: 0,
+            })
+            .collect();
+        self.name_sessions(&heard, true, cx);
+    }
+
+    fn name_sessions(
+        &mut self,
+        heard: &[crate::ui::revive::Heard],
+        certain_only: bool,
+        cx: &mut Context<Self>,
+    ) {
         // Agent tabs, and shells with Claude typed at their prompt.
         let agents: Vec<usize> = self
             .terminals
@@ -2722,7 +2760,7 @@ impl ClaudhubApp {
                 crate::ui::revive::Open {
                     worktree: terminal.worktree.clone(),
                     // The typed agent's own pid — the shell is the pty's
-                    // child, and it is not the one the hooks name.
+                    // child, and it is not the one Claude names.
                     pid: match &terminal.typed {
                         Some((_, _, pid)) => Some(*pid),
                         None => terminal.view.read(cx).child(),
@@ -2730,17 +2768,22 @@ impl ClaudhubApp {
                 }
             })
             .collect();
-        let heard: Vec<crate::ui::revive::Heard> = records
-            .iter()
-            .map(|record| crate::ui::revive::Heard {
-                session: record.session.clone(),
-                worktree: record.worktree.clone(),
-                pid: record.pid,
-                age_ms: record.age_ms,
-            })
-            .collect();
-        for (index, session) in crate::ui::revive::sessions(&open, &heard) {
-            self.terminals[agents[index]].session = Some(session);
+        let certain = crate::ui::revive::by_pid(&open, heard);
+        let named = if certain_only {
+            certain.clone()
+        } else {
+            crate::ui::revive::sessions(&open, heard)
+        };
+        for (index, session) in named {
+            let terminal = &mut self.terminals[agents[index]];
+            // A guess never replaces what a pid said: Claude's own files
+            // name the conversation for certain, the hooks' freshest record
+            // of a worktree may be another Claude's.
+            let guessed = !certain.iter().any(|(i, _)| *i == index);
+            if guessed && terminal.session.is_some() {
+                continue;
+            }
+            terminal.session = Some(session);
         }
     }
 

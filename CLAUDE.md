@@ -692,7 +692,8 @@ ont été sortis.
 **Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal` dans
 le magasin) : un shell ou un agent encore vivant revient au démarrage, à sa
 place et à sa taille, et Claude **dans sa conversation** : `--resume` de la
-session que les hooks rapportent pour l'enfant du pty, à défaut `--continue`
+session que **Claude écrit lui-même** pour son pid (`~/.claude/sessions/<pid>.json`,
+lu par le worker — `agent::claude_processes`), sinon celle des hooks, à défaut `--continue`
 quand le worktree n'avait qu'un agent — les hooks manquent souvent, posés
 seulement sur les worktrees apparus fenêtre ouverte et jamais sur un
 `settings.local.json` suivi — et toujours `|| exec claude` derrière : une

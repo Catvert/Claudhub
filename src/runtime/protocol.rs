@@ -1557,6 +1557,11 @@ pub enum Evt {
     AgentSessions {
         sessions: Vec<crate::agent_hooks::Record>,
     },
+    /// The Claude Code processes running, as Claude writes them down itself —
+    /// see `agent::ClaudeProcess`. By the same sweep, every two seconds.
+    ClaudeProcesses {
+        processes: Vec<crate::agent::ClaudeProcess>,
+    },
     /// Our hooks were written into, or taken out of, a worktree's
     /// `.claude/settings.local.json`. `Ok(false)`: there was nothing to change.
     AgentHooksWritten {

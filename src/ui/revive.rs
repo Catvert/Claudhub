@@ -164,6 +164,20 @@ pub struct Heard {
     pub age_ms: u64,
 }
 
+/// The sessions a pid names for certain, and nothing else: what Claude's
+/// own process files give, where a guess would name another Claude's
+/// conversation running in the same checkout.
+pub fn by_pid(open: &[Open], heard: &[Heard]) -> Vec<(usize, String)> {
+    open.iter()
+        .enumerate()
+        .filter_map(|(index, terminal)| {
+            let pid = terminal.pid?;
+            let record = heard.iter().find(|h| h.pid == Some(pid))?;
+            Some((index, record.session.clone()))
+        })
+        .collect()
+}
+
 /// Which session each agent terminal runs, by index into `open`.
 ///
 /// The pid first, which is certain. Then, for a worktree where one agent
@@ -172,12 +186,10 @@ pub struct Heard {
 /// the common case. Two agents in one worktree with no pid to tell them
 /// apart get nothing — a wrong conversation resumed is worse than a fresh one.
 pub fn sessions(open: &[Open], heard: &[Heard]) -> Vec<(usize, String)> {
-    let mut found: Vec<(usize, String)> = Vec::new();
+    let mut found = by_pid(open, heard);
     let mut claimed: Vec<&str> = Vec::new();
-    for (index, terminal) in open.iter().enumerate() {
-        let Some(pid) = terminal.pid else { continue };
-        if let Some(record) = heard.iter().find(|h| h.pid == Some(pid)) {
-            found.push((index, record.session.clone()));
+    for (_, session) in &found {
+        if let Some(record) = heard.iter().find(|h| &h.session == session) {
             claimed.push(&record.session);
         }
     }
@@ -331,6 +343,23 @@ mod tests {
             heard("elsewhere", "/c", Some(3), 10),
         ];
         assert_eq!(sessions(&terminals, &records), vec![(0, "new".to_string())]);
+    }
+
+    /// The case that made `by_pid` exist: a Claude outside the window, in
+    /// the same checkout and more recent, is not taken for ours.
+    #[test]
+    fn a_pid_is_never_confused_with_another_claude_of_the_same_checkout() {
+        let terminals = [open("/wt", Some(10))];
+        let processes = [
+            heard("theirs", "/wt", Some(99), 0),
+            heard("ours", "/wt", Some(10), 0),
+        ];
+        assert_eq!(
+            by_pid(&terminals, &processes),
+            vec![(0, "ours".to_string())]
+        );
+        // Ours not running any more: nothing, rather than theirs.
+        assert!(by_pid(&terminals, &processes[..1]).is_empty());
     }
 
     #[test]
