@@ -2418,6 +2418,14 @@ impl ClaudhubApp {
                     self.file_changed(&path, &dirs, cx);
                 }
             }
+            // Read again as `refresh_active` reads it: the branches say which
+            // worktree holds which, and the new one holds one.
+            Evt::WorktreeListChanged { worktree } => {
+                if let Some(main) = self.main_of(&worktree) {
+                    self.git.send(Cmd::RefreshRepo { main: main.clone() });
+                    self.git.send(Cmd::LoadBranches { main });
+                }
+            }
             // The vault has been written: it exists, so it can be watched.
             // Re-reading it straight away is not a luxury — the disk is the
             // authority, and a refused write (the agent had touched the file

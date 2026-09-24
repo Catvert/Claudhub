@@ -1356,6 +1356,12 @@ pub enum Evt {
     FilesChanged {
         paths: Vec<PathBuf>,
     },
+    /// The repository of a watched worktree gained or lost a worktree — a
+    /// `git worktree add` or `remove` typed in a terminal. Nothing else tells
+    /// the view: the list is read on opening and on our own writes.
+    WorktreeListChanged {
+        worktree: WorktreeId,
+    },
 
     // — The language server ————————————————————————————————————
     /// The server answered `initialize`: it is up, and this is what it says it

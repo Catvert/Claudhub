@@ -463,9 +463,21 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
             let spawned = std::thread::Builder::new()
                 .name("claudhub-watch-evt".into())
                 .spawn(move || {
-                    while let Ok(paths) = changes.recv_blocking() {
-                        if forward.send_blocking(Evt::FilesChanged { paths }).is_err() {
-                            return;
+                    while let Ok(batch) = changes.recv_blocking() {
+                        let mut evts = Vec::new();
+                        if !batch.paths.is_empty() {
+                            evts.push(Evt::FilesChanged { paths: batch.paths });
+                        }
+                        evts.extend(
+                            batch
+                                .worktree_lists
+                                .into_iter()
+                                .map(|worktree| Evt::WorktreeListChanged { worktree }),
+                        );
+                        for evt in evts {
+                            if forward.send_blocking(evt).is_err() {
+                                return;
+                            }
                         }
                     }
                 });

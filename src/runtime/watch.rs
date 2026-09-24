@@ -28,6 +28,25 @@ enum Order {
     /// `ls-files` would say nothing.
     WatchDir(PathBuf),
     UnwatchDir(PathBuf),
+    /// Plans a watched checkout again, and does nothing for one no longer
+    /// watched: a git directory's `worktrees/` folder has just been born or has
+    /// just gone, and the plan made before is watching the wrong one. The
+    /// translation thread sends it, and only this thread knows whether the
+    /// checkout is still watched — an `Unwatch` and a `Watch` sent from there
+    /// would watch again a worktree the view had just left.
+    Rewatch(PathBuf),
+}
+
+/// What one debounce window has to say.
+#[derive(Debug, Default)]
+pub struct Batch {
+    /// Paths under the watched worktrees, or the worktree itself for its git
+    /// metadata: what `git status` may answer differently.
+    pub paths: Vec<PathBuf>,
+    /// Watched checkouts whose repository gained or lost a worktree. Nothing
+    /// in `paths` says it: `git worktree add` in a terminal writes no file of
+    /// this checkout, and creates no branch when it checks out one that exists.
+    pub worktree_lists: Vec<PathBuf>,
 }
 
 /// Debounce window. A build touches thousands of files; refreshing on every
@@ -62,18 +81,19 @@ impl Watcher {
     /// Starts watching and returns the receiver of changed paths.
     ///
     /// What the receiver delivers is a **batch** of arbitrary paths under the
-    /// watched worktrees — one batch per debounce window, which makes it a
+    /// watched worktrees, and of the checkouts whose worktree list moved — one batch per debounce window, which makes it a
     /// single `Evt` on the wire; it is up to the caller to attach each path to
     /// the worktree it knows, being the only one to know which are open.
-    pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Vec<PathBuf>>)> {
+    pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Batch>)> {
         // Async channel: a gpui task drains it, and it cannot afford to wait on
         // a blocking `recv`.
-        let (tx, rx) = async_channel::unbounded::<Vec<PathBuf>>();
+        let (tx, rx) = async_channel::unbounded::<Batch>();
         let (raw_tx, raw_rx) = mpsc::channel();
         let mut debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
         let (order_tx, order_rx) = mpsc::channel::<Order>();
         let git_watches = Arc::new(Mutex::new(GitWatches::new()));
         let order_git_watches = git_watches.clone();
+        let rewatch = order_tx.clone();
 
         // One thread to set up and remove the watches, long operations on a
         // large tree.
@@ -90,7 +110,16 @@ impl Watcher {
                 // watch per path: unwatching it for the one leaving took it
                 // from the one staying.
                 let mut holders = Holders::default();
-                while let Ok(order) = order_rx.recv() {
+                // What a `Rewatch` expands to, played before the next order.
+                let mut replay: Vec<Order> = Vec::new();
+                loop {
+                    let order = match replay.pop() {
+                        Some(order) => order,
+                        None => match order_rx.recv() {
+                            Ok(order) => order,
+                            Err(_) => break,
+                        },
+                    };
                     match order {
                         Order::Watch(path) => {
                             if watched.contains_key(&path) {
@@ -165,6 +194,13 @@ impl Watcher {
                                 let _ = debouncer.unwatch(&path);
                             }
                         }
+                        // Popped from the end: the unwatch runs first.
+                        Order::Rewatch(path) => {
+                            if watched.contains_key(&path) {
+                                replay.push(Order::Watch(path.clone()));
+                                replay.push(Order::Unwatch(path));
+                            }
+                        }
                     }
                 }
             })?;
@@ -179,17 +215,31 @@ impl Watcher {
                     // The order is kept — a batch is read as it happened — but
                     // membership goes through a set: a save touching a
                     // thousand files made a thousand linear scans.
-                    let mut seen: Vec<PathBuf> = Vec::new();
+                    let mut batch = Batch::default();
                     let mut known: HashSet<PathBuf> = HashSet::new();
+                    let mut replan: HashSet<PathBuf> = HashSet::new();
                     let mappings = git_watches.lock().unwrap_or_else(|e| e.into_inner());
                     for event in &events {
                         for path in interesting_paths(event, &mappings) {
                             if known.insert(path.clone()) {
-                                seen.push(path);
+                                batch.paths.push(path);
+                            }
+                        }
+                        for listing in listings(event, &mappings) {
+                            if listing.folder {
+                                replan.insert(listing.checkout.clone());
+                            }
+                            if !batch.worktree_lists.contains(&listing.checkout) {
+                                batch.worktree_lists.push(listing.checkout);
                             }
                         }
                     }
-                    if !seen.is_empty() && tx.send_blocking(seen).is_err() {
+                    drop(mappings);
+                    for checkout in replan {
+                        let _ = rewatch.send(Order::Rewatch(checkout));
+                    }
+                    let empty = batch.paths.is_empty() && batch.worktree_lists.is_empty();
+                    if !empty && tx.send_blocking(batch).is_err() {
                         return; // the window is gone
                     }
                 }
@@ -293,6 +343,59 @@ fn event_paths(path: &Path, mappings: &GitWatches) -> Vec<PathBuf> {
         paths.push(path.to_path_buf());
     }
     paths
+}
+
+/// A watched checkout whose repository's worktree list an event touches.
+#[derive(Debug, PartialEq)]
+struct Listing {
+    checkout: PathBuf,
+    /// The event is the `worktrees/` folder itself, born with the first linked
+    /// worktree or gone with the last: the watch plan has to be made again.
+    folder: bool,
+}
+
+/// The listings of an event: a linked worktree's administrative folder —
+/// `<git dir>/worktrees/<name>` — appearing or going away, which is what
+/// `git worktree add`, `remove` and `prune` do and what `git worktree list`
+/// reads.
+///
+/// Every git directory is asked and not only the innermost: a linked
+/// checkout's own directory *is* one of those folders, and its removal is read
+/// relative to the common directory above it.
+fn listings(event: &DebouncedEvent, mappings: &GitWatches) -> Vec<Listing> {
+    if !changes_content(&event.kind) {
+        return Vec::new();
+    }
+    event
+        .paths
+        .iter()
+        .flat_map(|path| path_listings(path, mappings))
+        .collect()
+}
+
+fn path_listings(path: &Path, mappings: &GitWatches) -> Vec<Listing> {
+    let mut found = Vec::new();
+    for (checkout, git_dirs) in mappings {
+        let folder = git_dirs.iter().find_map(|dir| {
+            let relative = path.strip_prefix(&dir.path).ok()?;
+            let mut parts = relative.components();
+            if parts.next() != Some(Component::Normal("worktrees".as_ref())) {
+                return None;
+            }
+            match (parts.next(), parts.next()) {
+                (None, _) => Some(true),
+                (Some(_), None) => Some(false),
+                _ => None,
+            }
+        });
+        if let Some(folder) = folder {
+            found.push(Listing {
+                checkout: checkout.clone(),
+                folder,
+            });
+        }
+    }
+    found
 }
 
 /// True for an event likely to change what `git status` answers.
@@ -485,9 +588,14 @@ fn add_checkout(worktree: &Path, plan: &mut WatchPlan, seen: &mut HashSet<PathBu
     }
 }
 
-/// A git directory's root without recursion, and its `refs/` whole.
+/// A git directory's root without recursion, its `refs/` whole, and its
+/// `worktrees/` without recursion — the folders of the linked worktrees coming
+/// and going, not what they hold, which is each one's `HEAD` and `index`.
+/// Absent before the first linked worktree: the root reports its birth, and
+/// `Order::Rewatch` watches it then.
 fn add_git_dir(dir: PathBuf, shared: bool, plan: &mut WatchPlan) {
     let refs = dir.join("refs");
+    let worktrees = dir.join("worktrees");
     plan.git_dirs.push(GitDir {
         path: dir.clone(),
         shared,
@@ -495,6 +603,10 @@ fn add_git_dir(dir: PathBuf, shared: bool, plan: &mut WatchPlan) {
     plan.directories.push((dir, RecursiveMode::NonRecursive));
     if refs.is_dir() {
         plan.directories.push((refs, RecursiveMode::Recursive));
+    }
+    if worktrees.is_dir() {
+        plan.directories
+            .push((worktrees, RecursiveMode::NonRecursive));
     }
 }
 
@@ -649,7 +761,10 @@ mod tests {
         while std::time::Instant::now() < deadline {
             std::fs::write(&file, "edited\n").unwrap();
             std::thread::sleep(Duration::from_millis(100));
-            if changes.try_recv().is_ok_and(|batch| batch.contains(&file)) {
+            if changes
+                .try_recv()
+                .is_ok_and(|batch| batch.paths.contains(&file))
+            {
                 received = true;
                 break;
             }
@@ -670,7 +785,7 @@ mod tests {
             std::thread::sleep(DEBOUNCE + Duration::from_millis(150));
             if changes
                 .try_recv()
-                .is_ok_and(|batch| batch.contains(&f.child))
+                .is_ok_and(|batch| batch.paths.contains(&f.child))
             {
                 received = true;
                 break;
@@ -756,6 +871,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `git worktree add` typed in a terminal writes nothing of the checkout
+    /// on screen: the folder it creates under `worktrees/` is the only trace.
+    #[test]
+    fn a_worktree_coming_or_going_moves_the_list_of_every_checkout() {
+        let (root, main, linked) = linked_worktree("listing");
+        let common = main.join(".git");
+        let plan = watch_plan(&main);
+        let dirs: Vec<_> = plan.directories.iter().map(|(dir, _)| dir).collect();
+        assert!(dirs.contains(&&common.join("worktrees")), "{dirs:?}");
+
+        let from = |checkout: &Path| {
+            HashMap::from([(checkout.to_path_buf(), watch_plan(checkout).git_dirs)])
+        };
+        for checkout in [&main, &linked] {
+            let mappings = from(checkout);
+            let listing = |folder| {
+                vec![Listing {
+                    checkout: checkout.clone(),
+                    folder,
+                }]
+            };
+            assert_eq!(
+                path_listings(&common.join("worktrees/other"), &mappings),
+                listing(false),
+                "{checkout:?}"
+            );
+            assert_eq!(
+                path_listings(&common.join("worktrees"), &mappings),
+                listing(true),
+                "{checkout:?}"
+            );
+            // What a worktree does inside its own folder is not a new one.
+            for inside in [
+                "worktrees/linked/HEAD",
+                "worktrees/linked/index",
+                "refs/heads/main",
+            ] {
+                assert!(
+                    path_listings(&common.join(inside), &mappings).is_empty(),
+                    "{checkout:?} {inside}"
+                );
+            }
+        }
+        // The linked checkout removed: its own git directory is read from the
+        // common one above it.
+        assert_eq!(
+            path_listings(&common.join("worktrees/linked"), &from(&linked)),
+            vec![Listing {
+                checkout: linked.clone(),
+                folder: false,
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository without a linked worktree has no `worktrees/` to watch:
+    /// the first one is seen by the git directory's root, and the second only
+    /// if the plan was made again when the folder was born.
+    #[test]
+    fn worktrees_added_in_a_terminal_reach_the_live_watcher() {
+        let (root, main, linked) = linked_worktree("added");
+        crate::git::git(&main, &["worktree", "remove", &linked.to_string_lossy()]).unwrap();
+        assert!(
+            !main.join(".git/worktrees").exists(),
+            "git keeps no empty folder"
+        );
+
+        let (watcher, changes) = Watcher::new().unwrap();
+        watcher.watch(&main);
+        let expect_listing = |name: &str| {
+            let path = root.join(name);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            // `watch` returns before the watch is set up: add, and if nothing
+            // came, remove and add again.
+            while std::time::Instant::now() < deadline {
+                crate::git::git(
+                    &main,
+                    &["worktree", "add", "-q", "--detach", &path.to_string_lossy()],
+                )
+                .unwrap();
+                std::thread::sleep(DEBOUNCE + Duration::from_millis(250));
+                if std::iter::from_fn(|| changes.try_recv().ok())
+                    .any(|batch| batch.worktree_lists.contains(&main))
+                {
+                    return true;
+                }
+                crate::git::git(&main, &["worktree", "remove", &path.to_string_lossy()]).unwrap();
+                std::thread::sleep(DEBOUNCE + Duration::from_millis(250));
+                while changes.try_recv().is_ok() {}
+            }
+            false
+        };
+        let first = expect_listing("first");
+        // Let the new plan land before the second: it is what is tested.
+        std::thread::sleep(Duration::from_millis(500));
+        while changes.try_recv().is_ok() {}
+        let second = expect_listing("second");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(first, "the first linked worktree was not reported");
+        assert!(second, "the second linked worktree was not reported");
+    }
+
     #[test]
     fn a_folder_two_worktrees_watch_stays_watched_until_the_last_leaves() {
         let mut holders = Holders::default();
@@ -784,7 +1001,7 @@ mod tests {
             std::thread::sleep(DEBOUNCE + Duration::from_millis(150));
             if changes
                 .try_recv()
-                .is_ok_and(|batch| batch.contains(&linked))
+                .is_ok_and(|batch| batch.paths.contains(&linked))
             {
                 received = true;
                 break;
@@ -925,7 +1142,7 @@ mod tests {
             std::fs::write(&file, b"content").expect("write");
             std::thread::sleep(Duration::from_millis(100));
             if let Ok(batch) = changes.try_recv() {
-                received = batch.into_iter().next();
+                received = batch.paths.into_iter().next();
                 break;
             }
         }
