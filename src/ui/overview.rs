@@ -257,16 +257,6 @@ pub enum Side {
 }
 
 impl Side {
-    /// The way out of the node through this side.
-    pub fn outward(self) -> (f32, f32) {
-        match self {
-            Side::Top => (0., -1.),
-            Side::Bottom => (0., 1.),
-            Side::Left => (-1., 0.),
-            Side::Right => (1., 0.),
-        }
-    }
-
     fn middle(self, rect: Rect) -> (f32, f32) {
         match self {
             Side::Top => (rect.x + rect.w / 2., rect.y),
@@ -297,6 +287,23 @@ pub fn attach(parent: Rect, child: Rect) -> ((f32, f32), Side, (f32, f32), Side)
         (Side::Left, Side::Right)
     };
     (from.middle(parent), from, to.middle(child), to)
+}
+
+/// The four points of a link drawn as an elbow: out of `from` square to its
+/// side, across half way, and into `to` square to the side facing back — an
+/// org chart's line, which reads as a tree where a long curve read as a
+/// swoop. The view rounds the two corners.
+pub fn elbow(from: (f32, f32), side: Side, to: (f32, f32)) -> [(f32, f32); 4] {
+    match side {
+        Side::Top | Side::Bottom => {
+            let middle = (from.1 + to.1) / 2.;
+            [from, (from.0, middle), (to.0, middle), to]
+        }
+        Side::Left | Side::Right => {
+            let middle = (from.0 + to.0) / 2.;
+            [from, (middle, from.1), (middle, to.1), to]
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -967,6 +974,18 @@ mod tests {
         // Diagonal: the axis they are furthest apart on decides.
         assert_eq!(attach(parent, at(500., 200.)).1, Side::Right);
         assert_eq!(attach(parent, at(200., 500.)).1, Side::Bottom);
+    }
+
+    #[test]
+    fn an_elbow_turns_half_way_along_the_side_it_leaves() {
+        assert_eq!(
+            elbow((50., 100.), Side::Bottom, (400., 300.)),
+            [(50., 100.), (50., 200.), (400., 200.), (400., 300.)]
+        );
+        assert_eq!(
+            elbow((100., 50.), Side::Right, (400., 150.)),
+            [(100., 50.), (250., 50.), (250., 150.), (400., 150.)]
+        );
     }
 
     #[test]

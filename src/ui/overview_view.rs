@@ -878,6 +878,7 @@ impl ClaudhubApp {
         let quiet = cx.theme().border;
         let lit = cx.theme().ring;
         let width = px((1.5 * view.zoom).clamp(1., 2.5));
+        let zoom = view.zoom;
         canvas(
             move |_, _, _| {},
             move |bounds, _, window, _| {
@@ -891,20 +892,33 @@ impl ClaudhubApp {
                         LinkKind::Root | LinkKind::Branch => width,
                         LinkKind::Terminal | LinkKind::Note => width * 0.6,
                     };
-                    // Out of the parent through the side facing the child,
-                    // and into the child through the side facing back: each
-                    // end leaves square to its side, half the way across.
-                    let (from, to) = (link.from, link.to);
-                    let reach = ((to.0 - from.0).abs().max((to.1 - from.1).abs()) / 2.).max(12.);
-                    let out = link.from_side.outward();
-                    let back = link.to_side.outward();
+                    // An elbow: out square to the parent's side, across
+                    // half way, into the child square to its own — and the
+                    // two corners rounded, never wider than half a leg.
+                    let points = overview::elbow(link.from, link.from_side, link.to);
+                    let radius = (10. * zoom).max(3.);
                     let mut path = PathBuilder::stroke(width);
-                    path.move_to(at(from));
-                    path.cubic_bezier_to(
-                        at(to),
-                        at((from.0 + out.0 * reach, from.1 + out.1 * reach)),
-                        at((to.0 + back.0 * reach, to.1 + back.1 * reach)),
-                    );
+                    path.move_to(at(points[0]));
+                    for corner in 1..=2 {
+                        let (before, here, after) =
+                            (points[corner - 1], points[corner], points[corner + 1]);
+                        let length = |a: (f32, f32), b: (f32, f32)| {
+                            ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
+                        };
+                        let (into, out) = (length(before, here), length(here, after));
+                        let r = radius.min(into / 2.).min(out / 2.);
+                        if r < 0.5 {
+                            path.line_to(at(here));
+                            continue;
+                        }
+                        let toward = |a: (f32, f32), b: (f32, f32), by: f32| {
+                            let d = length(a, b);
+                            (a.0 + (b.0 - a.0) / d * by, a.1 + (b.1 - a.1) / d * by)
+                        };
+                        path.line_to(at(toward(here, before, r)));
+                        path.curve_to(at(toward(here, after, r)), at(here));
+                    }
+                    path.line_to(at(points[3]));
                     if let Ok(path) = path.build() {
                         window.paint_path(path, if on { lit } else { quiet });
                     }
@@ -1927,6 +1941,11 @@ impl ClaudhubApp {
                             true
                         })
                 });
+                // The buttons dispatch `Confirm` and `Cancel` from the focus,
+                // and the focus is still where the cross was pressed — a
+                // terminal, which answers neither: OK did nothing. Deferred,
+                // the dialog being painted on the next frame.
+                window.defer(cx, |window, cx| window.focus_dialog(cx));
             }
             Node::Worktree(path) => {
                 let node = node.clone();
@@ -1958,6 +1977,8 @@ impl ClaudhubApp {
                             true
                         })
                 });
+                // See the terminal's: the buttons dispatch from the focus.
+                window.defer(cx, |window, cx| window.focus_dialog(cx));
             }
         }
     }
@@ -2100,6 +2121,8 @@ impl ClaudhubApp {
                     true
                 })
         });
+        // See `close_node`: the buttons dispatch from the focus.
+        window.defer(cx, |window, cx| window.focus_dialog(cx));
     }
 
     /// A note: rendered Markdown, or the field it is written in.

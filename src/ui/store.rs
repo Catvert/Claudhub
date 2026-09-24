@@ -317,6 +317,10 @@ pub struct SavedTerminal {
     pub offset: Option<(f32, f32)>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Claude typed at the shell's prompt: its program and arguments, typed
+    /// again when the shell comes back.
+    #[serde(default)]
+    pub typed: Option<(String, Vec<String>)>,
 }
 
 /// What starts a kept terminal again.

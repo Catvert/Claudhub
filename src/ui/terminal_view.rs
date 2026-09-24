@@ -353,6 +353,17 @@ impl TerminalView {
         self.terminal.child()
     }
 
+    /// What a hand typed at the shell's prompt and is running now.
+    pub fn foreground_job(&self) -> Option<(u32, Vec<String>)> {
+        self.terminal.foreground_job()
+    }
+
+    /// Types a line at the prompt, and enters it — a command handed back to
+    /// the shell it was typed in.
+    pub fn type_line(&mut self, line: &str) {
+        self.terminal.write_str(&format!("{line}\r"));
+    }
+
     pub fn label(&self) -> SharedString {
         // The kept `SharedString` and not `Terminal::title`: the dock asks
         // every tab for its title at every frame, and that one would copy the
@@ -1818,6 +1829,9 @@ pub struct OpenTerminal {
     pub relaunch: Option<crate::ui::store::Relaunch>,
     /// The agent's conversation, once the hooks have named it.
     pub session: Option<String>,
+    /// Claude typed at this shell's prompt and running now — its program,
+    /// arguments and pid, read from `/proc` by `persist_terminals`.
+    pub typed: Option<(String, Vec<String>, u32)>,
     /// Its card's size on the home screen, in plane units.
     ///
     /// Here and not in a map keyed by the view: a terminal that closes takes
@@ -2043,6 +2057,7 @@ impl ClaudhubApp {
             view_name,
             relaunch: None,
             session: None,
+            typed: None,
             size: crate::ui::overview::Tile::default().size(),
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
@@ -2501,7 +2516,9 @@ impl ClaudhubApp {
             // worktree's last conversation, two may not — see `relaunch`.
             let agents = kept
                 .iter()
-                .filter(|kept| matches!(kept.relaunch, Relaunch::Agent { .. }))
+                .filter(|kept| {
+                    matches!(kept.relaunch, Relaunch::Agent { .. }) || kept.typed.is_some()
+                })
                 .count();
             for kept in kept {
                 let launch = match &kept.relaunch {
@@ -2556,6 +2573,26 @@ impl ClaudhubApp {
                 // time: the kept command is.
                 opened.relaunch = Some(kept.relaunch.clone());
                 opened.name = kept.name.clone().map(SharedString::from);
+                // Claude typed at this shell's prompt: typed again, once the
+                // shell has had the time to draw its prompt — typeahead
+                // reaches most shells, but a line editor that clears the line
+                // on start would eat it.
+                if let Some((program, args)) = kept.typed.clone() {
+                    let line = crate::ui::revive::typed_line(
+                        &program,
+                        &args,
+                        kept.session.as_deref(),
+                        agents == 1,
+                    );
+                    let view = opened.view.clone();
+                    cx.spawn(async move |_, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(800))
+                            .await;
+                        view.update(cx, |view, _| view.type_line(&line));
+                    })
+                    .detach();
+                }
                 opened.session = kept.session.clone();
                 if let Some(size) = kept.size {
                     opened.size = size;
@@ -2579,6 +2616,21 @@ impl ClaudhubApp {
     /// the worktrees whose kept terminals have been opened again, and only
     /// what can be started again: a shell or an agent still running.
     pub(super) fn persist_terminals(&mut self, cx: &mut Context<Self>) {
+        // What each shell is running, read first: Claude typed at a prompt
+        // comes back the way it was started, in its shell.
+        for terminal in &mut self.terminals {
+            if !matches!(terminal.relaunch, Some(crate::ui::store::Relaunch::Shell)) {
+                continue;
+            }
+            terminal.typed = terminal
+                .view
+                .read(cx)
+                .foreground_job()
+                .and_then(|(pid, cmdline)| {
+                    crate::ui::revive::claude_in(&cmdline)
+                        .map(|(program, args)| (program, args, pid))
+                });
+        }
         let mut kept: HashMap<PathBuf, Vec<crate::ui::store::SavedTerminal>> = self
             .terminals_revived
             .iter()
@@ -2618,6 +2670,10 @@ impl ClaudhubApp {
                     .overview_hand
                     .collapsed
                     .contains(&crate::ui::overview::Node::Terminal(id)),
+                typed: terminal
+                    .typed
+                    .as_ref()
+                    .map(|(program, args, _)| (program.clone(), args.clone())),
             });
         }
         crate::ui::store::Store::update_global_if(cx, |store| {
@@ -2644,11 +2700,15 @@ impl ClaudhubApp {
         records: &[crate::agent_hooks::Record],
         cx: &mut Context<Self>,
     ) {
+        // Agent tabs, and shells with Claude typed at their prompt.
         let agents: Vec<usize> = self
             .terminals
             .iter()
             .enumerate()
-            .filter(|(_, t)| matches!(t.relaunch, Some(crate::ui::store::Relaunch::Agent { .. })))
+            .filter(|(_, t)| {
+                matches!(t.relaunch, Some(crate::ui::store::Relaunch::Agent { .. }))
+                    || t.typed.is_some()
+            })
             .filter(|(_, t)| !t.view.read(cx).has_exited())
             .map(|(index, _)| index)
             .collect();
@@ -2657,9 +2717,17 @@ impl ClaudhubApp {
         }
         let open: Vec<crate::ui::revive::Open> = agents
             .iter()
-            .map(|&index| crate::ui::revive::Open {
-                worktree: self.terminals[index].worktree.clone(),
-                pid: self.terminals[index].view.read(cx).child(),
+            .map(|&index| {
+                let terminal = &self.terminals[index];
+                crate::ui::revive::Open {
+                    worktree: terminal.worktree.clone(),
+                    // The typed agent's own pid — the shell is the pty's
+                    // child, and it is not the one the hooks name.
+                    pid: match &terminal.typed {
+                        Some((_, _, pid)) => Some(*pid),
+                        None => terminal.view.read(cx).child(),
+                    },
+                }
             })
             .collect();
         let heard: Vec<crate::ui::revive::Heard> = records

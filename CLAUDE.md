@@ -622,7 +622,10 @@ worktree.
   (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — taille et vue
   d'avant rendues au second clic —, et une croix toujours confirmée : un terminal fermé,
   une note supprimée, un worktree **retiré du plan** avec ce qui en pend
-  (`Hand::hidden`), jamais supprimé ; le nœud git n'en a pas. Agrandir
+  (`Hand::hidden`), jamais supprimé ; le nœud git n'en a pas. **Un dialogue
+  ouvert depuis un nœud prend le focus** (`focus_dialog`, différé) : ses
+  boutons dispatchent `Confirm` depuis le focus, resté dans le terminal où la
+  croix a été pressée — et OK ne faisait rien. Agrandir
   **donne la place** et pas seulement un regard plus proche : le nœud reçoit
   90 % de l'écran à un zoom de un (`maximized_size`), donc un terminal des
   lignes et des colonnes, et l'arbre s'écarte. Tant qu'un nœud est agrandi,
@@ -631,6 +634,8 @@ worktree.
 - **Un lien part du côté qui fait face à l'enfant** (`overview::attach`) :
   en dessous tant que l'arbre est tel qu'il l'a posé, par le flanc dès qu'on a
   traîné l'enfant à côté — l'axe où les deux nœuds sont le plus écartés décide.
+  Il est tracé **en coude** (`overview::elbow`), coins arrondis : une courbe
+  étirée sur toute la distance faisait des boucles, pas un arbre.
 - Le plan **suit le focus** (`View::reveal`) quand la main passe à un autre
   terminal, jamais à chaque image. Un clic sur une carte la sélectionne, un
   double clic y emmène (`work_in_worktree`) : quitter l'écran est le seul geste
@@ -691,9 +696,12 @@ session que les hooks rapportent pour l'enfant du pty, à défaut `--continue`
 quand le worktree n'avait qu'un agent — les hooks manquent souvent, posés
 seulement sur les worktrees apparus fenêtre ouverte et jamais sur un
 `settings.local.json` suivi — et toujours `|| exec claude` derrière : une
-reprise qui ne trouve rien sort en erreur, et l'onglet serait mort-né. Un onglet lancé
-sur une commande ne revient pas : relancer un `just deploy` parce qu'on a
-fermé la fenêtre dessus serait un redémarrage que personne n'a demandé. Rien
+reprise qui ne trouve rien sort en erreur, et l'onglet serait mort-né. Claude
+**tapé dans un shell** revient dans ce shell (`revive::claude_in` lu dans
+`/proc`, puis la ligne de reprise tapée à l'invite, sans `exec` pour que le
+shell reste). Un onglet lancé sur une commande ne revient pas : relancer un
+`just deploy` parce qu'on a fermé la fenêtre dessus serait un redémarrage que
+personne n'a demandé. Rien
 n'est écrit pour un worktree dont les terminaux n'ont pas encore été rouverts
 (`terminals_revived`) : un dépôt qui n'a pas répondu serait écrit vide.
 

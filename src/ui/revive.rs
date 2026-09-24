@@ -45,16 +45,30 @@ pub fn relaunch(
     session: Option<&str>,
     alone: bool,
 ) -> (String, Vec<String>) {
+    match resume_line(program, args, session, alone, "exec ") {
+        Some(line) => ("sh".to_string(), vec!["-c".to_string(), line]),
+        None => (program.to_string(), without_resume(args)),
+    }
+}
+
+/// `<resume> || <fresh>`, or `None` when there is nothing to resume.
+/// `exec` before the fresh start where the line is the tab's own process —
+/// the agent is then the pty's child, as a fresh tab's is — and not where it
+/// is typed at a prompt, whose shell has to be there when the agent ends.
+fn resume_line(
+    program: &str,
+    args: &[String],
+    session: Option<&str>,
+    alone: bool,
+    exec: &str,
+) -> Option<String> {
     let args = without_resume(args);
     let resume: Vec<String> = match session {
-        _ if !is_claude(program) => Vec::new(),
+        _ if !is_claude(program) => return None,
         Some(session) => vec!["--resume".into(), session.into()],
         None if alone => vec!["--continue".into()],
-        None => Vec::new(),
+        None => return None,
     };
-    if resume.is_empty() {
-        return (program.to_string(), args);
-    }
     let fresh: Vec<&str> = std::iter::once(program)
         .chain(args.iter().map(String::as_str))
         .collect();
@@ -63,12 +77,11 @@ pub fn relaunch(
         .copied()
         .chain(resume.iter().map(String::as_str))
         .collect();
-    let line = format!(
-        "{} || exec {}",
+    Some(format!(
+        "{} || {exec}{}",
         crate::cmdline::join_command(&resumed),
         crate::cmdline::join_command(&fresh)
-    );
-    ("sh".to_string(), vec!["-c".to_string(), line])
+    ))
 }
 
 /// A profile's arguments without a `--resume` of their own: what is kept is
@@ -86,12 +99,51 @@ pub fn without_resume(args: &[String]) -> Vec<String> {
             skip = true;
             continue;
         }
-        if arg.starts_with("--resume=") {
+        // `--continue` too: kept, it would fight the session added back.
+        if arg.starts_with("--resume=") || arg == "--continue" || arg == "-c" {
             continue;
         }
         kept.push(arg.clone());
     }
     kept
+}
+
+/// Claude Code in a command line read from `/proc`, as a hand typed it at a
+/// prompt: the native binary, or node running its script. What comes back
+/// is the program to type again and its arguments.
+pub fn claude_in(cmdline: &[String]) -> Option<(String, Vec<String>)> {
+    let name = |arg: &String| {
+        Path::new(arg)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let first = cmdline.first()?;
+    if is_claude(first) {
+        return Some(("claude".into(), without_resume(&cmdline[1..])));
+    }
+    // `node …/claude-code/cli.js` — the script names the package.
+    let runtime = name(first);
+    if runtime == "node" || runtime == "bun" {
+        let script = cmdline
+            .iter()
+            .skip(1)
+            .position(|arg| arg.contains("claude"))?
+            + 1;
+        return Some(("claude".into(), without_resume(&cmdline[script + 1..])));
+    }
+    None
+}
+
+/// The line to type at a shell's prompt to take a typed agent back up — the
+/// same resume and the same fallback as `relaunch`, without the `sh -c` a
+/// prompt does not need.
+pub fn typed_line(program: &str, args: &[String], session: Option<&str>, alone: bool) -> String {
+    resume_line(program, args, session, alone, "").unwrap_or_else(|| {
+        crate::cmdline::join_command(
+            std::iter::once(program.to_string()).chain(without_resume(args)),
+        )
+    })
 }
 
 /// An open agent terminal, as the matching sees it.
@@ -186,6 +238,40 @@ mod tests {
         assert_eq!(
             relaunch("codex", &strings(&["x"]), Some("abc"), true),
             ("codex".to_string(), strings(&["x"]))
+        );
+    }
+
+    #[test]
+    fn claude_typed_at_a_prompt_is_recognised_native_or_through_node() {
+        assert_eq!(
+            claude_in(&strings(&[
+                "claude",
+                "--dangerously-skip-permissions",
+                "-c"
+            ])),
+            Some((
+                "claude".into(),
+                strings(&["--dangerously-skip-permissions"])
+            ))
+        );
+        assert_eq!(
+            claude_in(&strings(&[
+                "node",
+                "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+                "--model",
+                "opus"
+            ])),
+            Some(("claude".into(), strings(&["--model", "opus"])))
+        );
+        assert_eq!(claude_in(&strings(&["vim", "claude.md"])), None);
+        assert_eq!(claude_in(&strings(&["node", "server.js"])), None);
+        assert_eq!(
+            typed_line("claude", &[], Some("abc"), true),
+            "claude --resume abc || claude"
+        );
+        assert_eq!(
+            typed_line("claude", &strings(&["-c"]), None, false),
+            "claude"
         );
     }
 
