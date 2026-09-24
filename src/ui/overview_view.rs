@@ -36,7 +36,7 @@ use gpui_kit::{
 };
 
 use super::app::ClaudhubApp;
-use super::canvas_view::{note_button, Hang};
+use super::canvas_view::Hang;
 use super::icons::icon;
 use super::overview::{self, Checkout, Group, LinkKind, Node, Plan, Rect, View};
 use super::terminal_view::{Canvas, Launch};
@@ -1122,26 +1122,23 @@ impl ClaudhubApp {
                     .child(SharedString::from(repo.name.clone())),
             )
             .when(detail, |el| {
-                el.child(note_button(
-                    cx.entity().downgrade(),
-                    Hang::Repo(main.to_path_buf()),
-                ))
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "overview-fetch-{}",
-                        main.display()
-                    )))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("refresh-cw"))
-                    .tooltip(tr!("overview-fetch"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.git.send(crate::runtime::Cmd::Fetch {
-                            worktree: fetch.clone(),
-                        });
-                        cx.notify();
-                    })),
-                )
+                el.child(self.add_menu(Hang::Repo(main.to_path_buf()), cx))
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "overview-fetch-{}",
+                            main.display()
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("refresh-cw"))
+                        .tooltip(tr!("overview-fetch"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.git.send(crate::runtime::Cmd::Fetch {
+                                worktree: fetch.clone(),
+                            });
+                            cx.notify();
+                        })),
+                    )
             });
         v_flex()
             .id(SharedString::from(format!(
@@ -1268,12 +1265,6 @@ impl ClaudhubApp {
                         .child(tr!("overview-main")),
                 )
             })
-            .when(detail, |el| {
-                el.child(note_button(
-                    cx.entity().downgrade(),
-                    Hang::Worktree(path.to_path_buf()),
-                ))
-            })
             // A branch with commits its base does not have can be merged from
             // here — the card is where one sees how far ahead it is.
             .when_some(
@@ -1325,7 +1316,7 @@ impl ClaudhubApp {
                             path.display()
                         )))
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(self.new_terminal_button(path, cx)),
+                        .child(self.add_menu(Hang::Worktree(path.to_path_buf()), cx)),
                 )
                 .child(
                     Button::new(SharedString::from(format!(
@@ -1589,53 +1580,72 @@ impl ClaudhubApp {
         .into_any_element()
     }
 
-    /// A `+` on a worktree's card: a shell, or one of the agent profiles.
-    fn new_terminal_button(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// The `+` of a card or of the git node: what can be added under it — a
+    /// terminal, an agent, a note written by hand, or a note or a diagram an
+    /// agent writes from a request (`canvas_view::generate_node`).
+    fn add_menu(&self, hang: Hang, cx: &mut Context<Self>) -> AnyElement {
         let app = cx.entity().downgrade();
-        let path = path.to_path_buf();
-        let id = SharedString::from(format!("overview-new-{}", path.display()));
-        if super::settings::Settings::global(cx)
-            .terminal
-            .agents
-            .is_empty()
-        {
-            return Button::new(id)
-                .ghost()
-                .xsmall()
-                .icon(icon("plus"))
-                .tooltip(tr!("terminal-new"))
-                .on_click(move |_, window, cx| {
-                    open_on(&app, &path, Launch::shell(), window, cx);
-                })
-                .into_any_element();
-        }
+        let worktree = match &hang {
+            Hang::Repo(main) => main.clone(),
+            Hang::Worktree(worktree) => worktree.clone(),
+        };
+        let id = SharedString::from(format!("overview-add-{hang:?}"));
         Button::new(id)
             .ghost()
             .xsmall()
             .icon(icon("plus"))
-            .tooltip(tr!("terminal-new"))
+            .tooltip(tr!("overview-add"))
             .dropdown_menu(move |menu, _, cx| {
                 let profiles = super::settings::Settings::global(cx)
                     .terminal
                     .agents
                     .clone();
-                let shell = (app.clone(), path.clone());
+                let shell = (app.clone(), worktree.clone());
                 let menu = menu.item(
                     PopupMenuItem::new(tr!("terminal-new"))
-                        .icon(icon("plus"))
+                        .icon(icon("square-terminal"))
                         .on_click(move |_, window, cx| {
                             open_on(&shell.0, &shell.1, Launch::shell(), window, cx);
                         }),
                 );
-                profiles.into_iter().fold(menu, |menu, profile| {
-                    let (app, path) = (app.clone(), path.clone());
+                let menu = profiles.into_iter().fold(menu, |menu, profile| {
+                    let (app, worktree) = (app.clone(), worktree.clone());
                     let label = SharedString::from(profile.label().to_string());
                     menu.item(PopupMenuItem::new(label).icon(icon("bot")).on_click(
                         move |_, window, cx| {
-                            open_on(&app, &path, Launch::agent(&profile), window, cx);
+                            open_on(&app, &worktree, Launch::agent(&profile), window, cx);
                         },
                     ))
-                })
+                });
+                let item = |label: SharedString,
+                            glyph: &'static str,
+                            kind: Option<crate::canvas::Kind>| {
+                    let (app, hang) = (app.clone(), hang.clone());
+                    PopupMenuItem::new(label)
+                        .icon(icon(glyph))
+                        .on_click(move |_, window, cx| {
+                            let Some(app) = app.upgrade() else {
+                                return;
+                            };
+                            let hang = hang.clone();
+                            app.update(cx, |this, cx| match kind {
+                                None => this.add_home_note(hang, cx),
+                                Some(kind) => this.ask_generation(hang, kind, window, cx),
+                            });
+                        })
+                };
+                menu.separator()
+                    .item(item(tr!("overview-add-note"), "sticky-note", None))
+                    .item(item(
+                        tr!("overview-add-note-prompt"),
+                        "sparkles",
+                        Some(crate::canvas::Kind::Note),
+                    ))
+                    .item(item(
+                        tr!("overview-add-diagram-prompt"),
+                        "image",
+                        Some(crate::canvas::Kind::Diagram),
+                    ))
             })
             .into_any_element()
     }

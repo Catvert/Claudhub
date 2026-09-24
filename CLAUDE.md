@@ -631,6 +631,14 @@ worktree.
   listées dans le panneau Notes — **jamais versées dans les notes**, que le
   coffre recopie. Envoyées à l'agent, elles lui demandent de passer lui-même
   la remarque `resolved` dans le fichier.
+- **Le `+` d'une carte ou du nœud git** ajoute dessous : un terminal, un
+  agent, une note vide, ou une note ou un diagramme **écrits par l'agent** sur
+  une demande. Claudhub nomme le fichier d'avance et le dit à l'agent avec le
+  format entier (`canvas::generation_prompt`, la skill pouvant manquer) ; son
+  terminal est un nœud où on le voit travailler, et **cède la place** au
+  résultat une fois le fichier là et le tour de l'agent fini — le `status` que
+  Claude écrit pour son pid. Ce terminal n'est pas retenu : rouvert, il
+  relancerait la demande.
 - **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
   sa branche fusionnée (plus aucun commit d'avance sur sa base) :
   `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de

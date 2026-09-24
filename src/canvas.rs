@@ -458,6 +458,62 @@ pub fn finding_prompt(review_file: &str, findings: &[&Finding]) -> String {
     out
 }
 
+/// What an agent is asked when the hand wants a note or a diagram written
+/// for it: the file to create — named in advance, so the window knows what
+/// it waits for — its whole format, since the skill may not be installed,
+/// and the request itself.
+pub fn generation_prompt(
+    kind: Kind,
+    anchor: Anchor,
+    file: &str,
+    picture: Option<&str>,
+    created: &str,
+    request: &str,
+) -> String {
+    let anchor = match anchor {
+        Anchor::Repo => "repo",
+        Anchor::Worktree => "worktree",
+    };
+    let mut out =
+        format!("Write a node for the Claudhub home screen. Create exactly the file `{file}`");
+    if let Some(picture) = picture {
+        out.push_str(&format!(" and the SVG `{picture}`"));
+    }
+    out.push_str(
+        ", and change nothing else in the repository.\n\nThe file starts with this \
+         frontmatter, then its body in Markdown:\n\n---\n",
+    );
+    out.push_str(&format!("claudhub: {}\n", kind.word()));
+    out.push_str(&format!("anchor: {anchor}\n"));
+    out.push_str("title: <a short title>\n");
+    out.push_str("author: <the output of `git config user.name`>\n");
+    out.push_str("agent: claude\n");
+    out.push_str(&format!("created: {created}\n"));
+    if let Some(picture) = picture {
+        let name = Path::new(picture)
+            .file_name()
+            .map_or(picture.to_string(), |n| n.to_string_lossy().into_owned());
+        out.push_str(&format!("image: {name}\n"));
+    }
+    out.push_str("---\n\n");
+    match kind {
+        Kind::Diagram => out.push_str(
+            "The body is a short caption: what the diagram shows. The SVG is \
+             self-contained — no external fonts, images or scripts — with a viewBox \
+             and a sensible width and height.\n",
+        ),
+        Kind::Review => out.push_str(
+            "The body is a summary, then `## Findings` with one `### path:line` \
+             heading per finding, its `severity:` and `status: open`, the quoted \
+             lines in a fenced block, and what to do.\n",
+        ),
+        Kind::Note => out.push_str("The body is the note itself.\n"),
+    }
+    out.push_str(&format!("\nThe request: {request}\n\n"));
+    out.push_str("When the file is written, say so in one line and stop.");
+    out
+}
+
 /// Where a checkout's shared notes live.
 pub fn shared_dir(checkout: &Path) -> PathBuf {
     crate::wslpath::join(&crate::wslpath::join(checkout, DIR), NOTES)
@@ -568,6 +624,25 @@ mod tests {
         assert!(prompt.contains("## src/cache.rs:42 (warning)\n"));
         assert!(prompt.contains("## src/api.rs:10-12 (suggestion)\n"));
         assert!(prompt.contains("The key is built twice."));
+    }
+
+    #[test]
+    fn a_generation_names_its_file_and_its_whole_format() {
+        let prompt = generation_prompt(
+            Kind::Diagram,
+            Anchor::Repo,
+            "/r/.claudhub/notes/2026-09-24-2200-flow.md",
+            Some("/r/.claudhub/notes/2026-09-24-2200-flow.svg"),
+            "2026-09-24T22:00:00+02:00",
+            "the login flow",
+        );
+        assert!(prompt.contains("`/r/.claudhub/notes/2026-09-24-2200-flow.md`"));
+        assert!(prompt.contains("the SVG `/r/.claudhub/notes/2026-09-24-2200-flow.svg`"));
+        assert!(prompt.contains("claudhub: diagram\nanchor: repo\n"));
+        assert!(prompt.contains("image: 2026-09-24-2200-flow.svg\n"));
+        assert!(prompt.contains("The request: the login flow"));
+        let note = generation_prompt(Kind::Note, Anchor::Worktree, "a.md", None, "x", "y");
+        assert!(!note.contains("image:"));
     }
 
     #[test]

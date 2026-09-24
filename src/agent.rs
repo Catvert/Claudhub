@@ -472,6 +472,9 @@ pub struct ClaudeProcess {
     pub pid: u32,
     pub session: String,
     pub cwd: PathBuf,
+    /// `busy` or `idle`, as Claude says it: what tells a turn still under way
+    /// from one done.
+    pub status: Option<String>,
 }
 
 /// Reads one of those files, field by field — Sentry's rule: a shape that
@@ -487,6 +490,10 @@ pub fn parse_claude_process(text: &str) -> Option<ClaudeProcess> {
                 .and_then(|cwd| cwd.as_str())
                 .unwrap_or_default(),
         ),
+        status: value
+            .get("status")
+            .and_then(|status| status.as_str())
+            .map(str::to_string),
     })
 }
 
@@ -644,6 +651,7 @@ mod tests {
                 pid: 1153715,
                 session: "0023212f".into(),
                 cwd: PathBuf::from("/r/wt"),
+                status: Some("idle".into()),
             })
         );
         // Without the two fields it is read for, it is nothing.

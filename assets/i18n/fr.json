@@ -1014,5 +1014,16 @@
   "overview-close-note-title": "Fermer ce nœud ?",
   "overview-delete-file": "Supprimer le fichier",
   "overview-close-note-shared": "Masquer le retire de l'accueil et garde son fichier dans .claudhub/ — le menu « Masqués » le fait revenir. Supprimer efface le fichier, pour toute l'équipe au prochain commit.",
-  "overview-close-note-private": "Masquer le retire de l'accueil et garde son fichier dans le coffre — le menu « Masqués » le fait revenir. Supprimer efface le fichier."
+  "overview-close-note-private": "Masquer le retire de l'accueil et garde son fichier dans le coffre — le menu « Masqués » le fait revenir. Supprimer efface le fichier.",
+  "overview-add": "Ajouter…",
+  "overview-add-note": "Note vide",
+  "overview-add-note-prompt": "Note, écrite par l'agent…",
+  "overview-add-diagram-prompt": "Diagramme, dessiné par l'agent…",
+  "generate-note-title": "Une note, écrite par l'agent",
+  "generate-note-placeholder": "Ce que la note doit dire — « résume les changements de la branche »…",
+  "generate-diagram-title": "Un diagramme, dessiné par l'agent",
+  "generate-diagram-placeholder": "Ce qu'il doit montrer — « le flux de connexion »…",
+  "generate-no-agent": "Aucun profil d'agent n'est réglé.",
+  "generate-note-running": "✦ Note en cours…",
+  "generate-diagram-running": "✦ Diagramme en cours…"
 }

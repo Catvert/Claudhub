@@ -1014,5 +1014,16 @@
   "overview-close-note-title": "Close this node?",
   "overview-delete-file": "Delete the file",
   "overview-close-note-shared": "Hiding takes it off the home screen and keeps its file in .claudhub/ — the « Hidden » menu brings it back. Deleting erases the file, for the whole team at the next commit.",
-  "overview-close-note-private": "Hiding takes it off the home screen and keeps its file in the vault — the « Hidden » menu brings it back. Deleting erases the file."
+  "overview-close-note-private": "Hiding takes it off the home screen and keeps its file in the vault — the « Hidden » menu brings it back. Deleting erases the file.",
+  "overview-add": "Add…",
+  "overview-add-note": "Empty note",
+  "overview-add-note-prompt": "Note, written by the agent…",
+  "overview-add-diagram-prompt": "Diagram, drawn by the agent…",
+  "generate-note-title": "A note, written by the agent",
+  "generate-note-placeholder": "What the note should say — “sum up the branch's changes”…",
+  "generate-diagram-title": "A diagram, drawn by the agent",
+  "generate-diagram-placeholder": "What it should show — “the login flow”…",
+  "generate-no-agent": "No agent profile is set.",
+  "generate-note-running": "✦ Note in progress…",
+  "generate-diagram-running": "✦ Diagram in progress…"
 }
