@@ -182,7 +182,7 @@ pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui_kit::App) -> im
 }
 
 /// The dot and, when the agent said one, its word — the picker's row and a
-/// multiplexer tile, where the program's name is not what one reads.
+/// home screen's card, where the program's name is not what one reads.
 pub(super) fn activity_badge(
     agent: &crate::agent::State,
     max_width: gpui_kit::Pixels,
@@ -402,7 +402,7 @@ impl ClaudhubApp {
                             // own: not one of the pickers that say what the window is
                             // talking about, and not one of the worktree's operations
                             // either — it is the corner one reaches for, next to the
-                            // multiplexer, which is where what it starts ends up. It is
+                            // home screen, which is where what it starts ends up. It is
                             // painted only where there is a justfile with a recipe in
                             // it.
                             .children(self.render_just(cx))
@@ -442,10 +442,10 @@ impl ClaudhubApp {
     /// A pin is what says which those are, and the row is read left to right in
     /// the order they were pinned — nothing reorders itself under the hand.
     ///
-    /// **The multiplexer is the first segment**, and it belongs there: the
-    /// group answers "which checkout am I looking at", and the grid is the
-    /// answer "all of them at once". Two buttons a gap apart said that twice,
-    /// with nothing to say they were one question; joined, the grid reads as
+    /// **The home screen is the first segment**, and it belongs there: the
+    /// group answers "which checkout am I looking at", and the home screen is
+    /// the answer "all of them at once". Two buttons a gap apart said that
+    /// twice, with nothing to say they were one question; joined, it reads as
     /// the group's "all" and lights up like a pin when it is on, which is the
     /// polarity every one of them already had.
     ///
@@ -453,16 +453,16 @@ impl ClaudhubApp {
     /// were not, an empty group being width spent to say that a feature exists.
     ///
     /// **And it is exclusive of the pins**, since it is one answer to the same
-    /// question: while the strip is up no pin is lit, though the window still
-    /// has a current checkout underneath — the strip shows every project's
-    /// terminals, and a pin lit beside it said one of them was being looked at
-    /// alone. A pin pressed from the strip goes to work in that checkout and
-    /// leaves the strip, the gesture the tiles' arrow already makes.
+    /// question: while the home screen is up no pin is lit, though the window
+    /// still has a current checkout underneath — the screen shows every
+    /// project, and a pin lit beside it said one of them was being looked at
+    /// alone. A pin pressed from there goes to work in that checkout and
+    /// leaves the screen, the gesture the cards' arrow already makes.
     fn render_switches(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Shared, not copied twice: the click handler outlives the frame and
         // used to take a second list of its own.
         let pins: std::rc::Rc<[PathBuf]> = self.pinned_worktrees(cx).into();
-        let active = self.active_path().filter(|_| !self.multiplex);
+        let active = self.active_path().filter(|_| !self.overview);
         let muted = cx.theme().muted_foreground;
         // What a selected pin is painted with. A solid button's ground is the
         // accent, and everything the row carries beside its name — the
@@ -480,11 +480,11 @@ impl ClaudhubApp {
             // screen. A lone picture for "leave the window you are working
             // in" is a button one presses to find out what it does.
             .child(
-                Button::new("multiplex")
-                    .icon(icon("layout-grid"))
-                    .label(tr!("multiplex-short"))
-                    .tooltip(tr!("multiplex-toggle"))
-                    .map(|button| match self.multiplex {
+                Button::new("overview")
+                    .icon(icon("layout-dashboard"))
+                    .label(tr!("overview-short"))
+                    .tooltip(tr!("overview-toggle"))
+                    .map(|button| match self.overview {
                         true => button.primary(),
                         false => button.outline(),
                     }),
@@ -502,7 +502,7 @@ impl ClaudhubApp {
                             // The repository's name in front and greyed,
                             // exactly as the picker's trigger says it, and
                             // dropped when it would repeat the checkout's
-                            // own name — the multiplexer's rule, and the
+                            // own name — the home screen's rule, and the
                             // same helper.
                             .children(repo.map(|name| {
                                 div()
@@ -555,13 +555,13 @@ impl ClaudhubApp {
                 // The grid is the first segment, so the pins are counted
                 // from one — the one place this arrangement costs anything.
                 let Some(index) = index.checked_sub(1) else {
-                    this.toggle_multiplex(window, cx);
+                    this.toggle_overview(window, cx);
                     return;
                 };
                 let Some(path) = for_click.get(index).cloned() else {
                     return;
                 };
-                if this.multiplex {
+                if this.overview {
                     this.work_in_worktree(&path, window, cx);
                 } else {
                     this.select_worktree(path, window, cx);

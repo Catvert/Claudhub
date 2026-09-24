@@ -133,6 +133,8 @@ pub struct TerminalView {
     /// command. Recorded at opening, like `agent`, and for the same reason —
     /// nothing about the running process says it afterwards.
     runs_command: bool,
+    /// Set while the home screen shows it — see `set_canvas`.
+    canvas: Option<Canvas>,
 }
 
 /// The pty's child has exited, and the tab was a shell — nothing to keep.
@@ -268,7 +270,26 @@ impl TerminalView {
             label,
             agent,
             runs_command,
+            canvas: None,
         }
+    }
+
+    /// Puts the terminal on the home screen's plane, or takes it off.
+    ///
+    /// **Zooming scales the terminal, it does not reflow it.** The font
+    /// follows the zoom, and the grid is worked out from the card's size in
+    /// plane units — never from the pixels it covers, which the zoom changes
+    /// and the layout rounds: at a fifth of the size, one pixel of rounding is
+    /// five of the plane, and a line would come and go at every notch, each
+    /// one a `SIGWINCH` a program redraws on.
+    pub fn set_canvas(&mut self, canvas: Option<Canvas>) {
+        if self.canvas == canvas {
+            return;
+        }
+        self.canvas = canvas;
+        // Measured again at the next frame, against the new font.
+        self.font_size = px(0.);
+        self.bounds = Bounds::default();
     }
 
     pub fn is_agent(&self) -> bool {
@@ -327,6 +348,22 @@ impl TerminalView {
         self.runs_command || self.terminal.busy()
     }
 
+    /// The pty's child: the agent itself, for an agent's tab on Linux.
+    pub fn child(&self) -> Option<u32> {
+        self.terminal.child()
+    }
+
+    /// What a hand typed at the shell's prompt and is running now.
+    pub fn foreground_job(&self) -> Option<(u32, Vec<String>)> {
+        self.terminal.foreground_job()
+    }
+
+    /// Types a line at the prompt, and enters it — a command handed back to
+    /// the shell it was typed in.
+    pub fn type_line(&mut self, line: &str) {
+        self.terminal.write_str(&format!("{line}\r"));
+    }
+
     pub fn label(&self) -> SharedString {
         // The kept `SharedString` and not `Terminal::title`: the dock asks
         // every tab for its title at every frame, and that one would copy the
@@ -346,7 +383,8 @@ impl TerminalView {
     /// the shell would keep believing in the old column width.
     fn sync_font(&mut self, cx: &App) {
         let settings = Settings::global(cx);
-        let font_size = px(settings.terminal.font_size);
+        let zoom = self.canvas.map_or(1., |canvas| canvas.zoom);
+        let font_size = px(settings.terminal.font_size * zoom);
         let font_family = settings.terminal_font();
         if font_size == self.font_size && font_family == self.font_family.as_ref() {
             return;
@@ -490,13 +528,25 @@ impl TerminalView {
         let line_height = window.line_height().max(px(1.));
 
         self.cell = gpui_kit::size(cell_width.max(px(1.)), line_height);
-        let (columns, lines) = grid_size(bounds.size, self.cell);
+        // On the plane, the grid is the card's and the cell the one of the
+        // unzoomed font: the same answer at every zoom — see `set_canvas`.
+        let (space, cell) = match self.canvas {
+            Some(canvas) => (
+                gpui_kit::size(px(canvas.size.0), px(canvas.size.1)),
+                gpui_kit::size(
+                    self.cell.width / canvas.zoom,
+                    self.cell.height / canvas.zoom,
+                ),
+            ),
+            None => (bounds.size, self.cell),
+        };
+        let (columns, lines) = grid_size(space, cell);
         self.request_size(
             TermSize::new(
                 columns,
                 lines,
-                f32::from(cell_width) as u16,
-                f32::from(line_height) as u16,
+                f32::from(cell.width) as u16,
+                f32::from(cell.height) as u16,
             ),
             cx,
         );
@@ -910,6 +960,11 @@ impl TerminalView {
         let line_height = window.line_height().max(px(1.));
         let delta = event.delta.pixel_delta(line_height);
         if delta.y == px(0.) && delta.x != px(0.) {
+            return;
+        }
+        // On the home screen the zoom is the plane's, and it goes through
+        // untouched: the terminal's own would change every terminal's font.
+        if self.canvas.is_some() && event.modifiers.secondary() {
             return;
         }
         cx.stop_propagation();
@@ -1769,14 +1824,30 @@ pub struct OpenTerminal {
     /// there one below?" holds a `&self` on the application, and reading an
     /// entity from there is one borrow too many.
     pub view_name: &'static str,
-    /// How wide its column is in the multiplexer, as a share of the window.
+    /// What starts it again after a restart — `None` for a terminal launched
+    /// on a command, which is not started again (see `ui::revive`).
+    pub relaunch: Option<crate::ui::store::Relaunch>,
+    /// The agent's conversation, once the hooks have named it.
+    pub session: Option<String>,
+    /// Claude typed at this shell's prompt and running now — its program,
+    /// arguments and pid, read from `/proc` by `persist_terminals`.
+    pub typed: Option<(String, Vec<String>, u32)>,
+    /// Its card's size on the home screen, in plane units.
     ///
     /// Here and not in a map keyed by the view: a terminal that closes takes
-    /// its width with it, and there is nothing to sweep.
-    pub column: crate::ui::multiplex::Width,
+    /// its size with it, and there is nothing to sweep.
+    pub size: (f32, f32),
 }
 
 impl OpenTerminal {}
+
+/// A terminal as the home screen holds it: the plane's zoom, and the size of
+/// its grid in plane units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Canvas {
+    pub zoom: f32,
+    pub size: (f32, f32),
+}
 
 impl ClaudhubApp {
     /// How a worktree is named where there is no room for a path: the
@@ -1890,6 +1961,18 @@ impl ClaudhubApp {
         // the pty: `open` falls back on the settings' program when nothing was
         // asked for, and that fallback is the shell.
         let runs_command = launch.command.is_some();
+        // What would start it again: a shell, or an agent's own command —
+        // without a `--resume` of this run, the session being added back on
+        // the way out.
+        let relaunch = match &launch.command {
+            None => Some(crate::ui::store::Relaunch::Shell),
+            Some((program, args)) if launch.agent => Some(crate::ui::store::Relaunch::Agent {
+                profile: launch.label.to_string(),
+                program: program.clone(),
+                args: crate::ui::revive::without_resume(args),
+            }),
+            Some(_) => None,
+        };
         let view = cx.new(|cx| {
             TerminalView::attach(
                 terminal,
@@ -1918,6 +2001,9 @@ impl ClaudhubApp {
             self.show_panel(crate::ui::panels::TerminalPanel::name_of(placement), cx);
         }
         self.install_terminal(worktree.to_path_buf(), view, placement, window, cx);
+        if let Some(opened) = self.terminals.last_mut() {
+            opened.relaunch = relaunch;
+        }
     }
 
     /// Puts a terminal's panel into the dock, and shows it.
@@ -1969,7 +2055,10 @@ impl ClaudhubApp {
             name: None,
             panel: panel.clone(),
             view_name,
-            column: crate::ui::multiplex::Width::default(),
+            relaunch: None,
+            session: None,
+            typed: None,
+            size: crate::ui::overview::Tile::default().size(),
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);
@@ -2405,6 +2494,299 @@ impl ClaudhubApp {
         }
     }
 
+    /// Opens again the terminals a worktree had when the window was closed,
+    /// where they were — once per worktree and per run.
+    pub(super) fn revive_terminals(
+        &mut self,
+        worktrees: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::store::Relaunch;
+        for worktree in worktrees {
+            if !self.terminals_revived.insert(worktree.clone()) {
+                continue;
+            }
+            let kept = crate::ui::store::Store::global(cx)
+                .worktrees
+                .get(worktree)
+                .map(|state| state.terminals.clone())
+                .unwrap_or_default();
+            // How many agents the worktree had: one alone may continue the
+            // worktree's last conversation, two may not — see `relaunch`.
+            let agents = kept
+                .iter()
+                .filter(|kept| {
+                    matches!(kept.relaunch, Relaunch::Agent { .. }) || kept.typed.is_some()
+                })
+                .count();
+            for kept in kept {
+                let launch = match &kept.relaunch {
+                    Relaunch::Shell => Launch::shell(),
+                    Relaunch::Agent {
+                        profile,
+                        program,
+                        args,
+                    } => {
+                        let found = Settings::global(cx)
+                            .terminal
+                            .agents
+                            .iter()
+                            .find(|p| p.label() == profile)
+                            .cloned();
+                        let mut launch = match found {
+                            Some(profile) => Launch::agent(&profile),
+                            // The profile is gone: its command as it was.
+                            None => Launch {
+                                command: Some((program.clone(), args.clone())),
+                                env: HashMap::new(),
+                                label: SharedString::from(profile.clone()),
+                                agent: true,
+                                placement: None,
+                            },
+                        };
+                        if let Some((program, args)) = launch.command.take() {
+                            launch.command = Some(crate::ui::revive::relaunch(
+                                &program,
+                                &args,
+                                kept.session.as_deref(),
+                                agents == 1,
+                            ));
+                        }
+                        launch
+                    }
+                };
+                let placement = if kept.right {
+                    crate::ui::settings::TerminalPlacement::Right
+                } else {
+                    crate::ui::settings::TerminalPlacement::Bottom
+                };
+                let before = self.terminals.len();
+                self.open_terminal(worktree, launch.at(placement), window, cx);
+                if self.terminals.len() == before {
+                    continue;
+                }
+                let Some(opened) = self.terminals.last_mut() else {
+                    continue;
+                };
+                // What the launch wrapped to resume is not what starts it next
+                // time: the kept command is.
+                opened.relaunch = Some(kept.relaunch.clone());
+                opened.name = kept.name.clone().map(SharedString::from);
+                // Claude typed at this shell's prompt: typed again, once the
+                // shell has had the time to draw its prompt — typeahead
+                // reaches most shells, but a line editor that clears the line
+                // on start would eat it.
+                if let Some((program, args)) = kept.typed.clone() {
+                    let line = crate::ui::revive::typed_line(
+                        &program,
+                        &args,
+                        kept.session.as_deref(),
+                        agents == 1,
+                    );
+                    let view = opened.view.clone();
+                    cx.spawn(async move |_, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(800))
+                            .await;
+                        view.update(cx, |view, _| view.type_line(&line));
+                    })
+                    .detach();
+                }
+                opened.session = kept.session.clone();
+                if let Some(size) = kept.size {
+                    opened.size = size;
+                }
+                let id = opened.view.entity_id().as_u64();
+                if kept.collapsed {
+                    self.overview_hand
+                        .collapsed
+                        .insert(crate::ui::overview::Node::Terminal(id));
+                }
+                if let Some(offset) = kept.offset {
+                    self.overview_hand
+                        .moved
+                        .insert(crate::ui::overview::Node::Terminal(id), offset);
+                }
+            }
+        }
+    }
+
+    /// Writes the open terminals back to the store, per worktree — only for
+    /// the worktrees whose kept terminals have been opened again, and only
+    /// what can be started again: a shell or an agent still running.
+    pub(super) fn persist_terminals(&mut self, cx: &mut Context<Self>) {
+        // What each shell is running, read first: Claude typed at a prompt
+        // comes back the way it was started, in its shell.
+        for terminal in &mut self.terminals {
+            if !matches!(terminal.relaunch, Some(crate::ui::store::Relaunch::Shell)) {
+                continue;
+            }
+            terminal.typed = terminal
+                .view
+                .read(cx)
+                .foreground_job()
+                .and_then(|(pid, cmdline)| {
+                    crate::ui::revive::claude_in(&cmdline)
+                        .map(|(program, args)| (program, args, pid))
+                });
+        }
+        let mut kept: HashMap<PathBuf, Vec<crate::ui::store::SavedTerminal>> = self
+            .terminals_revived
+            .iter()
+            .map(|worktree| (worktree.clone(), Vec::new()))
+            .collect();
+        for terminal in &self.terminals {
+            let Some(list) = kept.get_mut(&terminal.worktree) else {
+                continue;
+            };
+            let Some(relaunch) = terminal.relaunch.clone() else {
+                continue;
+            };
+            if terminal.view.read(cx).has_exited() {
+                continue;
+            }
+            let id = terminal.view.entity_id().as_u64();
+            // Maximised is a moment, not a size: what is kept is the one it
+            // will be given back.
+            let size = match &self.overview_maximized {
+                Some(maximized) if maximized.node == crate::ui::overview::Node::Terminal(id) => {
+                    maximized.size.unwrap_or(terminal.size)
+                }
+                _ => terminal.size,
+            };
+            list.push(crate::ui::store::SavedTerminal {
+                relaunch,
+                name: terminal.name.as_ref().map(|name| name.to_string()),
+                session: terminal.session.clone(),
+                right: terminal.view_name == crate::ui::panels::TerminalPanel::RIGHT,
+                size: Some(size),
+                offset: self
+                    .overview_hand
+                    .moved
+                    .get(&crate::ui::overview::Node::Terminal(id))
+                    .copied(),
+                collapsed: self
+                    .overview_hand
+                    .collapsed
+                    .contains(&crate::ui::overview::Node::Terminal(id)),
+                typed: terminal
+                    .typed
+                    .as_ref()
+                    .map(|(program, args, _)| (program.clone(), args.clone())),
+            });
+        }
+        crate::ui::store::Store::update_global_if(cx, |store| {
+            let mut changed = false;
+            for (worktree, list) in kept {
+                let present = store.worktrees.contains_key(&worktree);
+                if !present && list.is_empty() {
+                    continue;
+                }
+                let entry = store.worktrees.entry(worktree).or_default();
+                if entry.terminals != list {
+                    entry.terminals = list;
+                    changed = true;
+                }
+            }
+            changed
+        });
+    }
+
+    /// Names the conversation each agent terminal runs, from what the hooks
+    /// said — see `revive::sessions`.
+    pub(super) fn terminal_sessions_heard(
+        &mut self,
+        records: &[crate::agent_hooks::Record],
+        cx: &mut Context<Self>,
+    ) {
+        let heard: Vec<crate::ui::revive::Heard> = records
+            .iter()
+            .map(|record| crate::ui::revive::Heard {
+                session: record.session.clone(),
+                worktree: record.worktree.clone(),
+                pid: record.pid,
+                age_ms: record.age_ms,
+            })
+            .collect();
+        self.name_sessions(&heard, false, cx);
+    }
+
+    /// The same from Claude's own process files: by pid only, which is
+    /// certain — see `revive::by_pid`. Heard after the hooks at every sweep,
+    /// so a pid Claude names wins over a guess.
+    pub(super) fn claude_processes_heard(
+        &mut self,
+        processes: &[crate::agent::ClaudeProcess],
+        cx: &mut Context<Self>,
+    ) {
+        let heard: Vec<crate::ui::revive::Heard> = processes
+            .iter()
+            .map(|process| crate::ui::revive::Heard {
+                session: process.session.clone(),
+                worktree: process.cwd.clone(),
+                pid: Some(process.pid),
+                age_ms: 0,
+            })
+            .collect();
+        self.name_sessions(&heard, true, cx);
+    }
+
+    fn name_sessions(
+        &mut self,
+        heard: &[crate::ui::revive::Heard],
+        certain_only: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // Agent tabs, and shells with Claude typed at their prompt.
+        let agents: Vec<usize> = self
+            .terminals
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                matches!(t.relaunch, Some(crate::ui::store::Relaunch::Agent { .. }))
+                    || t.typed.is_some()
+            })
+            .filter(|(_, t)| !t.view.read(cx).has_exited())
+            .map(|(index, _)| index)
+            .collect();
+        if agents.is_empty() {
+            return;
+        }
+        let open: Vec<crate::ui::revive::Open> = agents
+            .iter()
+            .map(|&index| {
+                let terminal = &self.terminals[index];
+                crate::ui::revive::Open {
+                    worktree: terminal.worktree.clone(),
+                    // The typed agent's own pid — the shell is the pty's
+                    // child, and it is not the one Claude names.
+                    pid: match &terminal.typed {
+                        Some((_, _, pid)) => Some(*pid),
+                        None => terminal.view.read(cx).child(),
+                    },
+                }
+            })
+            .collect();
+        let certain = crate::ui::revive::by_pid(&open, heard);
+        let named = if certain_only {
+            certain.clone()
+        } else {
+            crate::ui::revive::sessions(&open, heard)
+        };
+        for (index, session) in named {
+            let terminal = &mut self.terminals[agents[index]];
+            // A guess never replaces what a pid said: Claude's own files
+            // name the conversation for certain, the hooks' freshest record
+            // of a worktree may be another Claude's.
+            let guessed = !certain.iter().any(|(i, _)| *i == index);
+            if guessed && terminal.session.is_some() {
+                continue;
+            }
+            terminal.session = Some(session);
+        }
+    }
+
     /// Opens a terminal running the configured coding agent.
     pub(super) fn open_agent_terminal(
         &mut self,
@@ -2476,7 +2858,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// Goes to work in a project picked from the multiplexer.
+    /// Goes to work in a project picked from the home screen.
     ///
     /// Three things in one gesture, and none can be dropped: the worktree
     /// becomes the one being looked at — every dock only ever shows its own —,
@@ -2492,12 +2874,11 @@ impl ClaudhubApp {
         self.select_worktree(worktree.to_path_buf(), window, cx);
         self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
         self.bring_half_forward(crate::ui::panels::TerminalPanel::NAME, cx);
-        // And the grid goes away: one came to it to find out which of the
-        // agents had finished, and this is the answer being acted on. Leaving
-        // it up would show the eleven other checkouts' shells beside the one
+        // And the home screen goes away: one came to it to find out which of
+        // the agents had finished, and this is the answer being acted on.
+        // Leaving it up would show the eleven other checkouts beside the one
         // just chosen.
-        self.multiplex = false;
-        cx.notify();
+        self.leave_overview(cx);
     }
 
     /// The most recent agent terminal still running on this worktree.

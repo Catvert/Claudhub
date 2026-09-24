@@ -16,6 +16,7 @@ pub mod diff;
 // Named `history` and not `log`: a module `log` in this crate would shadow the
 // logging library of the same name for the whole file.
 pub mod history;
+pub mod outline;
 pub mod repo;
 pub mod search;
 pub mod snapshot;
@@ -29,6 +30,7 @@ pub(crate) mod submodule_tests;
 pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};
+pub use outline::Outline;
 pub use repo::{Pending, Repo, Stages, Worktree};
 pub use search::Query as SearchQuery;
 pub use stash::Stash;

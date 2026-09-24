@@ -1050,20 +1050,58 @@ pub struct ClaudhubApp {
     /// Empty when one is not in zen. It is not persisted: a window reopening in
     /// zen with no memory of what it hid would be a window one has to rebuild.
     pub(super) zen_folded: Vec<crate::ui::rails::Side>,
-    /// The terminal strip, in place of the whole workspace — see `ui::multiplex`.
+    /// The home screen, in place of the whole workspace — see
+    /// `ui::overview_view`.
     ///
     /// A state of the window and not a panel: what it replaces is the rails,
     /// the docks and the status bar, which is precisely what a panel cannot do.
-    /// Not remembered either — a screen with no way back to the code is not
-    /// where a window should come up.
-    pub(super) multiplex: bool,
-    /// Where the multiplexer's strip of columns is scrolled to.
-    pub(super) multiplex_scroll: gpui_kit::ScrollHandle,
-    /// The terminal the strip last brought into view — the one under the
-    /// hand at the previous frame. `None` when nothing was, or when the strip
-    /// has just come up: the first frame then reveals the focused column
-    /// wherever the strip had been left.
-    pub(super) multiplex_seen: Option<gpui_kit::EntityId>,
+    /// **Remembered** (`Session::home`), unlike the multiplexer it replaced:
+    /// the home screen is somewhere one works from, with its button back to
+    /// the code in the title bar, and a window that forgot it came back on a
+    /// screen one had left.
+    pub(super) overview: bool,
+    /// Where the home screen's plane is looked at from, and how close.
+    pub(super) overview_view: crate::ui::overview::View,
+    /// The terminal the plane last brought into view — the one under the
+    /// hand at the previous frame; `None` when nothing was, or when the
+    /// screen has just come up.
+    pub(super) overview_seen: Option<gpui_kit::EntityId>,
+    /// The canvas's origin and size at the last frame — x, y, width, height —
+    /// which is what the wheel's anchor, fitting and revealing measure
+    /// against. Written by a measuring canvas at paint time, hence the cell.
+    pub(super) overview_viewport: std::rc::Rc<std::cell::Cell<(f32, f32, f32, f32)>>,
+    /// False until the plane has been fitted to the canvas once: the first
+    /// time the screen comes up, everything is shown.
+    pub(super) overview_fitted: bool,
+    /// What the pointer is dragging on the home screen, and where it was at
+    /// the last step.
+    pub(super) overview_drag: Option<crate::ui::overview_view::Drag>,
+    /// What the hand decided on the plane: nodes moved, resized, folded,
+    /// hidden — see `overview::Hand`.
+    pub(super) overview_hand: crate::ui::overview::Hand,
+    /// The node maximised, and what to give back — see `overview::Maximized`.
+    pub(super) overview_maximized: Option<crate::ui::overview::Maximized>,
+    /// True while the commit sheet is open: a commit that lands then closes
+    /// it — see `overview_view::CommitSheet`.
+    pub(super) commit_sheet: bool,
+    /// The home screen's notes being edited, each with its field and the
+    /// subscription that writes it back to the store.
+    pub(super) note_editors: HashMap<u64, (Entity<EditorState>, gpui_kit::Subscription)>,
+    /// The worktrees whose kept terminals have been opened again: those, and
+    /// only those, have their open terminals written back — a worktree whose
+    /// repository has not answered yet would otherwise be written empty.
+    pub(super) terminals_revived: std::collections::HashSet<PathBuf>,
+    /// A node to bring into view on the next frame — one just created.
+    pub(super) overview_reveal: Option<crate::ui::overview::Node>,
+    /// True once the places remembered in the store have been read into
+    /// `overview_moved`.
+    pub(super) overview_loaded: bool,
+    /// Every project on the plane at once, rather than one.
+    pub(super) overview_all: bool,
+    /// The project picked in the corner; `None` follows the active worktree.
+    pub(super) overview_repo: Option<PathBuf>,
+    /// What the home screen's cards say of each branch — `git::outline`.
+    pub(super) outlines: HashMap<PathBuf, crate::git::Outline>,
     /// The views the user has hidden, by panel name.
     ///
     /// A set and not a flag per panel: it is `Panel::visible` that makes a view
@@ -1508,9 +1546,22 @@ impl ClaudhubApp {
             dock,
             dock_skin,
             layout_save_scheduled: false,
-            multiplex: false,
-            multiplex_scroll: gpui_kit::ScrollHandle::new(),
-            multiplex_seen: None,
+            overview: crate::ui::store::Store::global(cx).session.home,
+            overview_view: crate::ui::overview::View::default(),
+            overview_seen: None,
+            overview_viewport: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
+            overview_fitted: false,
+            overview_drag: None,
+            overview_hand: crate::ui::overview::Hand::default(),
+            overview_maximized: None,
+            commit_sheet: false,
+            note_editors: HashMap::new(),
+            terminals_revived: std::collections::HashSet::new(),
+            overview_reveal: None,
+            overview_loaded: false,
+            overview_all: false,
+            overview_repo: None,
+            outlines: HashMap::new(),
             zen_folded: Vec::new(),
             settings_form,
             off_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
@@ -1758,6 +1809,10 @@ impl ClaudhubApp {
                     .update(cx, |this, cx| {
                         this.scan_now(tick.is_multiple_of(SUMMARY_EVERY), cx);
                         this.auto_fetch_now(cx);
+                        // The open terminals, as they would come back: a
+                        // write only when something moved, and at most this
+                        // old when the window is closed.
+                        this.persist_terminals(cx);
                     })
                     .is_ok();
                 if !alive {
@@ -1787,6 +1842,13 @@ impl ClaudhubApp {
             // declared by the project, one per worktree, and there is no reason
             // to run them more often than a `git status`.
             self.scan_wt();
+            // And the home screen's cards, only while it is up: four commands
+            // a worktree, for a screen nobody is looking at otherwise.
+            if self.overview {
+                self.git.send(Cmd::LoadOutlines {
+                    worktrees: worktrees.clone(),
+                });
+            }
         }
         let programs = Settings::global(cx).terminal.agent_programs();
         self.git.send(Cmd::ScanAgents {
@@ -2225,6 +2287,11 @@ impl ClaudhubApp {
             Evt::Summaries { summaries } => {
                 self.summaries.extend(summaries);
             }
+            Evt::ClaudeProcesses { processes } => self.claude_processes_heard(&processes, cx),
+            Evt::Outlines { outlines } => {
+                self.outlines.extend(outlines);
+                cx.notify();
+            }
             Evt::Agents { agents } => self.agents_scanned(agents),
             Evt::AgentSessions { sessions } => self.agent_sessions_heard(sessions, cx),
             Evt::AgentHooksWritten {
@@ -2550,6 +2617,16 @@ impl ClaudhubApp {
             self.forget_missing_worktrees(&main, cx);
             self.ensure_wt_project(&main);
             self.git.send(Cmd::LoadBranches { main });
+            // Before the session's terminal below, which opens a shell only
+            // where there is none: the kept ones count.
+            self.revive_terminals(&paths, window, cx);
+            // A window that comes back on the home screen asks for its cards
+            // at once, rather than at the sweep's next turn.
+            if self.overview {
+                self.git.send(Cmd::LoadOutlines {
+                    worktrees: paths.clone(),
+                });
+            }
         }
         // A weaker candidate never displaces a firmer one, and re-selecting is
         // free: `select_worktree` returns at once when the path is already the
@@ -3037,6 +3114,11 @@ impl ClaudhubApp {
                 self.commit_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
                 });
+                // The sheet was opened for this commit, and has done its work.
+                if self.commit_sheet {
+                    self.commit_sheet = false;
+                    window.close_dialog(cx);
+                }
             }
         }
         self.report(
@@ -4597,8 +4679,8 @@ impl ClaudhubApp {
         // The `+` closes the bar, at the bottom right — the corner of the
         // window a terminal opens on. It is what is left of a row of three: the
         // toggle repeated the rail's own Terminal button, and the grid beside
-        // it was the multiplexer before there was one — that screen is back,
-        // and its button is in the title bar with the gear.
+        // it was the multiplexer before there was one — that screen became the
+        // home screen, and its button is in the title bar with the gear.
         let opens = h_flex()
             .flex_1()
             .min_w_0()
@@ -4704,8 +4786,6 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::close_terminal))
             .on_action(cx.listener(super::shortcuts::toggle_terminal))
             .on_action(cx.listener(super::shortcuts::next_terminal))
-            .on_action(cx.listener(super::shortcuts::multiplex_step_left))
-            .on_action(cx.listener(super::shortcuts::multiplex_step_right))
             .on_action(cx.listener(super::shortcuts::next_tab))
             .on_action(cx.listener(super::shortcuts::previous_tab))
             .on_action(cx.listener(super::shortcuts::commit))
@@ -4813,8 +4893,8 @@ impl Render for ClaudhubApp {
             // rails, the docks and the status bar. The title bar stays, and it
             // has to — the button that came here is the way back.
             .map(|el| {
-                if self.multiplex {
-                    el.child(self.render_multiplex(window, cx))
+                if self.overview {
+                    el.child(self.render_overview(window, cx))
                 } else {
                     el.child(self.render_workspace(cx))
                         .child(self.render_status_bar(cx))

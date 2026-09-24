@@ -312,6 +312,18 @@ impl Terminal {
     /// Off Linux it always answers no: reading a foreground group is `/proc`,
     /// and the Windows build's terminals are the one thing that stays on the
     /// Windows side.
+    /// The pty's child, where there is one to name — see `ui::revive`.
+    pub fn child(&self) -> Option<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.child)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     pub fn busy(&self) -> bool {
         if self.exited {
             return false;
@@ -325,6 +337,29 @@ impl Terminal {
         }
         #[cfg(not(target_os = "linux"))]
         false
+    }
+
+    /// The job in front of the shell — its leader's pid and command line —
+    /// when one is there: what a hand typed at the prompt, `claude` among
+    /// others. Linux only, like `busy`.
+    pub fn foreground_job(&self) -> Option<(u32, Vec<String>)> {
+        if self.exited {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.child)).ok()?;
+            let pid = foreground_of(&stat)?;
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            let args = cmdline
+                .split(|byte| *byte == 0)
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect();
+            Some((pid, args))
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     pub fn has_exited(&self) -> bool {
@@ -547,16 +582,17 @@ impl Drop for Terminal {
 /// attached to. A shell at its prompt is that group itself; a shell running a
 /// command has handed it over, and `-1` means no terminal at all.
 fn running_command(stat: &str) -> bool {
-    let Some(rest) = stat.rfind(')').map(|at| &stat[at + 1..]) else {
-        return false;
-    };
+    foreground_of(stat).is_some()
+}
+
+/// The terminal's foreground process group, when it is not the shell's own:
+/// the job typed at the prompt, whose leader's pid it is.
+fn foreground_of(stat: &str) -> Option<u32> {
+    let rest = stat.rfind(')').map(|at| &stat[at + 1..])?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
-    let group = fields.get(2).and_then(|f| f.parse::<i32>().ok());
-    let foreground = fields.get(5).and_then(|f| f.parse::<i32>().ok());
-    match (group, foreground) {
-        (Some(group), Some(foreground)) => foreground > 0 && foreground != group,
-        _ => false,
-    }
+    let group = fields.get(2).and_then(|f| f.parse::<i32>().ok())?;
+    let foreground = fields.get(5).and_then(|f| f.parse::<i32>().ok())?;
+    (foreground > 0 && foreground != group).then_some(foreground as u32)
 }
 
 #[cfg(test)]
@@ -572,6 +608,7 @@ mod tests {
         assert!(!running_command(idle), "sitting at its prompt");
         let running = "4242 (fi(sh) one) S 4200 4242 4242 34816 4711 4194304 1 2 3 4";
         assert!(running_command(running), "a job in front of it");
+        assert_eq!(foreground_of(running), Some(4711), "and which");
         let detached = "4242 (bash) S 4200 4242 4242 0 -1 4194304 1 2 3 4";
         assert!(!running_command(detached), "no terminal at all");
         assert!(!running_command("nonsense"));

@@ -34,6 +34,18 @@ const SAVE_DELAY: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorktreeState {
+    /// Where the hand moved this worktree's card on the home screen, as an
+    /// offset from where the layout puts it — see `ui::overview`.
+    pub home_offset: Option<(f32, f32)>,
+    /// The size the hand gave its card, when it gave one.
+    pub home_size: Option<(f32, f32)>,
+    /// Its card folded to its head.
+    pub home_collapsed: bool,
+    /// Its card taken off the plane, with what hangs from it.
+    pub home_hidden: bool,
+    /// The terminals that were open, in order, to open again — see
+    /// `ui::revive`.
+    pub terminals: Vec<SavedTerminal>,
     /// The main repository this checkout belongs to.
     ///
     /// It only serves the purge, and is indispensable to it: without it, an
@@ -216,6 +228,8 @@ pub struct Session {
     /// over the checkout `claudhub` was launched from — see
     /// `ClaudhubApp::repo_opened`.
     pub worktree: Option<PathBuf>,
+    /// The home screen was up: the window comes back on it.
+    pub home: bool,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.
@@ -238,6 +252,13 @@ pub struct RepoState {
     /// live in `settings.json` — the organisation and the token belong to the
     /// machine, the project belongs to the code.
     pub sentry_project: Option<String>,
+    /// Where the hand moved the repository's git node on the home screen, as
+    /// an offset from where the layout puts it.
+    pub home_offset: Option<(f32, f32)>,
+    /// The size the hand gave the git node, when it gave one.
+    pub home_size: Option<(f32, f32)>,
+    /// The git node folded to its head.
+    pub home_collapsed: bool,
     /// **Legacy**: what a plugin had remembered about this repository, read
     /// once so `migrate_sentry` can pour Sentry's back into the field above,
     /// then cleared. Nothing writes it any more.
@@ -273,6 +294,73 @@ pub struct Store {
     /// be forgotten. What `forget_missing` drops is a checkout git has just
     /// said is gone.
     pub pinned: Vec<PathBuf>,
+    /// The Markdown notes on the home screen, every repository together —
+    /// see `ui::overview_view`.
+    pub home_notes: Vec<HomeNote>,
+}
+
+/// A terminal as it is kept across a restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedTerminal {
+    pub relaunch: Relaunch,
+    /// The name given by hand.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The agent's conversation, to resume.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Beside the code rather than under it.
+    #[serde(default)]
+    pub right: bool,
+    /// Its card on the home screen: size, and where the hand put it.
+    #[serde(default)]
+    pub size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub offset: Option<(f32, f32)>,
+    #[serde(default)]
+    pub collapsed: bool,
+    /// Claude typed at the shell's prompt: its program and arguments, typed
+    /// again when the shell comes back.
+    #[serde(default)]
+    pub typed: Option<(String, Vec<String>)>,
+}
+
+/// What starts a kept terminal again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Relaunch {
+    Shell,
+    /// An agent, by its profile's name — looked up again, so a profile edited
+    /// since is the one that starts — and its command, for when the profile
+    /// is gone.
+    Agent {
+        profile: String,
+        program: String,
+        args: Vec<String>,
+    },
+}
+
+/// A Markdown note on the home screen's plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HomeNote {
+    /// Unique among the notes, never reused while the note lives.
+    pub id: u64,
+    pub anchor: HomeAnchor,
+    pub text: String,
+    /// Where the hand moved it, as an offset from where the tree puts it.
+    #[serde(default)]
+    pub offset: Option<(f32, f32)>,
+    #[serde(default)]
+    pub size: Option<(f32, f32)>,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// What a note hangs from: a repository's git node, or a worktree's card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HomeAnchor {
+    /// By the repository's main path.
+    Repo(PathBuf),
+    Worktree(PathBuf),
 }
 
 impl Store {
@@ -647,6 +735,7 @@ mod tests {
             session: Session {
                 worktree: None,
                 place: a_place(),
+                ..Default::default()
             },
             ..Default::default()
         };

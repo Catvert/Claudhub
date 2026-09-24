@@ -881,7 +881,7 @@ impl ClaudhubApp {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_review_tree(cx)))
     }
 
-    fn render_commit_box(
+    pub(super) fn render_commit_box(
         &self,
         can_commit: bool,
         staged: usize,

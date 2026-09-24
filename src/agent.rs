@@ -458,6 +458,60 @@ pub fn scan(_worktrees: &[PathBuf], _programs: &[String]) -> Agents {
     Agents::new()
 }
 
+/// A Claude Code process, as it writes itself down: Claude keeps a file per
+/// running process in `~/.claude/sessions/<pid>.json`, naming the
+/// conversation it is in and updating it when that changes.
+///
+/// It is what ties a terminal to its conversation **without our hooks**,
+/// which are missing wherever `.claude/settings.local.json` is tracked or the
+/// worktree predates the window — and exactly, by pid: `--continue` took the
+/// directory's last conversation, which may be another Claude's, running
+/// outside Claudhub in the same checkout.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaudeProcess {
+    pub pid: u32,
+    pub session: String,
+    pub cwd: PathBuf,
+}
+
+/// Reads one of those files, field by field — Sentry's rule: a shape that
+/// grows fields, or writes `null` in one, must not lose the two we read.
+pub fn parse_claude_process(text: &str) -> Option<ClaudeProcess> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    Some(ClaudeProcess {
+        pid: u32::try_from(value.get("pid")?.as_u64()?).ok()?,
+        session: value.get("sessionId")?.as_str()?.to_string(),
+        cwd: PathBuf::from(
+            value
+                .get("cwd")
+                .and_then(|cwd| cwd.as_str())
+                .unwrap_or_default(),
+        ),
+    })
+}
+
+/// Every Claude Code process this user runs, from `~/.claude/sessions` —
+/// `$CLAUDE_CONFIG_DIR/sessions` when that is set, as Claude reads it. Empty
+/// when there is no such folder: an older Claude, or none at all.
+pub fn claude_processes() -> Vec<ClaudeProcess> {
+    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
+    let Some(dir) = root.map(|root| root.join("sessions")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| parse_claude_process(&text))
+        .collect()
+}
+
 /// Walks `/proc` looking for the agents launched in these worktrees.
 ///
 /// `programs` are the command names of **all** configured profiles, not of a
@@ -579,6 +633,24 @@ pub fn parse_cpu_ticks(stat: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_claude_process_file_names_its_pid_and_its_conversation() {
+        let text =
+            r#"{"pid":1153715,"sessionId":"0023212f","cwd":"/r/wt","status":"idle","name":null}"#;
+        assert_eq!(
+            parse_claude_process(text),
+            Some(ClaudeProcess {
+                pid: 1153715,
+                session: "0023212f".into(),
+                cwd: PathBuf::from("/r/wt"),
+            })
+        );
+        // Without the two fields it is read for, it is nothing.
+        assert_eq!(parse_claude_process(r#"{"pid":1}"#), None);
+        assert_eq!(parse_claude_process("not json"), None);
+    }
+
     use super::*;
 
     // Reads what only exists under `/proc`.
