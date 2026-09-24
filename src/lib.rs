@@ -21,6 +21,7 @@ rust_i18n::i18n!("assets/i18n", fallback = "en");
 
 pub mod agent;
 pub mod agent_hooks;
+pub mod canvas;
 pub mod cmdline;
 pub mod commit_msg;
 pub mod db;
@@ -35,6 +36,7 @@ pub mod outside;
 pub mod release;
 pub mod runtime;
 pub mod sentry;
+pub mod skill;
 pub mod suite;
 #[cfg(feature = "ui")]
 pub mod terminal;

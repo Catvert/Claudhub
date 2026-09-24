@@ -665,6 +665,61 @@ pub enum Cmd {
         text: String,
         expect: Option<u64>,
     },
+    /// The home screen's nodes of a worktree: its shared folder
+    /// (`.claudhub/notes` in the checkout) and its private one (in the vault),
+    /// `true` for the private. See `crate::canvas`.
+    ReadCanvas {
+        worktree: WorktreeId,
+        dirs: Vec<(PathBuf, bool)>,
+    },
+    /// Writes a new note into a folder: the worker picks a free name on the
+    /// disk and signs it with the checkout's `user.name` — two things only it
+    /// can know.
+    CreateCanvasNote {
+        worktree: WorktreeId,
+        dir: PathBuf,
+        anchor: crate::canvas::Anchor,
+    },
+    /// Writes a node file unless it changed since it was read — an agent may
+    /// be writing the same file. Empty text deletes it: `WriteVaultFile`'s
+    /// rules, for a file that may be in the checkout.
+    WriteCanvasFile {
+        worktree: WorktreeId,
+        path: PathBuf,
+        text: String,
+        expect: Option<u64>,
+    },
+    /// The bytes of a picture a diagram node shows — asked only when its
+    /// stamp moved.
+    ReadCanvasPicture {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// Deletes a diagram's picture, gone with its node: a binary file has no
+    /// text read to guard the delete with.
+    DeleteCanvasPicture {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// Where the Claudhub skill is installed for this checkout, and in which
+    /// version — see `crate::skill`.
+    SkillStatus {
+        worktree: WorktreeId,
+    },
+    /// Installs this build's skill, or removes ours.
+    SetSkill {
+        worktree: WorktreeId,
+        scope: crate::skill::Scope,
+        install: bool,
+    },
+    /// Writes a worktree's context sheet — what an agent reads of its
+    /// environment — when it differs from what is there: it is written at
+    /// every sweep, and a file rewritten identical every ten seconds wakes
+    /// whoever watches it.
+    WriteContext {
+        path: PathBuf,
+        text: String,
+    },
     /// Launches the external editor on a file, at a given line.
     ///
     /// The command template travels here for the same reason as
@@ -1019,6 +1074,14 @@ impl Cmd {
             Self::ReadNotes { .. } => "ReadNotes",
             Self::WriteNotes { .. } => "WriteNotes",
             Self::WriteVaultFile { .. } => "WriteVaultFile",
+            Self::ReadCanvas { .. } => "ReadCanvas",
+            Self::SkillStatus { .. } => "SkillStatus",
+            Self::ReadCanvasPicture { .. } => "ReadCanvasPicture",
+            Self::DeleteCanvasPicture { .. } => "DeleteCanvasPicture",
+            Self::SetSkill { .. } => "SetSkill",
+            Self::WriteContext { .. } => "WriteContext",
+            Self::CreateCanvasNote { .. } => "CreateCanvasNote",
+            Self::WriteCanvasFile { .. } => "WriteCanvasFile",
             Self::OpenExternal { .. } => "OpenExternal",
             Self::Watch { .. } => "Watch",
             Self::Unwatch { .. } => "Unwatch",
@@ -1458,6 +1521,30 @@ pub enum Evt {
     /// relaunch.
     ServerLost {
         message: String,
+    },
+    /// Where the Claudhub skill is, for a checkout.
+    SkillStatus {
+        worktree: WorktreeId,
+        status: crate::skill::Status,
+    },
+    /// A worktree's node files: full path, private or not, and text — and
+    /// the pictures beside them, by stamp only (`files::picture_stamps`).
+    CanvasRead {
+        worktree: WorktreeId,
+        files: Vec<(PathBuf, bool, String)>,
+        pictures: Vec<(PathBuf, bool, u64)>,
+    },
+    /// A diagram's picture, undecoded.
+    CanvasPicture {
+        path: PathBuf,
+        stamp: u64,
+        bytes: Vec<u8>,
+    },
+    /// A node file was written; `created` names the note just made, for the
+    /// view to open it for writing once it has been read.
+    CanvasWritten {
+        worktree: WorktreeId,
+        created: Option<PathBuf>,
     },
     /// The notes folder's content: file name and text.
     NotesRead {

@@ -149,6 +149,8 @@ src/
     search.rs   `git grep` : les arguments, le parsage, les plafonds
     snapshot.rs le point de relecture : l'état du worktree en commit, sans
                 toucher l'index de l'utilisateur
+  canvas.rs     un nœud de l'accueil sur disque : l'en-tête, le nom du fichier — pur
+  skill.rs      la skill Claude Code livrée : où elle est, sa version, l'installer
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent,
                 ont fini ou attendent — le mot de l'agent fusionné à la devinette
   agent_hooks.rs  les hooks de Claude Code : la ligne shell qui écrit, le fichier
@@ -202,6 +204,8 @@ src/
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
+    canvas_view.rs  les notes de l'accueil : les fichiers lus, écrits, déplacés
+    context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
                     zoom — pur, testé
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
@@ -611,9 +615,42 @@ worktree.
   (`set_canvas`), sinon il changerait la police de tous.
 - **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
   worktrees d'un code ne se lisent pas parmi ceux d'un autre.
-- **Les notes sont du Markdown dans le magasin** (`Store::home_notes`),
-  accrochées à un dépôt ou à un worktree ; chaque frappe y retourne, il n'y a
-  pas d'« enregistrer » à oublier.
+- **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
+  Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
+  **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
+  lise chez un collègue — ou dans le coffre du worktree pour une note privée.
+  Le disque fait foi : un agent y écrit, la vue relit — la surveillance
+  couvre `.claudhub/notes/` même né après coup (sa naissance refait le plan),
+  et l'accueil relit les projets affichés toutes les deux secondes ; la main y retourne après une pause, **à la
+  condition** que le fichier soit toujours celui lu. La mise en page reste
+  locale (`Store::home_places`, par chemin). Le worker crée la note — nom
+  libre sur le disque, signée du `user.name` du checkout.
+- **Une revue est un nœud et ses remarques** (`### chemin:ligne`, lues par
+  `canvas::findings`) : résolues dans le fichier même, marquées dans la
+  gouttière du diff par la relocalisation des notes (`refresh_note_marks`) et
+  listées dans le panneau Notes — **jamais versées dans les notes**, que le
+  coffre recopie. Envoyées à l'agent, elles lui demandent de passer lui-même
+  la remarque `resolved` dans le fichier.
+- **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
+  sa branche fusionnée (plus aucun commit d'avance sur sa base) :
+  `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de
+  branche fusionne dans sa base** par le geste « Intégrer » des worktrees
+  (`integrate`, qui propose ensuite de retirer le worktree), confirmé ici, la
+  base venant de la carte quand le worktree n'a jamais été ouvert.
+- **Un diagramme est une image et son nœud** (`claudhub: diagram`,
+  `image:` à côté), un SVG seul devenant un nœud à lui. Le relevé ne transporte
+  que l'**empreinte** des images (`files::picture_stamps`, taille et date) ; les
+  octets ne passent que quand elle bouge — un relevé toutes les deux secondes
+  les enverrait sinon à travers WSL à chaque fois. Posé sur fond blanc : un
+  schéma dessiné pour une page claire reste lisible sur un thème sombre.
+- **Ce qu'un agent voit de son environnement** est une fiche Markdown
+  (`ui::context`), réécrite à chaque relevé dans le coffre du worktree et
+  annoncée par `$CLAUDHUB_CONTEXT` : base, commits, changements, agents,
+  terminaux, nœuds, voisins. Le worker ne l'écrit que si elle a changé.
+  **La skill** qui lui en apprend le format (`crate::skill`, texte dans
+  `assets/skills/`) porte sa version dans son texte ; le bouton de l'accueil
+  l'installe dans le dépôt — pour l'équipe — ou pour soi, et n'écrase ni ne
+  retire jamais un fichier qui n'est pas le nôtre.
 - **Valider depuis une carte** ouvre une feuille (`CommitSheet`, une entité
   enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
   commit du panneau des changements elle-même — même champ, même brouillon.

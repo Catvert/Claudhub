@@ -1937,6 +1937,12 @@ impl ClaudhubApp {
                     .display()
                     .to_string(),
             );
+            launch.env.insert(
+                "CLAUDHUB_CONTEXT".into(),
+                crate::wslpath::join(&vault, crate::ui::canvas_view::CONTEXT)
+                    .display()
+                    .to_string(),
+            );
         }
         // A pty we cannot open is a system problem: descriptor limit reached,
         // `/dev/pts` missing. We give the terminal up and say so, rather than

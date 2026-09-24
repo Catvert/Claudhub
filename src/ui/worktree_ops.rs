@@ -2043,10 +2043,17 @@ impl ClaudhubApp {
         else {
             return;
         };
+        // The review's base, or the one the home screen's card guessed: a
+        // worktree merged from its card may never have been opened.
         let Some(base) = self
             .review
             .get(&worktree)
             .and_then(|state| state.base.clone())
+            .or_else(|| {
+                self.outlines
+                    .get(&worktree)
+                    .and_then(|outline| outline.base.clone())
+            })
         else {
             return;
         };

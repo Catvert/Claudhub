@@ -114,6 +114,8 @@ fn is_background(cmd: &Cmd) -> bool {
         cmd,
         Cmd::LoadSummaries { .. }
             | Cmd::LoadOutlines { .. }
+            | Cmd::ReadCanvas { .. }
+            | Cmd::WriteContext { .. }
             | Cmd::ScanAgents { .. }
             | Cmd::WtScan { .. }
             | Cmd::WtLinks { .. }
@@ -1234,6 +1236,110 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             worktree,
             crate::files::write_vault_file(&path, &text, expect),
         ),
+        Cmd::SkillStatus { worktree } => vec![Evt::SkillStatus {
+            status: crate::skill::status(&worktree),
+            worktree,
+        }],
+        Cmd::SetSkill {
+            worktree,
+            scope,
+            install,
+        } => {
+            let done = if install {
+                crate::skill::install(scope, &worktree)
+            } else {
+                crate::skill::remove(scope, &worktree)
+            };
+            let mut evts = match done {
+                Ok(()) => Vec::new(),
+                Err(e) => vec![fail(Some(worktree.clone()), Action::Notes, e)],
+            };
+            evts.push(Evt::SkillStatus {
+                status: crate::skill::status(&worktree),
+                worktree,
+            });
+            evts
+        }
+        Cmd::WriteContext { path, text } => {
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+                if let Err(e) = crate::files::write_at(&path, &text, None) {
+                    log::warn!("writing the context sheet {}: {e:#}", path.display());
+                }
+            }
+            Vec::new()
+        }
+        Cmd::ReadCanvas { worktree, dirs } => {
+            let mut files = Vec::new();
+            let mut pictures = Vec::new();
+            for (dir, private) in dirs {
+                // A folder that is not there is a worktree without nodes.
+                if let Ok(read) = crate::files::read_notes(&dir) {
+                    files
+                        .extend(read.into_iter().map(|(name, text)| {
+                            (crate::wslpath::join(&dir, &name), private, text)
+                        }));
+                }
+                pictures.extend(
+                    crate::files::picture_stamps(&dir)
+                        .into_iter()
+                        .map(|(path, stamp)| (path, private, stamp)),
+                );
+            }
+            vec![Evt::CanvasRead {
+                worktree,
+                files,
+                pictures,
+            }]
+        }
+        Cmd::DeleteCanvasPicture { worktree, path } => match std::fs::remove_file(&path) {
+            Ok(()) => vec![Evt::CanvasWritten {
+                worktree,
+                created: None,
+            }],
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => vec![fail(
+                Some(worktree),
+                Action::Notes,
+                anyhow::Error::new(e).context(format!("deleting {}", path.display())),
+            )],
+        },
+        Cmd::ReadCanvasPicture { worktree, path } => match std::fs::read(&path) {
+            Ok(bytes) => {
+                let stamp = crate::files::picture_stamps(path.parent().unwrap_or(&path))
+                    .into_iter()
+                    .find(|(p, _)| *p == path)
+                    .map_or(0, |(_, stamp)| stamp);
+                vec![Evt::CanvasPicture { path, stamp, bytes }]
+            }
+            Err(e) => vec![fail(
+                Some(worktree),
+                Action::Notes,
+                anyhow::Error::new(e).context(format!("reading {}", path.display())),
+            )],
+        },
+        Cmd::CreateCanvasNote {
+            worktree,
+            dir,
+            anchor,
+        } => match create_canvas_note(&worktree, &dir, anchor) {
+            Ok(path) => vec![Evt::CanvasWritten {
+                worktree,
+                created: Some(path),
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Notes, e)],
+        },
+        Cmd::WriteCanvasFile {
+            worktree,
+            path,
+            text,
+            expect,
+        } => match crate::files::write_vault_file(&path, &text, expect) {
+            Ok(()) => vec![Evt::CanvasWritten {
+                worktree,
+                created: None,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Notes, e)],
+        },
         Cmd::OpenExternal {
             worktree,
             path,
@@ -1621,6 +1727,31 @@ fn db_query(
 
 /// A vault write. The answer carries the worktree and nothing else — see
 /// [`Evt::VaultWritten`].
+/// A new note on disk: a free name in the folder, signed with the author the
+/// checkout's git knows.
+fn create_canvas_note(
+    worktree: &Path,
+    dir: &Path,
+    anchor: crate::canvas::Anchor,
+) -> Result<PathBuf> {
+    let now = chrono::Local::now();
+    let taken: Vec<String> = crate::files::read_notes(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let name = crate::canvas::file_name(&now.format("%Y-%m-%d-%H%M").to_string(), "", &taken);
+    let author = crate::git::git_opt(worktree, &["config", "user.name"]).filter(|n| !n.is_empty());
+    let node = crate::canvas::Node::note(anchor, author, now.to_rfc3339());
+    let path = crate::wslpath::join(dir, &name);
+    crate::files::write_at(
+        &path,
+        &crate::canvas::render(&node),
+        Some(crate::files::ABSENT),
+    )?;
+    Ok(path)
+}
+
 fn vault_written(worktree: PathBuf, result: Result<()>) -> Vec<Evt> {
     match result {
         Ok(()) => vec![Evt::VaultWritten { worktree }],
@@ -2370,6 +2501,27 @@ mod tests {
             }),
             Queue::Reads
         );
+    }
+
+    /// A note the hand creates is a file on disk, signed by the checkout's
+    /// author, under a name nobody has — and a second one does not overwrite
+    /// the first.
+    #[test]
+    fn a_new_canvas_note_is_signed_and_never_overwrites() {
+        let root = std::env::temp_dir().join(format!("claudhub-canvas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::git::git(&root, &["init", "-q"]).unwrap();
+        crate::git::git(&root, &["config", "user.name", "Ada"]).unwrap();
+        let dir = crate::canvas::shared_dir(&root);
+        let first = create_canvas_note(&root, &dir, crate::canvas::Anchor::Repo).unwrap();
+        let second = create_canvas_note(&root, &dir, crate::canvas::Anchor::Repo).unwrap();
+        assert_ne!(first, second);
+        let node = crate::canvas::parse(&std::fs::read_to_string(&first).unwrap()).unwrap();
+        assert_eq!(node.author.as_deref(), Some("Ada"));
+        assert_eq!(node.anchor, crate::canvas::Anchor::Repo);
+        assert!(first.starts_with(root.join(".claudhub/notes")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -36,13 +36,14 @@ use gpui_kit::{
 };
 
 use super::app::ClaudhubApp;
+use super::canvas_view::{note_button, Hang};
 use super::icons::icon;
 use super::overview::{self, Checkout, Group, LinkKind, Node, Plan, Rect, View};
 use super::terminal_view::{Canvas, Launch};
 use crate::tr;
 
 /// Below this zoom, cards are read and not handled.
-const DETAIL: f32 = 0.55;
+pub(super) const DETAIL: f32 = 0.55;
 /// The commits a card lists.
 const COMMITS: usize = 4;
 
@@ -156,7 +157,7 @@ fn placed(rect: Rect) -> gpui_kit::Div {
 impl ClaudhubApp {
     /// The repositories the plane shows: the one picked in the corner, the
     /// active worktree's until one is, or all of them.
-    fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
+    pub(super) fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
         if self.overview_all {
             return self.repos.iter().collect();
         }
@@ -176,13 +177,43 @@ impl ClaudhubApp {
     }
 
     /// What the plane holds, laid out.
-    fn overview_plan(&self, cx: &App) -> Plan {
-        let notes = &super::store::Store::global(cx).home_notes;
-        let hung = |anchor: super::store::HomeAnchor| -> Vec<u64> {
+    fn overview_plan(&self) -> Plan {
+        // A worktree's nodes hang from its card, unless they say they are
+        // the repository's; a repository's note versioned on several branches
+        // is one note, shown once — the main checkout's copy first.
+        let entries = |worktree: &Path| {
+            self.canvas
+                .get(worktree)
+                .map(|entries| entries.as_slice())
+                .unwrap_or(&[])
+        };
+        let repo_notes = |repo: &crate::ui::repos::RepoState| -> Vec<PathBuf> {
+            let mut seen: Vec<(bool, std::ffi::OsString)> = Vec::new();
+            let mut notes = Vec::new();
+            let mut checkouts: Vec<_> = repo.worktrees.iter().collect();
+            checkouts.sort_by_key(|worktree| !worktree.is_main);
+            for worktree in checkouts {
+                for entry in entries(&worktree.path) {
+                    if entry.node.anchor != crate::canvas::Anchor::Repo {
+                        continue;
+                    }
+                    let key = (
+                        entry.private,
+                        entry.path.file_name().unwrap_or_default().to_os_string(),
+                    );
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        notes.push(entry.path.clone());
+                    }
+                }
+            }
             notes
+        };
+        let worktree_notes = |worktree: &Path| -> Vec<PathBuf> {
+            entries(worktree)
                 .iter()
-                .filter(|note| note.anchor == anchor)
-                .map(|note| note.id)
+                .filter(|entry| entry.node.anchor == crate::canvas::Anchor::Worktree)
+                .map(|entry| entry.path.clone())
                 .collect()
         };
         let groups: Vec<Group> = self
@@ -190,7 +221,7 @@ impl ClaudhubApp {
             .into_iter()
             .map(|repo| Group {
                 main: &repo.main,
-                notes: hung(super::store::HomeAnchor::Repo(repo.main.clone())),
+                notes: repo_notes(repo),
                 checkouts: repo
                     .worktrees
                     .iter()
@@ -211,7 +242,7 @@ impl ClaudhubApp {
                             .filter(|terminal| terminal.worktree == worktree.path)
                             .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.size))
                             .collect(),
-                        notes: hung(super::store::HomeAnchor::Worktree(worktree.path.clone())),
+                        notes: worktree_notes(&worktree.path),
                     })
                     .collect(),
             })
@@ -233,7 +264,7 @@ impl ClaudhubApp {
         // The places kept from the last session, once — the screen may come
         // up with the window, before any toggle has read them.
         self.load_overview_places(cx);
-        let plan = self.overview_plan(cx);
+        let plan = self.overview_plan();
         let size = self.overview_size();
         // Everything in view the first time — and after picking another
         // project — once the canvas has a size: its first frame has none, and
@@ -344,8 +375,8 @@ impl ClaudhubApp {
                 Scaled {
                     rem,
                     child: placed(view.screen(note.rect))
-                        .child(self.render_home_note(note.id, view.zoom, cx))
-                        .children(self.corner_unless_folded(Node::Note(note.id), cx))
+                        .child(self.render_home_note(&note.path, view.zoom, cx))
+                        .children(self.corner_unless_folded(Node::Note(note.path.clone()), cx))
                         .into_any_element(),
                 }
                 .into_any_element()
@@ -515,7 +546,7 @@ impl ClaudhubApp {
             }
             Drag::Thumb(axis, last) => {
                 let (dx, dy) = moved(last);
-                let plan = self.overview_plan(cx);
+                let plan = self.overview_plan();
                 let bounds = self.overview_view.screen(plan.bounds);
                 let (w, h) = self.overview_size();
                 match axis {
@@ -566,11 +597,9 @@ impl ClaudhubApp {
                     let worktree = store.worktrees.entry(path.clone()).or_default();
                     (&mut worktree.home_offset, &mut worktree.home_size)
                 }
-                Node::Note(id) => {
-                    let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) else {
-                        return;
-                    };
-                    (&mut note.offset, &mut note.size)
+                Node::Note(path) => {
+                    let place = store.home_places.entry(path.clone()).or_default();
+                    (&mut place.offset, &mut place.size)
                 }
                 Node::Terminal(_) => return,
             };
@@ -584,7 +613,7 @@ impl ClaudhubApp {
     }
 
     /// The places remembered from an earlier session, read once.
-    fn load_overview_places(&mut self, cx: &App) {
+    fn load_overview_places(&mut self, cx: &mut Context<Self>) {
         if self.overview_loaded {
             return;
         }
@@ -611,12 +640,12 @@ impl ClaudhubApp {
                     worktree.home_hidden,
                 )
             }))
-            .chain(store.home_notes.iter().map(|note| {
+            .chain(store.home_places.iter().map(|(path, place)| {
                 (
-                    Node::Note(note.id),
-                    note.offset,
-                    note.size,
-                    note.collapsed,
+                    Node::Note(path.clone()),
+                    place.offset,
+                    place.size,
+                    place.collapsed,
                     false,
                 )
             }))
@@ -636,6 +665,53 @@ impl ClaudhubApp {
                 hand.hidden.insert(node);
             }
         }
+        self.migrate_home_notes(cx);
+    }
+
+    /// The notes of before, kept in the store, become private note files in
+    /// their worktree's vault — once, and only where a vault is set: without
+    /// one they stay in the store rather than be lost.
+    fn migrate_home_notes(&mut self, cx: &mut Context<Self>) {
+        let notes = super::store::Store::global(cx).home_notes.clone();
+        if notes.is_empty() {
+            return;
+        }
+        let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M").to_string();
+        let mut kept = Vec::new();
+        for note in notes {
+            let (worktree, anchor) = match &note.anchor {
+                super::store::HomeAnchor::Repo(main) => (main.clone(), crate::canvas::Anchor::Repo),
+                super::store::HomeAnchor::Worktree(path) => {
+                    (path.clone(), crate::canvas::Anchor::Worktree)
+                }
+            };
+            let Some(vault) = self.notes_dir(&worktree, cx) else {
+                kept.push(note);
+                continue;
+            };
+            let mut node =
+                crate::canvas::Node::note(anchor, None, chrono::Local::now().to_rfc3339());
+            node.body = note.text.clone();
+            let name = format!("{stamp}-note-{}.md", note.id);
+            let path = crate::wslpath::join(&crate::canvas::private_dir(&vault), &name);
+            if note.offset.is_some() || note.size.is_some() || note.collapsed {
+                let place = super::store::NodePlace {
+                    offset: note.offset,
+                    size: note.size,
+                    collapsed: note.collapsed,
+                };
+                super::store::Store::update_global(cx, |store| {
+                    store.home_places.insert(path.clone(), place);
+                });
+            }
+            self.git.send(crate::runtime::Cmd::WriteCanvasFile {
+                worktree,
+                path,
+                text: crate::canvas::render(&node),
+                expect: Some(crate::files::ABSENT),
+            });
+        }
+        super::store::Store::update_global(cx, |store| store.home_notes = kept);
     }
 
     /// Puts every node of the projects on show back where the tree wants it,
@@ -645,7 +721,7 @@ impl ClaudhubApp {
     /// at is the gesture, and another project's arrangement is not in sight
     /// to be missed.
     fn reset_overview(&mut self, cx: &mut Context<Self>) {
-        let plan = self.overview_plan(cx);
+        let plan = self.overview_plan();
         let nodes: Vec<Node> = plan
             .gits
             .iter()
@@ -656,7 +732,7 @@ impl ClaudhubApp {
                     .map(|card| Node::Worktree(card.path.clone())),
             )
             .chain(plan.tiles.iter().map(|tile| Node::Terminal(tile.id)))
-            .chain(plan.notes.iter().map(|note| Node::Note(note.id)))
+            .chain(plan.notes.iter().map(|note| Node::Note(note.path.clone())))
             .collect();
         // And what was taken off the plane comes back: a hidden worktree is
         // in no plan to be read from, so it is found among the repositories.
@@ -702,12 +778,8 @@ impl ClaudhubApp {
                             worktree.home_hidden = false;
                         }
                     }
-                    Node::Note(id) => {
-                        if let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) {
-                            note.offset = None;
-                            note.size = None;
-                            note.collapsed = false;
-                        }
+                    Node::Note(path) => {
+                        store.home_places.remove(path);
                     }
                     Node::Terminal(_) => {}
                 }
@@ -843,6 +915,7 @@ impl ClaudhubApp {
                         })
                     }),
             )
+            .child(self.render_skill_button(cx))
             .child(
                 Button::new("overview-reset")
                     .ghost()
@@ -861,6 +934,7 @@ impl ClaudhubApp {
             self.overview_repo = main;
         }
         self.overview_fitted = false;
+        self.ask_skill_status();
         cx.notify();
     }
 
@@ -995,7 +1069,7 @@ impl ClaudhubApp {
                     .icon(icon("maximize"))
                     .tooltip(tr!("overview-fit"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        let plan = this.overview_plan(cx);
+                        let plan = this.overview_plan();
                         this.overview_view = View::fit(plan.bounds, this.overview_size());
                         cx.notify();
                     })),
@@ -1050,7 +1124,7 @@ impl ClaudhubApp {
             .when(detail, |el| {
                 el.child(note_button(
                     cx.entity().downgrade(),
-                    super::store::HomeAnchor::Repo(main.to_path_buf()),
+                    Hang::Repo(main.to_path_buf()),
                 ))
                 .child(
                     Button::new(SharedString::from(format!(
@@ -1197,9 +1271,34 @@ impl ClaudhubApp {
             .when(detail, |el| {
                 el.child(note_button(
                     cx.entity().downgrade(),
-                    super::store::HomeAnchor::Worktree(path.to_path_buf()),
+                    Hang::Worktree(path.to_path_buf()),
                 ))
             })
+            // A branch with commits its base does not have can be merged from
+            // here — the card is where one sees how far ahead it is.
+            .when_some(
+                outline
+                    .filter(|o| detail && !worktree.is_main && o.ahead_of_base > 0)
+                    .and_then(|o| o.base.clone()),
+                |el, base| {
+                    let merge = path.to_path_buf();
+                    el.child(
+                        Button::new(SharedString::from(format!(
+                            "overview-merge-{}",
+                            path.display()
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("git-merge"))
+                        .tooltip(tr!("overview-merge", { base: base }))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.confirm_merge(&merge, window, cx);
+                            },
+                        )),
+                    )
+                },
+            )
             .when(detail && summary.is_some_and(|s| !s.is_empty()), |el| {
                 let commit = path.to_path_buf();
                 el.child(
@@ -1560,9 +1659,12 @@ impl ClaudhubApp {
         self.load_overview_places(cx);
         let worktrees = self.repos.worktrees_in_order();
         if !worktrees.is_empty() {
-            self.git
-                .send(crate::runtime::Cmd::LoadOutlines { worktrees });
+            self.git.send(crate::runtime::Cmd::LoadOutlines {
+                worktrees: worktrees.clone(),
+            });
+            self.read_canvas(worktrees, cx);
         }
+        self.ask_skill_status();
         let focused = self
             .terminals
             .iter()
@@ -1723,7 +1825,7 @@ fn corner(app: WeakEntity<ClaudhubApp>, node: Node, cx: &App) -> gpui_kit::State
 
 /// A node's head takes the node along: the press starts the drag, and stops
 /// there, the plane's own drag being what a bare press means.
-fn grab(
+pub(super) fn grab(
     app: WeakEntity<ClaudhubApp>,
     node: Node,
 ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
@@ -1752,7 +1854,7 @@ impl ClaudhubApp {
     /// A window's three buttons, at the end of a node's head: fold to the
     /// head, maximise, close. The git node has no cross — it is the tree's
     /// root, and a plane without it would be a plane without a project.
-    fn window_controls(&self, node: Node, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn window_controls(&self, node: Node, cx: &mut Context<Self>) -> impl IntoElement {
         let folded = self.overview_hand.collapsed.contains(&node);
         let maximized = self
             .overview_maximized
@@ -1843,7 +1945,7 @@ impl ClaudhubApp {
         if self.overview_hand.collapsed.remove(node) {
             self.remember_folds(node, cx);
         }
-        let Some(rect) = self.overview_plan(cx).rect(node) else {
+        let Some(rect) = self.overview_plan().rect(node) else {
             return;
         };
         let viewport = self.overview_size();
@@ -1857,7 +1959,7 @@ impl ClaudhubApp {
             view: view_before,
             size: size_before,
         });
-        if let Some(rect) = self.overview_plan(cx).rect(node) {
+        if let Some(rect) = self.overview_plan().rect(node) {
             self.overview_view = View::focus(rect, viewport, 0.9);
         }
         // A terminal maximised is one to type in.
@@ -1914,7 +2016,7 @@ impl ClaudhubApp {
     fn close_node(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
         match node {
             Node::Git(_) => {}
-            Node::Note(id) => self.delete_home_note(*id, window, cx),
+            Node::Note(path) => self.delete_home_note(path, window, cx),
             Node::Terminal(id) => {
                 let Some(terminal) = self
                     .terminals
@@ -2004,261 +2106,46 @@ impl ClaudhubApp {
                 state.home_collapsed = folded;
                 state.home_hidden = hidden;
             }
-            Node::Note(id) => {
-                if let Some(note) = store.home_notes.iter_mut().find(|n| n.id == *id) {
-                    note.collapsed = folded;
-                }
+            Node::Note(path) => {
+                store.home_places.entry(path.clone()).or_default().collapsed = folded
             }
             Node::Terminal(_) => {}
         });
     }
-}
 
-/// The `+ note` of a git node's or a card's head.
-fn note_button(app: WeakEntity<ClaudhubApp>, anchor: super::store::HomeAnchor) -> Button {
-    let id = SharedString::from(format!("overview-add-note-{anchor:?}"));
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .icon(icon("sticky-note"))
-        .tooltip(tr!("overview-note-add"))
-        .on_click(move |_, window, cx| {
-            if let Some(app) = app.upgrade() {
-                let anchor = anchor.clone();
-                app.update(cx, |this, cx| this.add_home_note(anchor, window, cx));
-            }
-        })
-}
-
-impl ClaudhubApp {
-    /// Writes a new note, hung from a git node or a card, and opens it for
-    /// writing — an empty note shown as rendered Markdown is a blank card
-    /// that says nothing of what to do with it.
-    fn add_home_note(
-        &mut self,
-        anchor: super::store::HomeAnchor,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = super::store::Store::global(cx)
-            .home_notes
-            .iter()
-            .map(|note| note.id)
-            .max()
-            .map_or(1, |id| id + 1);
-        super::store::Store::update_global(cx, |store| {
-            store.home_notes.push(super::store::HomeNote {
-                id,
-                anchor,
-                text: String::new(),
-                offset: None,
-                size: None,
-                collapsed: false,
-            });
-        });
-        self.overview_reveal = Some(Node::Note(id));
-        self.edit_home_note(id, window, cx);
-    }
-
-    /// Opens a note for writing: a field of the window's editor, whose every
-    /// change goes back to the store — there is no "save" to forget.
-    fn edit_home_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((editor, _)) = self.note_editors.get(&id) {
-            super::dialogs::focus_field(editor, window, cx);
-            return;
+    /// A note moved between the checkout and the vault keeps its place: the
+    /// hand's arrangement follows the file to its new name.
+    pub(super) fn rename_node(&mut self, from: &Node, to: Node, cx: &mut Context<Self>) {
+        let hand = &mut self.overview_hand;
+        if let Some(offset) = hand.moved.remove(from) {
+            hand.moved.insert(to.clone(), offset);
         }
-        let text = super::store::Store::global(cx)
-            .home_notes
-            .iter()
-            .find(|note| note.id == id)
-            .map(|note| note.text.clone())
-            .unwrap_or_default();
-        let editor = cx.new(|cx| super::surface::plain_editor(window, cx));
-        editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
-        let subscription = cx.subscribe(
-            &editor,
-            move |_, editor, event: &gpui_kit::component::input::InputEvent, cx| {
-                if !matches!(event, gpui_kit::component::input::InputEvent::Change) {
-                    return;
+        if let Some(size) = hand.sizes.remove(from) {
+            hand.sizes.insert(to.clone(), size);
+        }
+        if hand.collapsed.remove(from) {
+            hand.collapsed.insert(to.clone());
+        }
+        if let (Node::Note(from), Node::Note(to)) = (from, &to) {
+            super::store::Store::update_global(cx, |store| {
+                if let Some(place) = store.home_places.remove(from) {
+                    store.home_places.insert(to.clone(), place);
                 }
-                let text = editor.read(cx).value().to_string();
-                super::store::Store::update_global_if(cx, |store| {
-                    match store.home_notes.iter_mut().find(|note| note.id == id) {
-                        Some(note) if note.text != text => {
-                            note.text = text;
-                            true
-                        }
-                        _ => false,
-                    }
-                });
-            },
-        );
-        super::dialogs::focus_field(&editor, window, cx);
-        self.note_editors.insert(id, (editor, subscription));
-        cx.notify();
-    }
-
-    /// Back to the rendered note. What was typed is already in the store.
-    fn done_home_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.note_editors.remove(&id);
-        self.focus_handle(cx).focus(window, cx);
-        cx.notify();
-    }
-
-    /// Deletes a note, once asked: it is text someone wrote, and nothing
-    /// else keeps a copy of it.
-    fn delete_home_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let entity = entity.clone();
-            dialog
-                .title(tr!("overview-note-delete-title"))
-                .child(div().text_sm().child(tr!("overview-note-delete-body")))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.note_editors.remove(&id);
-                        this.overview_hand.moved.remove(&Node::Note(id));
-                        this.overview_hand.sizes.remove(&Node::Note(id));
-                        super::store::Store::update_global(cx, |store| {
-                            store.home_notes.retain(|note| note.id != id);
-                        });
-                        cx.notify();
-                    });
-                    true
-                })
-        });
-        // See `close_node`: the buttons dispatch from the focus.
-        window.defer(cx, |window, cx| window.focus_dialog(cx));
-    }
-
-    /// A note: rendered Markdown, or the field it is written in.
-    fn render_home_note(&self, id: u64, zoom: f32, cx: &mut Context<Self>) -> AnyElement {
-        let Some(note) = super::store::Store::global(cx)
-            .home_notes
-            .iter()
-            .find(|note| note.id == id)
-            .cloned()
-        else {
-            return div().into_any_element();
-        };
-        let theme = cx.theme().clone();
-        let muted = theme.muted_foreground;
-        let detail = zoom >= DETAIL;
-        let editor = self.note_editors.get(&id).map(|(editor, _)| editor.clone());
-        let editing = editor.is_some();
-        // Its first line, bare of Markdown's marks: what the note is about.
-        let title = note
-            .text
-            .lines()
-            .map(|line| line.trim_start_matches(['#', '>', '-', '*', ' ']).trim())
-            .find(|line| !line.is_empty())
-            .map(|line| SharedString::from(line.to_string()))
-            .unwrap_or_else(|| tr!("overview-note"));
-        let app = cx.entity().downgrade();
-        let head = h_flex()
-            .flex_none()
-            .h(px(overview::HEAD * zoom))
-            .px_2()
-            .gap_1p5()
-            .items_center()
-            .bg(theme.warning.opacity(0.18))
-            .cursor_grab()
-            .on_mouse_down(MouseButton::Left, grab(app.clone(), Node::Note(id)))
-            .child(icon("sticky-note").text_color(muted))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .when(detail, |el| {
-                el.child(
-                    Button::new(("overview-note-edit", id))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon(if editing { "check" } else { "pencil" }))
-                        .tooltip(if editing {
-                            tr!("overview-note-done")
-                        } else {
-                            tr!("overview-note-edit")
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if editing {
-                                this.done_home_note(id, window, cx);
-                            } else {
-                                this.edit_home_note(id, window, cx);
-                            }
-                        })),
-                )
-                .child(
-                    Button::new(("overview-note-delete", id))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("trash-2"))
-                        .tooltip(tr!("overview-note-delete"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.delete_home_note(id, window, cx);
-                        })),
-                )
             });
-        let body = match editor {
-            Some(editor) => v_flex()
-                .flex_1()
-                .min_h_0()
-                .p_1()
-                .child(
-                    gpui_kit::component::input::Editor::new(&editor)
-                        .text_sm()
-                        .h_full(),
-                )
-                .into_any_element(),
-            None => div()
-                .id(("overview-note-body", id))
-                .flex_1()
-                .min_h_0()
-                .p_2()
-                .overflow_y_scroll()
-                .text_sm()
-                .cursor_text()
-                // Twice to write in it, the gesture of every sticky note.
-                .on_click(
-                    cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            this.edit_home_note(id, window, cx);
-                        }
-                    }),
-                )
-                .map(|el| {
-                    if note.text.trim().is_empty() {
-                        el.text_color(muted).child(tr!("overview-note-empty"))
-                    } else {
-                        el.child(gpui_kit::component::text::TextView::markdown(
-                            ("overview-note-text", id),
-                            note.text.clone(),
-                        ))
-                    }
-                })
-                .into_any_element(),
-        };
-        v_flex()
-            .size_full()
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.warning.opacity(0.45))
-            .bg(theme.background)
-            // A note is written in and read, not dragged by its body.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(head.when(detail, |el| {
-                el.child(self.window_controls(Node::Note(id), cx))
-            }))
-            .child(body)
-            .into_any_element()
+        }
+    }
+
+    /// A node gone for good: nothing of its arrangement is kept.
+    pub(super) fn forget_node(&mut self, node: &Node, cx: &mut Context<Self>) {
+        let hand = &mut self.overview_hand;
+        hand.moved.remove(node);
+        hand.sizes.remove(node);
+        hand.collapsed.remove(node);
+        if let Node::Note(path) = node {
+            super::store::Store::update_global(cx, |store| {
+                store.home_places.remove(path);
+            });
+        }
     }
 }
 

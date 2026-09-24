@@ -1086,7 +1086,16 @@ pub struct ClaudhubApp {
     pub(super) commit_sheet: bool,
     /// The home screen's notes being edited, each with its field and the
     /// subscription that writes it back to the store.
-    pub(super) note_editors: HashMap<u64, (Entity<EditorState>, gpui_kit::Subscription)>,
+    pub(super) note_editors: HashMap<PathBuf, crate::ui::canvas_view::NoteEditor>,
+    /// Each worktree's node files, as last read — see `ui::canvas_view`.
+    pub(super) canvas: HashMap<PathBuf, Vec<crate::ui::canvas_view::CanvasEntry>>,
+    /// A note just created, to open for writing once it has been read.
+    pub(super) canvas_created: Option<PathBuf>,
+    /// The diagrams' pictures, decoded once per stamp — see
+    /// `canvas_view::CanvasPicture`.
+    pub(super) canvas_pictures: HashMap<PathBuf, crate::ui::canvas_view::CanvasPicture>,
+    /// Where the Claudhub skill is installed, by checkout asked about.
+    pub(super) skill_status: HashMap<PathBuf, crate::skill::Status>,
     /// The worktrees whose kept terminals have been opened again: those, and
     /// only those, have their open terminals written back — a worktree whose
     /// repository has not answered yet would otherwise be written empty.
@@ -1556,6 +1565,10 @@ impl ClaudhubApp {
             overview_maximized: None,
             commit_sheet: false,
             note_editors: HashMap::new(),
+            canvas: HashMap::new(),
+            canvas_created: None,
+            skill_status: HashMap::new(),
+            canvas_pictures: HashMap::new(),
             terminals_revived: std::collections::HashSet::new(),
             overview_reveal: None,
             overview_loaded: false,
@@ -1849,6 +1862,21 @@ impl ClaudhubApp {
                     worktrees: worktrees.clone(),
                 });
             }
+            // What each agent can read of its surroundings, at the same pace
+            // as what it is made of.
+            self.write_contexts(cx);
+        }
+        // The home screen's nodes, at the agents' pace while it is up: a
+        // note an agent writes in a worktree nobody watches is two seconds
+        // away, not ten. The projects on show only — a folder listing and a
+        // few small files each.
+        if self.overview {
+            let shown: Vec<PathBuf> = self
+                .overview_repos()
+                .into_iter()
+                .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
+                .collect();
+            self.read_canvas(shown, cx);
         }
         let programs = Settings::global(cx).terminal.agent_programs();
         self.git.send(Cmd::ScanAgents {
@@ -2246,6 +2274,14 @@ impl ClaudhubApp {
         if !path.starts_with(&active) {
             return;
         }
+        // A node written in `.claudhub/` — by an agent, most of the time —
+        // shows on the home screen at once rather than at the next sweep.
+        if path
+            .strip_prefix(&active)
+            .is_ok_and(|inside| inside.starts_with(crate::canvas::DIR))
+        {
+            self.read_canvas([active.clone()], cx);
+        }
         // A recipe added while Claudhub is open has to show up in the menu: the
         // justfile is a file one edits during the very session it drives.
         if path
@@ -2288,6 +2324,19 @@ impl ClaudhubApp {
                 self.summaries.extend(summaries);
             }
             Evt::ClaudeProcesses { processes } => self.claude_processes_heard(&processes, cx),
+            Evt::CanvasRead {
+                worktree,
+                files,
+                pictures,
+            } => self.canvas_read(worktree, files, pictures, window, cx),
+            Evt::CanvasPicture { path, stamp, bytes } => {
+                self.canvas_picture(path, stamp, bytes, cx)
+            }
+            Evt::SkillStatus { worktree, status } => {
+                self.skill_status.insert(worktree, status);
+                cx.notify();
+            }
+            Evt::CanvasWritten { worktree, created } => self.canvas_written(worktree, created, cx),
             Evt::Outlines { outlines } => {
                 self.outlines.extend(outlines);
                 cx.notify();
@@ -2626,6 +2675,7 @@ impl ClaudhubApp {
                 self.git.send(Cmd::LoadOutlines {
                     worktrees: paths.clone(),
                 });
+                self.read_canvas(paths.clone(), cx);
             }
         }
         // A weaker candidate never displaces a firmer one, and re-selecting is

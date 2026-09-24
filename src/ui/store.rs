@@ -294,9 +294,22 @@ pub struct Store {
     /// be forgotten. What `forget_missing` drops is a checkout git has just
     /// said is gone.
     pub pinned: Vec<PathBuf>,
-    /// The Markdown notes on the home screen, every repository together —
-    /// see `ui::overview_view`.
+    /// **Legacy**: the home screen's notes before they were files — poured
+    /// into the vault once (`overview_view::migrate_home_notes`), then
+    /// cleared.
     pub home_notes: Vec<HomeNote>,
+    /// Where each note file stands on the home screen, by its path: the
+    /// file says what the note is, this how the hand arranged it.
+    pub home_places: BTreeMap<PathBuf, NodePlace>,
+}
+
+/// A node's arrangement on the plane.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NodePlace {
+    pub offset: Option<(f32, f32)>,
+    pub size: Option<(f32, f32)>,
+    pub collapsed: bool,
 }
 
 /// A terminal as it is kept across a restart.
