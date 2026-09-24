@@ -1642,33 +1642,37 @@ impl ClaudhubApp {
     }
 }
 
-/// A light grid under everything, moving and scaling with the plane: what
+/// A light dotted grid under everything, moving and scaling with the plane: what
 /// makes a drag read as the plane moving rather than the cards, and a zoom
 /// as distance. Its step doubles when the lines would crowd — see
 /// `overview::grid`.
 fn render_grid(view: View, cx: &App) -> impl IntoElement {
-    let color = cx.theme().border.opacity(0.35);
+    // Dots where lines would cross, in the text's colour barely there: lines
+    // drew a sheet of graph paper over the plane, and what is wanted is only
+    // enough texture for a drag to read as the plane moving.
+    let color = cx.theme().foreground.opacity(0.09);
+    let dot = px(2.);
     canvas(
         move |_, _, _| {},
         move |bounds, _, window, _| {
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+            let rows = overview::grid(view.pan.1, view.zoom, h);
             for x in overview::grid(view.pan.0, view.zoom, w) {
-                window.paint_quad(gpui_kit::fill(
-                    gpui_kit::Bounds::new(
-                        point(bounds.origin.x + px(x), bounds.origin.y),
-                        gpui_kit::size(px(1.), bounds.size.height),
-                    ),
-                    color,
-                ));
-            }
-            for y in overview::grid(view.pan.1, view.zoom, h) {
-                window.paint_quad(gpui_kit::fill(
-                    gpui_kit::Bounds::new(
-                        point(bounds.origin.x, bounds.origin.y + px(y)),
-                        gpui_kit::size(bounds.size.width, px(1.)),
-                    ),
-                    color,
-                ));
+                for &y in &rows {
+                    window.paint_quad(
+                        gpui_kit::fill(
+                            gpui_kit::Bounds::new(
+                                point(
+                                    bounds.origin.x + px(x) - dot / 2.,
+                                    bounds.origin.y + px(y) - dot / 2.,
+                                ),
+                                gpui_kit::size(dot, dot),
+                            ),
+                            color,
+                        )
+                        .corner_radii(dot / 2.),
+                    );
+                }
             }
         },
     )

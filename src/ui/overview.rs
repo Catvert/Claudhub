@@ -671,8 +671,8 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
 
 /// The grid's step in plane units, at a zoom of one.
 const GRID: f32 = 40.;
-/// Closer than this on screen, the lines would be a tint and not a grid.
-const GRID_MIN_SCREEN: f32 = 16.;
+/// Closer than this on screen, the dots would be a tint and not a grid.
+const GRID_MIN_SCREEN: f32 = 24.;
 
 /// Where the background grid's lines fall along one axis, in screen pixels
 /// from the canvas's edge: every `GRID` of the plane, doubled until they
@@ -1246,9 +1246,10 @@ mod tests {
         // At a zoom of one, every forty pixels, shifted with the pan.
         assert_eq!(grid(10., 1., 100.), vec![10., 50., 90.]);
         assert_eq!(grid(-30., 1., 100.), vec![10., 50., 90.]);
-        // Zoomed out a lot, the step doubles until it is readable.
+        // Zoomed out a lot, the step doubles until it is readable: 4, 8,
+        // 16, then 32 — the first not under the floor.
         let far = grid(0., 0.1, 200.);
-        assert_eq!(far[1] - far[0], 16.);
+        assert_eq!(far[1] - far[0], 32.);
     }
 
     #[test]
