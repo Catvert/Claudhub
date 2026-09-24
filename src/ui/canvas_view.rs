@@ -414,6 +414,147 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Puts a closed review away: moved to `.claudhub/archive/` — still in
+    /// the repository's history and its files, no longer on the plane.
+    fn archive_home_note(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some((worktree, entry)) = self.canvas_entry(path) else {
+            return;
+        };
+        let (worktree, entry) = (worktree.clone(), entry.clone());
+        let target = if entry.private {
+            let Some(vault) = self.notes_dir(&worktree, cx) else {
+                return;
+            };
+            crate::wslpath::join(&canvas::private_dir(&vault), "archive")
+        } else {
+            canvas::archive_dir(&worktree)
+        };
+        let Some(name) = entry.path.file_name() else {
+            return;
+        };
+        self.git.send(Cmd::WriteCanvasFile {
+            worktree: worktree.clone(),
+            path: crate::wslpath::join(&target, name),
+            text: canvas::render(&entry.node),
+            expect: None,
+        });
+        self.git.send(Cmd::WriteCanvasFile {
+            worktree,
+            path: entry.path.clone(),
+            text: String::new(),
+            expect: Some(entry.digest),
+        });
+        self.note_editors.remove(path);
+        self.forget_node(&Node::Note(entry.path.clone()), cx);
+        cx.notify();
+    }
+
+    /// A review done with: every finding resolved, or its branch merged into
+    /// its base — it has nothing left to ask of anyone.
+    fn review_closed(&self, entry: &CanvasEntry) -> bool {
+        if entry.node.kind != canvas::Kind::Review {
+            return false;
+        }
+        if entry.node.status.as_deref() == Some("resolved") {
+            return true;
+        }
+        let Some((worktree, _)) = self.canvas_entry(&entry.path) else {
+            return false;
+        };
+        let main = self.repos.worktree(worktree).is_some_and(|w| w.is_main);
+        !main
+            && self
+                .outlines
+                .get(worktree)
+                .is_some_and(|o| o.base.is_some() && o.ahead_of_base == 0)
+    }
+
+    /// The band a closed review carries: archive it, or delete it.
+    fn render_closed_band(&self, entry: &CanvasEntry, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (archive, delete) = (entry.path.clone(), entry.path.clone());
+        h_flex()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .bg(theme.success.opacity(0.12))
+            .text_xs()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.success)
+                    .child(tr!("review-closed")),
+            )
+            .child(
+                Button::new(SharedString::from(format!(
+                    "review-archive-{}",
+                    entry.path.display()
+                )))
+                .ghost()
+                .xsmall()
+                .label(tr!("review-archive"))
+                .tooltip(tr!("review-archive-hint"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.archive_home_note(&archive, cx);
+                })),
+            )
+            .child(
+                Button::new(SharedString::from(format!(
+                    "review-delete-{}",
+                    entry.path.display()
+                )))
+                .ghost()
+                .xsmall()
+                .label(tr!("review-delete"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.delete_home_note(&delete, window, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// Merges a worktree's branch into its base, once asked — the gesture of
+    /// the worktree picker's « Integrate », from the card that shows how far
+    /// ahead the branch is.
+    pub(super) fn confirm_merge(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let branch = self
+            .repos
+            .worktree(worktree)
+            .and_then(|w| w.branch.clone())
+            .unwrap_or_default();
+        let base = self
+            .outlines
+            .get(worktree)
+            .and_then(|o| o.base.clone())
+            .unwrap_or_default();
+        let ahead = self.outlines.get(worktree).map_or(0, |o| o.ahead_of_base);
+        let entity = cx.entity();
+        let target = worktree.to_path_buf();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (entity, target) = (entity.clone(), target.clone());
+            dialog
+                .title(tr!("merge-title", { branch: branch.clone(), base: base.clone() }))
+                .child(div().text_sm().child(tr!("merge-body", { count: ahead })))
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::confirm())
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.integrate(target.clone(), cx));
+                    true
+                })
+        });
+        window.defer(cx, |window, cx| window.focus_dialog(cx));
+    }
+
     /// Deletes a note, once asked: nothing else keeps its text — unless it
     /// was committed, which git does.
     pub(super) fn delete_home_note(
@@ -1338,6 +1479,8 @@ impl ClaudhubApp {
                 })
                 .into_any_element(),
         };
+        let band =
+            (!editing && self.review_closed(&entry)).then(|| self.render_closed_band(&entry, cx));
         v_flex()
             .size_full()
             .overflow_hidden()
@@ -1348,6 +1491,7 @@ impl ClaudhubApp {
             // A note is written in and read, not dragged by its body.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(head)
+            .children(band)
             .child(body)
             .into_any_element()
     }

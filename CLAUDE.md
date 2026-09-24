@@ -631,6 +631,12 @@ worktree.
   listées dans le panneau Notes — **jamais versées dans les notes**, que le
   coffre recopie. Envoyées à l'agent, elles lui demandent de passer lui-même
   la remarque `resolved` dans le fichier.
+- **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
+  sa branche fusionnée (plus aucun commit d'avance sur sa base) :
+  `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de
+  branche fusionne dans sa base** par le geste « Intégrer » des worktrees
+  (`integrate`, qui propose ensuite de retirer le worktree), confirmé ici, la
+  base venant de la carte quand le worktree n'a jamais été ouvert.
 - **Un diagramme est une image et son nœud** (`claudhub: diagram`,
   `image:` à côté), un SVG seul devenant un nœud à lui. Le relevé ne transporte
   que l'**empreinte** des images (`files::picture_stamps`, taille et date) ; les

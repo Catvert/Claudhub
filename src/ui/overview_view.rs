@@ -1274,6 +1274,31 @@ impl ClaudhubApp {
                     Hang::Worktree(path.to_path_buf()),
                 ))
             })
+            // A branch with commits its base does not have can be merged from
+            // here — the card is where one sees how far ahead it is.
+            .when_some(
+                outline
+                    .filter(|o| detail && !worktree.is_main && o.ahead_of_base > 0)
+                    .and_then(|o| o.base.clone()),
+                |el, base| {
+                    let merge = path.to_path_buf();
+                    el.child(
+                        Button::new(SharedString::from(format!(
+                            "overview-merge-{}",
+                            path.display()
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("git-merge"))
+                        .tooltip(tr!("overview-merge", { base: base }))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.confirm_merge(&merge, window, cx);
+                            },
+                        )),
+                    )
+                },
+            )
             .when(detail && summary.is_some_and(|s| !s.is_empty()), |el| {
                 let commit = path.to_path_buf();
                 el.child(

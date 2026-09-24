@@ -998,5 +998,12 @@
   "panel-reviews": "Reviews",
   "review-send": "Send to the agent",
   "review-send-all": "Send every open finding to the agent",
-  "overview-diagram-loading": "Loading the diagram…"
+  "overview-diagram-loading": "Loading the diagram…",
+  "review-closed": "Review closed",
+  "review-archive": "Archive",
+  "review-archive-hint": "Move to .claudhub/archive/: kept in the repository, off the home screen",
+  "review-delete": "Delete",
+  "overview-merge": "Merge into %{base}",
+  "merge-title": "Merge %{branch} into %{base}?",
+  "merge-body": "%{count} commit(s) will go into the base, from the main repository. Claudhub will then offer to remove the worktree."
 }

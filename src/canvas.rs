@@ -463,6 +463,11 @@ pub fn shared_dir(checkout: &Path) -> PathBuf {
     crate::wslpath::join(&crate::wslpath::join(checkout, DIR), NOTES)
 }
 
+/// Where a checkout's closed reviews go: versioned still, shown no more.
+pub fn archive_dir(checkout: &Path) -> PathBuf {
+    crate::wslpath::join(&crate::wslpath::join(checkout, DIR), "archive")
+}
+
 /// Where a worktree's private notes live, in its vault folder.
 pub fn private_dir(vault: &Path) -> PathBuf {
     crate::wslpath::join(vault, "canvas")
