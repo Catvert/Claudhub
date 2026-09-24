@@ -115,6 +115,7 @@ fn is_background(cmd: &Cmd) -> bool {
         Cmd::LoadSummaries { .. }
             | Cmd::LoadOutlines { .. }
             | Cmd::ReadCanvas { .. }
+            | Cmd::WriteContext { .. }
             | Cmd::ScanAgents { .. }
             | Cmd::WtScan { .. }
             | Cmd::WtLinks { .. }
@@ -1235,6 +1236,38 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             worktree,
             crate::files::write_vault_file(&path, &text, expect),
         ),
+        Cmd::SkillStatus { worktree } => vec![Evt::SkillStatus {
+            status: crate::skill::status(&worktree),
+            worktree,
+        }],
+        Cmd::SetSkill {
+            worktree,
+            scope,
+            install,
+        } => {
+            let done = if install {
+                crate::skill::install(scope, &worktree)
+            } else {
+                crate::skill::remove(scope, &worktree)
+            };
+            let mut evts = match done {
+                Ok(()) => Vec::new(),
+                Err(e) => vec![fail(Some(worktree.clone()), Action::Notes, e)],
+            };
+            evts.push(Evt::SkillStatus {
+                status: crate::skill::status(&worktree),
+                worktree,
+            });
+            evts
+        }
+        Cmd::WriteContext { path, text } => {
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+                if let Err(e) = crate::files::write_at(&path, &text, None) {
+                    log::warn!("writing the context sheet {}: {e:#}", path.display());
+                }
+            }
+            Vec::new()
+        }
         Cmd::ReadCanvas { worktree, dirs } => {
             let mut files = Vec::new();
             for (dir, private) in dirs {

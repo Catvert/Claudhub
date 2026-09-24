@@ -157,7 +157,7 @@ fn placed(rect: Rect) -> gpui_kit::Div {
 impl ClaudhubApp {
     /// The repositories the plane shows: the one picked in the corner, the
     /// active worktree's until one is, or all of them.
-    fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
+    pub(super) fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
         if self.overview_all {
             return self.repos.iter().collect();
         }
@@ -915,6 +915,7 @@ impl ClaudhubApp {
                         })
                     }),
             )
+            .child(self.render_skill_button(cx))
             .child(
                 Button::new("overview-reset")
                     .ghost()
@@ -933,6 +934,7 @@ impl ClaudhubApp {
             self.overview_repo = main;
         }
         self.overview_fitted = false;
+        self.ask_skill_status();
         cx.notify();
     }
 
@@ -1637,6 +1639,7 @@ impl ClaudhubApp {
             });
             self.read_canvas(worktrees, cx);
         }
+        self.ask_skill_status();
         let focused = self
             .terminals
             .iter()

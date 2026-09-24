@@ -689,6 +689,25 @@ pub enum Cmd {
         text: String,
         expect: Option<u64>,
     },
+    /// Where the Claudhub skill is installed for this checkout, and in which
+    /// version — see `crate::skill`.
+    SkillStatus {
+        worktree: WorktreeId,
+    },
+    /// Installs this build's skill, or removes ours.
+    SetSkill {
+        worktree: WorktreeId,
+        scope: crate::skill::Scope,
+        install: bool,
+    },
+    /// Writes a worktree's context sheet — what an agent reads of its
+    /// environment — when it differs from what is there: it is written at
+    /// every sweep, and a file rewritten identical every ten seconds wakes
+    /// whoever watches it.
+    WriteContext {
+        path: PathBuf,
+        text: String,
+    },
     /// Launches the external editor on a file, at a given line.
     ///
     /// The command template travels here for the same reason as
@@ -1044,6 +1063,9 @@ impl Cmd {
             Self::WriteNotes { .. } => "WriteNotes",
             Self::WriteVaultFile { .. } => "WriteVaultFile",
             Self::ReadCanvas { .. } => "ReadCanvas",
+            Self::SkillStatus { .. } => "SkillStatus",
+            Self::SetSkill { .. } => "SetSkill",
+            Self::WriteContext { .. } => "WriteContext",
             Self::CreateCanvasNote { .. } => "CreateCanvasNote",
             Self::WriteCanvasFile { .. } => "WriteCanvasFile",
             Self::OpenExternal { .. } => "OpenExternal",
@@ -1485,6 +1507,11 @@ pub enum Evt {
     /// relaunch.
     ServerLost {
         message: String,
+    },
+    /// Where the Claudhub skill is, for a checkout.
+    SkillStatus {
+        worktree: WorktreeId,
+        status: crate::skill::Status,
     },
     /// A worktree's node files: full path, private or not, and text.
     CanvasRead {

@@ -1091,6 +1091,8 @@ pub struct ClaudhubApp {
     pub(super) canvas: HashMap<PathBuf, Vec<crate::ui::canvas_view::CanvasEntry>>,
     /// A note just created, to open for writing once it has been read.
     pub(super) canvas_created: Option<PathBuf>,
+    /// Where the Claudhub skill is installed, by checkout asked about.
+    pub(super) skill_status: HashMap<PathBuf, crate::skill::Status>,
     /// The worktrees whose kept terminals have been opened again: those, and
     /// only those, have their open terminals written back — a worktree whose
     /// repository has not answered yet would otherwise be written empty.
@@ -1562,6 +1564,7 @@ impl ClaudhubApp {
             note_editors: HashMap::new(),
             canvas: HashMap::new(),
             canvas_created: None,
+            skill_status: HashMap::new(),
             terminals_revived: std::collections::HashSet::new(),
             overview_reveal: None,
             overview_loaded: false,
@@ -1856,6 +1859,9 @@ impl ClaudhubApp {
                 });
                 self.read_canvas(worktrees.clone(), cx);
             }
+            // What each agent can read of its surroundings, at the same pace
+            // as what it is made of.
+            self.write_contexts(cx);
         }
         let programs = Settings::global(cx).terminal.agent_programs();
         self.git.send(Cmd::ScanAgents {
@@ -2304,6 +2310,10 @@ impl ClaudhubApp {
             }
             Evt::ClaudeProcesses { processes } => self.claude_processes_heard(&processes, cx),
             Evt::CanvasRead { worktree, files } => self.canvas_read(worktree, files, window, cx),
+            Evt::SkillStatus { worktree, status } => {
+                self.skill_status.insert(worktree, status);
+                cx.notify();
+            }
             Evt::CanvasWritten { worktree, created } => self.canvas_written(worktree, created, cx),
             Evt::Outlines { outlines } => {
                 self.outlines.extend(outlines);

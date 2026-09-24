@@ -17,6 +17,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{EditorState, InputEvent},
+    menu::DropdownMenu as _,
     v_flex, ActiveTheme, Sizable as _, WindowExt as _,
 };
 use gpui_kit::{
@@ -57,6 +58,9 @@ pub(super) enum Hang {
     Repo(PathBuf),
     Worktree(PathBuf),
 }
+
+/// The context sheet's name, in a worktree's vault folder — see `ui::context`.
+pub(crate) const CONTEXT: &str = "context.md";
 
 /// How long the hand has to rest before what it typed goes to the disk.
 const SAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(700);
@@ -347,6 +351,248 @@ impl ClaudhubApp {
         });
         // See `close_node`: the buttons dispatch from the focus.
         window.defer(cx, |window, cx| window.focus_dialog(cx));
+    }
+
+    /// Writes each worktree's context sheet, where its vault is: what the
+    /// window knows of it and of its neighbours — see `ui::context`.
+    pub(super) fn write_contexts(&self, cx: &App) {
+        use super::context::{Checkout, NodeLine, Sheet};
+        let checkout = |worktree: &crate::git::Worktree| Checkout {
+            label: worktree.label(),
+            path: worktree.path.display().to_string(),
+            branch: worktree.branch.clone(),
+            changes: self
+                .summaries
+                .get(&worktree.path)
+                .map(|s| (s.files, s.added, s.removed)),
+            agent: self.agents.get(&worktree.path).map(|agent| {
+                use crate::agent::Activity;
+                match &agent.activity {
+                    Activity::Working => "working".to_string(),
+                    Activity::Finished => "finished its turn".to_string(),
+                    Activity::Waiting(message) if message.is_empty() => {
+                        "waiting for an answer".into()
+                    }
+                    Activity::Waiting(message) => format!("waiting: {message}"),
+                    Activity::Idle => "idle".to_string(),
+                }
+            }),
+        };
+        for repo in self.repos.iter() {
+            for worktree in repo.worktrees.iter().filter(|w| !w.prunable) {
+                let Some(vault) = self.notes_dir(&worktree.path, cx) else {
+                    continue;
+                };
+                let outline = self.outlines.get(&worktree.path);
+                let sheet = Sheet {
+                    repo: repo.name.clone(),
+                    here: checkout(worktree),
+                    base: outline
+                        .filter(|o| o.ahead_of_base > 0)
+                        .and_then(|o| o.base.clone()),
+                    ahead_of_base: outline.map_or(0, |o| o.ahead_of_base),
+                    upstream: outline.and_then(|o| o.upstream),
+                    commits: outline
+                        .map(|o| {
+                            o.commits
+                                .iter()
+                                .map(|c| (c.short.clone(), c.subject.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    terminals: self
+                        .terminals
+                        .iter()
+                        .filter(|t| t.worktree == worktree.path)
+                        .map(|t| {
+                            let label = t
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| t.view.read(cx).label())
+                                .to_string();
+                            let agent =
+                                matches!(t.relaunch, Some(super::store::Relaunch::Agent { .. }))
+                                    || t.typed.is_some();
+                            if agent {
+                                format!("{label} (agent)")
+                            } else {
+                                label
+                            }
+                        })
+                        .collect(),
+                    nodes: self
+                        .canvas
+                        .get(&worktree.path)
+                        .into_iter()
+                        .flatten()
+                        .map(|entry| NodeLine {
+                            kind: match entry.node.kind {
+                                canvas::Kind::Note => "note".into(),
+                                canvas::Kind::Review => "review".into(),
+                            },
+                            title: entry.node.heading().unwrap_or_else(|| "(untitled)".into()),
+                            file: entry
+                                .path
+                                .strip_prefix(&worktree.path)
+                                .unwrap_or(&entry.path)
+                                .display()
+                                .to_string(),
+                            private: entry.private,
+                            author: entry
+                                .node
+                                .agent
+                                .clone()
+                                .or_else(|| entry.node.author.clone()),
+                        })
+                        .collect(),
+                    others: repo
+                        .worktrees
+                        .iter()
+                        .filter(|other| other.path != worktree.path && !other.prunable)
+                        .map(checkout)
+                        .collect(),
+                };
+                self.git.send(Cmd::WriteContext {
+                    path: crate::wslpath::join(&vault, CONTEXT),
+                    text: super::context::render(&sheet),
+                });
+            }
+        }
+    }
+
+    /// The checkout the skill button speaks for: the one on show when it
+    /// is in the project on the plane, the project's main one otherwise.
+    pub(super) fn skill_worktree(&self) -> Option<PathBuf> {
+        let shown = self.overview_repos();
+        if let Some(active) = self.active.clone() {
+            if shown
+                .iter()
+                .any(|repo| repo.worktrees.iter().any(|w| w.path == active))
+            {
+                return Some(active);
+            }
+        }
+        shown.first().map(|repo| repo.main.clone())
+    }
+
+    /// Asks where the skill is, for the checkout the button speaks for.
+    pub(super) fn ask_skill_status(&self) {
+        if let Some(worktree) = self.skill_worktree() {
+            self.git.send(Cmd::SkillStatus { worktree });
+        }
+    }
+
+    /// The skill's button: its state at a glance — a dot, green when this
+    /// build's version is installed somewhere, amber when only an older one
+    /// is, none when it is nowhere — and the gestures in its menu.
+    pub(super) fn render_skill_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::skill::Scope;
+        let worktree = self.skill_worktree();
+        let status = worktree
+            .as_ref()
+            .and_then(|w| self.skill_status.get(w))
+            .copied()
+            .unwrap_or_default();
+        let current = crate::skill::version();
+        let ours = |v: Option<u32>| v.filter(|v| *v > 0);
+        let fresh = [status.repo, status.user]
+            .iter()
+            .any(|v| ours(*v) == Some(current));
+        let stale = !fresh
+            && [status.repo, status.user]
+                .iter()
+                .any(|v| ours(*v).is_some());
+        let theme = cx.theme().clone();
+        let dot = if fresh {
+            Some(theme.success)
+        } else if stale {
+            Some(theme.warning)
+        } else {
+            None
+        };
+        let describe = |v: Option<u32>| -> SharedString {
+            match v {
+                None => tr!("skill-absent"),
+                Some(0) => tr!("skill-foreign"),
+                Some(v) if v == current => tr!("skill-current", { version: v }),
+                Some(v) => tr!("skill-old", { version: v }),
+            }
+        };
+        let (repo_line, user_line) = (
+            tr!("skill-in-repo", { state: describe(status.repo) }),
+            tr!("skill-for-me", { state: describe(status.user) }),
+        );
+        let app = cx.entity().downgrade();
+        Button::new("overview-skill")
+            .ghost()
+            .small()
+            .icon(icon("sparkles"))
+            .label(tr!("skill-button"))
+            .when_some(dot, |button, color| {
+                button.child(div().size(px(7.)).rounded_full().bg(color))
+            })
+            .tooltip(tr!("skill-tooltip"))
+            .dropdown_menu(move |menu, _, _| {
+                let Some(worktree) = worktree.clone() else {
+                    return menu;
+                };
+                let entry = |label: SharedString, scope: Scope, install: bool| {
+                    let (app, worktree) = (app.clone(), worktree.clone());
+                    gpui_kit::component::menu::PopupMenuItem::new(label).on_click(
+                        move |_, _, cx| {
+                            if let Some(app) = app.upgrade() {
+                                let worktree = worktree.clone();
+                                app.update(cx, |this, cx| {
+                                    this.git.send(Cmd::SetSkill {
+                                        worktree,
+                                        scope,
+                                        install,
+                                    });
+                                    cx.notify();
+                                });
+                            }
+                        },
+                    )
+                };
+                let mut menu = menu
+                    .label(repo_line.clone())
+                    .label(user_line.clone())
+                    .separator();
+                let install = |v: Option<u32>| match v {
+                    Some(v) if v > 0 && v < current => Some(true),
+                    None => Some(false),
+                    _ => None,
+                };
+                if let Some(update) = install(status.repo) {
+                    menu = menu.item(entry(
+                        if update {
+                            tr!("skill-update-repo")
+                        } else {
+                            tr!("skill-install-repo")
+                        },
+                        Scope::Repo,
+                        true,
+                    ));
+                }
+                if let Some(update) = install(status.user) {
+                    menu = menu.item(entry(
+                        if update {
+                            tr!("skill-update-user")
+                        } else {
+                            tr!("skill-install-user")
+                        },
+                        Scope::User,
+                        true,
+                    ));
+                }
+                if ours(status.repo).is_some() {
+                    menu = menu.item(entry(tr!("skill-remove-repo"), Scope::Repo, false));
+                }
+                if ours(status.user).is_some() {
+                    menu = menu.item(entry(tr!("skill-remove-user"), Scope::User, false));
+                }
+                menu
+            })
     }
 
     /// A note: rendered Markdown, or the field it is written in.

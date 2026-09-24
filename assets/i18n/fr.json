@@ -977,5 +977,19 @@
   "overview-hide-body": "Le worktree n'est pas supprimé et ses terminaux continuent de tourner. « Réinitialiser » le fait revenir.",
   "overview-note-no-vault": "Aucun coffre de notes n'est réglé : une note privée n'a nulle part où aller.",
   "overview-note-share": "Partager : ranger la note dans le dépôt (.claudhub/)",
-  "overview-note-keep": "Garder pour moi : ranger la note dans le coffre, hors du dépôt"
+  "overview-note-keep": "Garder pour moi : ranger la note dans le coffre, hors du dépôt",
+  "skill-button": "Skill",
+  "skill-tooltip": "La skill Claudhub : ce qui apprend à Claude où sont les nœuds et leur format",
+  "skill-absent": "absente",
+  "skill-foreign": "présente mais pas la nôtre",
+  "skill-current": "à jour (v%{version})",
+  "skill-old": "ancienne (v%{version})",
+  "skill-in-repo": "Dans le dépôt : %{state}",
+  "skill-for-me": "Pour moi : %{state}",
+  "skill-install-repo": "Installer dans le dépôt (à commiter, pour l'équipe)",
+  "skill-install-user": "Installer pour moi (~/.claude)",
+  "skill-update-repo": "Mettre à jour dans le dépôt",
+  "skill-update-user": "Mettre à jour pour moi",
+  "skill-remove-repo": "Retirer du dépôt",
+  "skill-remove-user": "Retirer pour moi"
 }

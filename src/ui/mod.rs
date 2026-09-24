@@ -13,6 +13,7 @@ mod branch_picker;
 mod branches;
 mod canvas_view;
 mod conflicts;
+mod context;
 mod db;
 mod db_query;
 mod dialogs;

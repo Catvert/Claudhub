@@ -977,5 +977,19 @@
   "overview-hide-body": "The worktree is not deleted and its terminals keep running. “Reset” brings it back.",
   "overview-note-no-vault": "No notes vault is set: a private note has nowhere to go.",
   "overview-note-share": "Share: keep the note in the repository (.claudhub/)",
-  "overview-note-keep": "Keep to myself: move the note to the vault, out of the repository"
+  "overview-note-keep": "Keep to myself: move the note to the vault, out of the repository",
+  "skill-button": "Skill",
+  "skill-tooltip": "The Claudhub skill: what tells Claude where the nodes are and their format",
+  "skill-absent": "absent",
+  "skill-foreign": "present but not ours",
+  "skill-current": "up to date (v%{version})",
+  "skill-old": "old (v%{version})",
+  "skill-in-repo": "In the repository: %{state}",
+  "skill-for-me": "For me: %{state}",
+  "skill-install-repo": "Install in the repository (to commit, for the team)",
+  "skill-install-user": "Install for me (~/.claude)",
+  "skill-update-repo": "Update in the repository",
+  "skill-update-user": "Update for me",
+  "skill-remove-repo": "Remove from the repository",
+  "skill-remove-user": "Remove for me"
 }

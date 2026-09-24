@@ -150,6 +150,7 @@ src/
     snapshot.rs le point de relecture : l'état du worktree en commit, sans
                 toucher l'index de l'utilisateur
   canvas.rs     un nœud de l'accueil sur disque : l'en-tête, le nom du fichier — pur
+  skill.rs      la skill Claude Code livrée : où elle est, sa version, l'installer
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent,
                 ont fini ou attendent — le mot de l'agent fusionné à la devinette
   agent_hooks.rs  les hooks de Claude Code : la ligne shell qui écrit, le fichier
@@ -204,6 +205,7 @@ src/
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
     canvas_view.rs  les notes de l'accueil : les fichiers lus, écrits, déplacés
+    context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
                     zoom — pur, testé
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
@@ -622,6 +624,14 @@ worktree.
   condition** que le fichier soit toujours celui lu. La mise en page reste
   locale (`Store::home_places`, par chemin). Le worker crée la note — nom
   libre sur le disque, signée du `user.name` du checkout.
+- **Ce qu'un agent voit de son environnement** est une fiche Markdown
+  (`ui::context`), réécrite à chaque relevé dans le coffre du worktree et
+  annoncée par `$CLAUDHUB_CONTEXT` : base, commits, changements, agents,
+  terminaux, nœuds, voisins. Le worker ne l'écrit que si elle a changé.
+  **La skill** qui lui en apprend le format (`crate::skill`, texte dans
+  `assets/skills/`) porte sa version dans son texte ; le bouton de l'accueil
+  l'installe dans le dépôt — pour l'équipe — ou pour soi, et n'écrase ni ne
+  retire jamais un fichier qui n'est pas le nôtre.
 - **Valider depuis une carte** ouvre une feuille (`CommitSheet`, une entité
   enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
   commit du panneau des changements elle-même — même champ, même brouillon.
