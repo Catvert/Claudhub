@@ -2497,6 +2497,12 @@ impl ClaudhubApp {
                 .get(worktree)
                 .map(|state| state.terminals.clone())
                 .unwrap_or_default();
+            // How many agents the worktree had: one alone may continue the
+            // worktree's last conversation, two may not — see `relaunch`.
+            let agents = kept
+                .iter()
+                .filter(|kept| matches!(kept.relaunch, Relaunch::Agent { .. }))
+                .count();
             for kept in kept {
                 let launch = match &kept.relaunch {
                     Relaunch::Shell => Launch::shell(),
@@ -2522,9 +2528,13 @@ impl ClaudhubApp {
                                 placement: None,
                             },
                         };
-                        if let Some((program, args)) = launch.command.as_mut() {
-                            *args =
-                                crate::ui::revive::resumed(program, args, kept.session.as_deref());
+                        if let Some((program, args)) = launch.command.take() {
+                            launch.command = Some(crate::ui::revive::relaunch(
+                                &program,
+                                &args,
+                                kept.session.as_deref(),
+                                agents == 1,
+                            ));
                         }
                         launch
                     }
@@ -2542,6 +2552,9 @@ impl ClaudhubApp {
                 let Some(opened) = self.terminals.last_mut() else {
                     continue;
                 };
+                // What the launch wrapped to resume is not what starts it next
+                // time: the kept command is.
+                opened.relaunch = Some(kept.relaunch.clone());
                 opened.name = kept.name.clone().map(SharedString::from);
                 opened.session = kept.session.clone();
                 if let Some(size) = kept.size {

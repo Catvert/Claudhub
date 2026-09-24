@@ -686,8 +686,12 @@ ont été sortis.
 
 **Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal` dans
 le magasin) : un shell ou un agent encore vivant revient au démarrage, à sa
-place et à sa taille, et Claude **dans sa conversation** (`--resume`) — la
-session est celle des hooks dont le pid est l'enfant du pty. Un onglet lancé
+place et à sa taille, et Claude **dans sa conversation** : `--resume` de la
+session que les hooks rapportent pour l'enfant du pty, à défaut `--continue`
+quand le worktree n'avait qu'un agent — les hooks manquent souvent, posés
+seulement sur les worktrees apparus fenêtre ouverte et jamais sur un
+`settings.local.json` suivi — et toujours `|| exec claude` derrière : une
+reprise qui ne trouve rien sort en erreur, et l'onglet serait mort-né. Un onglet lancé
 sur une commande ne revient pas : relancer un `just deploy` parce qu'on a
 fermé la fenêtre dessus serait un redémarrage que personne n'a demandé. Rien
 n'est écrit pour un worktree dont les terminaux n'ont pas encore été rouverts

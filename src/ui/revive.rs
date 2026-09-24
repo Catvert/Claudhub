@@ -28,15 +28,47 @@ pub fn is_claude(program: &str) -> bool {
         .is_some_and(|name| name.starts_with("claude"))
 }
 
-/// The arguments that start the agent again, in its conversation when there
-/// is one to go back to and the agent is one we know how to ask.
-pub fn resumed(program: &str, args: &[String], session: Option<&str>) -> Vec<String> {
-    let mut args = without_resume(args);
-    if let Some(session) = session.filter(|_| is_claude(program)) {
-        args.push("--resume".into());
-        args.push(session.into());
+/// The command that starts a kept agent again, in its conversation when
+/// there is one to go back to and the agent is one we know how to ask.
+///
+/// **The hooks' session first** (`--resume`). Without one — the hooks are not
+/// installed where `.claude/settings.local.json` is a tracked file, and
+/// nothing then names a session — the worktree's **last** conversation
+/// (`--continue`), as long as the worktree had one agent: two would both
+/// continue the same one. And either way, **a fresh start when nothing is
+/// found**: a `--resume` of a session Claude no longer has, or a `--continue`
+/// where nothing was ever said, exits on an error, and the tab would be dead
+/// on arrival. Hence `sh -c '<resume> || exec <fresh>'`.
+pub fn relaunch(
+    program: &str,
+    args: &[String],
+    session: Option<&str>,
+    alone: bool,
+) -> (String, Vec<String>) {
+    let args = without_resume(args);
+    let resume: Vec<String> = match session {
+        _ if !is_claude(program) => Vec::new(),
+        Some(session) => vec!["--resume".into(), session.into()],
+        None if alone => vec!["--continue".into()],
+        None => Vec::new(),
+    };
+    if resume.is_empty() {
+        return (program.to_string(), args);
     }
-    args
+    let fresh: Vec<&str> = std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .collect();
+    let resumed: Vec<&str> = fresh
+        .iter()
+        .copied()
+        .chain(resume.iter().map(String::as_str))
+        .collect();
+    let line = format!(
+        "{} || exec {}",
+        crate::cmdline::join_command(&resumed),
+        crate::cmdline::join_command(&fresh)
+    );
+    ("sh".to_string(), vec!["-c".to_string(), line])
 }
 
 /// A profile's arguments without a `--resume` of their own: what is kept is
@@ -130,31 +162,43 @@ mod tests {
         args.iter().map(|a| a.to_string()).collect()
     }
 
+    fn shell(line: &str) -> (String, Vec<String>) {
+        ("sh".into(), strings(&["-c", line]))
+    }
+
     #[test]
-    fn claude_is_resumed_in_its_session_and_nothing_else_is() {
+    fn claude_is_resumed_in_its_session_or_started_fresh() {
         assert_eq!(
-            resumed("claude", &strings(&["--model", "opus"]), Some("abc")),
-            strings(&["--model", "opus", "--resume", "abc"])
+            relaunch("claude", &strings(&["--model", "opus"]), Some("abc"), false),
+            shell("claude --model opus --resume abc || exec claude --model opus")
         );
+        // No session named, one agent in the worktree: its last conversation.
         assert_eq!(
-            resumed("/usr/local/bin/claude", &[], Some("abc")),
-            strings(&["--resume", "abc"])
+            relaunch("/usr/local/bin/claude", &[], None, true),
+            shell("/usr/local/bin/claude --continue || exec /usr/local/bin/claude")
         );
-        // Another agent: its command as it was, the session being ours to
-        // know and not its to take.
+        // Two agents and no names: a fresh conversation, not the same one twice.
         assert_eq!(
-            resumed("codex", &strings(&["x"]), Some("abc")),
-            strings(&["x"])
+            relaunch("claude", &[], None, false),
+            ("claude".to_string(), Vec::new())
         );
-        // No session heard: a fresh conversation.
-        assert!(resumed("claude", &[], None).is_empty());
+        // Another agent: its command as it was.
+        assert_eq!(
+            relaunch("codex", &strings(&["x"]), Some("abc"), true),
+            ("codex".to_string(), strings(&["x"]))
+        );
     }
 
     #[test]
     fn a_resume_already_in_the_profile_is_replaced_not_doubled() {
         assert_eq!(
-            resumed("claude", &strings(&["--resume", "old", "-p"]), Some("new")),
-            strings(&["-p", "--resume", "new"])
+            relaunch(
+                "claude",
+                &strings(&["--resume", "old", "-p"]),
+                Some("new"),
+                true
+            ),
+            shell("claude -p --resume new || exec claude -p")
         );
         assert_eq!(
             without_resume(&strings(&["--resume=old", "-r", "x", "--verbose"])),
