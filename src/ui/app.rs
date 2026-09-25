@@ -1122,6 +1122,9 @@ pub struct ClaudhubApp {
     pub(super) overview_flow_wanted: bool,
     /// The frames for them are being asked for.
     pub(super) overview_flow_ticking: bool,
+    /// The Claude processes as they last wrote themselves down, status
+    /// included — see `agent::ClaudeProcess`.
+    pub(super) claude_processes: Vec<crate::agent::ClaudeProcess>,
     /// What the home screen's cards say of each branch — `git::outline`.
     pub(super) outlines: HashMap<PathBuf, crate::git::Outline>,
     /// The views the user has hidden, by panel name.
@@ -1592,6 +1595,7 @@ impl ClaudhubApp {
             overview_worktree: None,
             overview_flow_wanted: false,
             overview_flow_ticking: false,
+            claude_processes: Vec::new(),
             outlines: HashMap::new(),
             zen_folded: Vec::new(),
             settings_form,
@@ -2344,6 +2348,7 @@ impl ClaudhubApp {
             Evt::ClaudeProcesses { processes } => {
                 self.claude_processes_heard(&processes, cx);
                 self.settle_generations(&processes, window, cx);
+                self.claude_processes = processes;
             }
             Evt::CanvasRead {
                 worktree,

@@ -702,8 +702,9 @@ pub struct AgentTile<'a> {
     pub worktree: &'a Path,
     /// It runs an agent: launched as one, or Claude typed at its prompt.
     pub agent: bool,
-    /// Whether its own session says it is working, when the hooks named the
-    /// session — `None` when nothing speaks for this terminal alone.
+    /// Whether its own agent says it is working — Claude's status for its
+    /// pid, or the hooks' word for its session — `None` when nothing speaks
+    /// for this terminal alone.
     pub word: Option<bool>,
 }
 
@@ -712,9 +713,9 @@ pub struct AgentTile<'a> {
 pub struct AtWork {
     /// The terminals it works in.
     pub terminals: HashSet<u64>,
-    /// The worktrees it works in with no terminal on the plane to say so — an
-    /// agent started in a terminal of another program: their card's link
-    /// flows instead, or the work would not show at all.
+    /// The worktrees it works in with no agent terminal on the plane to say
+    /// so — an agent started in a terminal of another program: their card's
+    /// link flows instead, or the work would not show at all.
     pub cards: HashSet<PathBuf>,
 }
 
@@ -724,7 +725,10 @@ pub struct AtWork {
 /// only speaks for the agent terminals nothing names — and not when a named
 /// one already accounts for the work, the worktree's state being the loudest
 /// of its agents and not the sum. A shell with no agent in it never flows:
-/// the worktree working says nothing of a prompt beside it.
+/// the worktree working says nothing of a prompt beside it. And a card
+/// flows only where no agent terminal is on the plane: one that says it is
+/// at rest has said so, and the worktree's state — a guess from the
+/// processor, which typing a prompt burns — does not overrule it.
 pub fn at_work(tiles: &[AgentTile], working: &HashSet<&Path>) -> AtWork {
     let accounted = |worktree: &Path| {
         tiles
@@ -744,7 +748,7 @@ pub fn at_work(tiles: &[AgentTile], working: &HashSet<&Path>) -> AtWork {
         .filter(|worktree| {
             !tiles
                 .iter()
-                .any(|tile| tile.worktree == **worktree && terminals.contains(&tile.id))
+                .any(|tile| tile.worktree == **worktree && tile.agent)
         })
         .map(|worktree| worktree.to_path_buf())
         .collect();
@@ -1642,6 +1646,17 @@ mod tests {
         let found = at_work(&tiles, &working);
         assert_eq!(found.terminals, HashSet::from([1]));
         assert_eq!(found.cards, HashSet::from([PathBuf::from("/b")]));
+    }
+
+    #[test]
+    fn an_agent_that_says_it_rests_is_not_overruled_by_the_guess() {
+        // Typing a prompt burns processor, so the worktree is guessed at
+        // work; the agent itself says it is idle, and nothing flows — not
+        // its link, not the card's in its place.
+        let working: HashSet<&Path> = [Path::new("/a")].into();
+        let found = at_work(&[tile(1, "/a", true, Some(false))], &working);
+        assert!(found.terminals.is_empty());
+        assert!(found.cards.is_empty());
     }
 
     #[test]
