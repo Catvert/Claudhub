@@ -385,7 +385,7 @@ impl ClaudhubApp {
         // An agent at work flows along the link to it, and flowing needs
         // frames nobody else asks for. Under a maximised node the links are
         // under the veil: nothing to move.
-        let at_work = self.overview_at_work(&plan);
+        let at_work = self.overview_at_work(&plan, cx);
         self.overview_flow_wanted = self.overview_maximized.is_none()
             && (!at_work.terminals.is_empty() || !at_work.cards.is_empty());
         if self.overview_flow_wanted {
@@ -1146,30 +1146,78 @@ impl ClaudhubApp {
     }
 
     /// Where an agent is at work on the plane — see `overview::at_work`.
-    fn overview_at_work(&self, plan: &Plan) -> overview::AtWork {
+    ///
+    /// **Claude's own status first** (`busy` or `idle`, written for its pid):
+    /// the processor cannot tell a turn under way from a prompt being typed,
+    /// both burn it. Then the hooks' word for the terminal's session, then —
+    /// for another agent, or a Claude that writes no status — the guess.
+    fn overview_at_work(&self, plan: &Plan, cx: &App) -> overview::AtWork {
+        let status = |pid: Option<u32>, session: Option<&str>| {
+            self.claude_processes
+                .iter()
+                .find(|process| {
+                    pid == Some(process.pid) || session == Some(process.session.as_str())
+                })
+                .and_then(|process| process.status.as_deref())
+                .map(|status| status == "busy")
+        };
         let tiles: Vec<overview::AgentTile> = self
             .terminals
             .iter()
             .filter(|terminal| plan.tile(terminal.view.entity_id().as_u64()).is_some())
-            .map(|terminal| overview::AgentTile {
-                id: terminal.view.entity_id().as_u64(),
-                worktree: &terminal.worktree,
-                agent: matches!(
-                    terminal.relaunch,
-                    Some(crate::ui::store::Relaunch::Agent { .. })
-                ) || terminal.typed.is_some(),
-                word: terminal
-                    .session
-                    .as_deref()
-                    .and_then(|session| self.agents.session(session))
-                    .map(|activity| *activity == crate::agent::Activity::Working),
+            .map(|terminal| {
+                // The pty's child is Claude itself when the tab was launched
+                // on it; typed at a prompt, it is the pid read under the
+                // shell.
+                let pid = terminal
+                    .typed
+                    .as_ref()
+                    .map(|(_, _, pid)| *pid)
+                    .or_else(|| terminal.view.read(cx).child());
+                let session = terminal.session.as_deref();
+                let claude = status(pid, session);
+                overview::AgentTile {
+                    id: terminal.view.entity_id().as_u64(),
+                    worktree: &terminal.worktree,
+                    agent: claude.is_some()
+                        || matches!(
+                            terminal.relaunch,
+                            Some(crate::ui::store::Relaunch::Agent { .. })
+                        )
+                        || terminal.typed.is_some(),
+                    word: claude.or_else(|| {
+                        session
+                            .and_then(|session| self.agents.session(session))
+                            .map(|activity| *activity == crate::agent::Activity::Working)
+                    }),
+                }
             })
             .collect();
+        let cards: Vec<PathBuf> = plan.cards.iter().map(|card| card.path.clone()).collect();
         let working: std::collections::HashSet<&Path> = plan
             .cards
             .iter()
             .map(|card| card.path.as_path())
-            .filter(|path| self.agents.get(path).is_some_and(|state| state.working))
+            .filter(|path| {
+                // The Claudes of this worktree that say how they are: one of
+                // them busy is the answer, all idle too — the guess only
+                // speaks where none of them does.
+                let said: Vec<bool> = self
+                    .claude_processes
+                    .iter()
+                    .filter(|process| {
+                        crate::agent::owning_worktree(&cards, &process.cwd).as_deref()
+                            == Some(*path)
+                    })
+                    .filter_map(|process| process.status.as_deref())
+                    .map(|status| status == "busy")
+                    .collect();
+                if said.is_empty() {
+                    self.agents.get(path).is_some_and(|state| state.working)
+                } else {
+                    said.contains(&true)
+                }
+            })
             .collect();
         overview::at_work(&tiles, &working)
     }
