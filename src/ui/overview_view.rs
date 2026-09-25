@@ -679,11 +679,14 @@ impl ClaudhubApp {
 
         // Each column keeps its scroll from one frame to the next; the ones
         // gone take theirs with them.
-        let keys: Vec<PathBuf> = projects
+        let keys: Vec<String> = projects
             .iter()
             .flat_map(|(main, _, checkouts)| {
-                std::iter::once(main.clone())
-                    .chain(checkouts.iter().map(|(path, _, _)| path.clone()))
+                std::iter::once(column_key(&Node::Git(main.clone()))).chain(
+                    checkouts
+                        .iter()
+                        .map(|(path, _, _)| column_key(&Node::Worktree(path.clone()))),
+                )
             })
             .collect();
         self.overview_column_scrolls
@@ -691,7 +694,11 @@ impl ClaudhubApp {
         for key in &keys {
             self.overview_column_scrolls.entry(key.clone()).or_default();
         }
-        let scroll_of = |key: &PathBuf| self.overview_column_scrolls[key].clone();
+        let scroll_of = |node: Node| {
+            let key = column_key(&node);
+            let scroll = self.overview_column_scrolls[&key].clone();
+            (key, scroll)
+        };
 
         let body: AnyElement = match self.overview_zoomed.clone() {
             Some(node) => div()
@@ -719,14 +726,16 @@ impl ClaudhubApp {
                         .chain(notes.iter().cloned().map(Node::Note))
                         .map(|node| self.column_node(&node, true, &at_work, window, cx))
                         .collect();
-                    columns.push(column(main, COLUMN_REPO, &scroll_of(main), nodes));
+                    let (key, scroll) = scroll_of(Node::Git(main.clone()));
+                    columns.push(column(&key, COLUMN_REPO, &scroll, nodes));
                     for (path, terminals, notes) in checkouts {
                         let nodes: Vec<AnyElement> = std::iter::once(Node::Worktree(path.clone()))
                             .chain(terminals.iter().copied().map(Node::Terminal))
                             .chain(notes.iter().cloned().map(Node::Note))
                             .map(|node| self.column_node(&node, true, &at_work, window, cx))
                             .collect();
-                        columns.push(column(path, COLUMN_WORKTREE, &scroll_of(path), nodes));
+                        let (key, scroll) = scroll_of(Node::Worktree(path.clone()));
+                        columns.push(column(&key, COLUMN_WORKTREE, &scroll, nodes));
                     }
                 }
                 let row = h_flex()
@@ -1933,16 +1942,33 @@ fn outline(
     path.build().ok()
 }
 
+/// What names a column — its element id and its scroll — by the node at
+/// its head.
+///
+/// **By the node and not the path**: a repository's column and its main
+/// checkout's have the same one, and sharing a scroll between them was a
+/// bar that showed and never moved — the repository's column, with nothing
+/// to scroll, clamped the offset back to nothing at every frame.
+fn column_key(head: &Node) -> String {
+    match head {
+        Node::Git(main) => format!("repo:{}", main.display()),
+        Node::Worktree(path) => format!("worktree:{}", path.display()),
+        other => format!("{other:?}"),
+    }
+}
+
 /// A column of nodes, as tall as the screen, scrolling on its own when they
 /// are more — with a bar one can take, the wheel over a terminal being the
-/// terminal's.
+/// terminal's. The bar has a gutter of its own at the column's right, so it
+/// never lies over a terminal: `width` is what the nodes get.
 fn column(
-    key: &Path,
+    key: &str,
     width: f32,
     scroll: &gpui_kit::ScrollHandle,
     nodes: Vec<AnyElement>,
 ) -> AnyElement {
-    let id = format!("overview-column-{}", key.display());
+    let id = format!("overview-column-{key}");
+    let gutter = super::theme::scroll_gutter();
     let list = v_flex()
         .id(SharedString::from(format!("{id}-list")))
         .track_scroll(scroll)
@@ -1950,11 +1976,12 @@ fn column(
         .gap_2()
         // Room under the last node for its grip.
         .pb_2()
+        .pr(gutter)
         .overflow_y_scroll()
         .children(nodes);
     div()
         .flex_none()
-        .w(px(width))
+        .w(px(width) + gutter)
         .h_full()
         .child(super::scroll::vertical(id, scroll, list))
         .into_any_element()
