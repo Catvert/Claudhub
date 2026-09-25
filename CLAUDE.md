@@ -620,9 +620,12 @@ worktree.
   Ctrl+molette zoome autour du pointeur ; un terminal laisse passer ce cran
   (`set_canvas`), sinon il changerait la police de tous.
 - **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
-  worktrees d'un code ne se lisent pas parmi ceux d'un autre. Dans ce projet,
-  un second sélecteur montre **un worktree ou tous** ; le nœud git et les notes
-  du dépôt restent, étant à chacun. Changer de projet le remet à « tous ».
+  worktrees d'un code ne se lisent pas parmi ceux d'un autre — et autant qu'on
+  en coche. Un second sélecteur coche les **worktrees**, par projet : un projet
+  dont rien n'est coché les montre tous (`overview::shown_of`), et le nœud git
+  et les notes du dépôt restent, étant à chacun. Les deux sont des **popovers
+  à cases** et non des menus : un menu se ferme à chaque pression, et cocher
+  trois projets demandait trois ouvertures. Jamais le dernier décoché.
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
   Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
   **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
@@ -694,7 +697,9 @@ worktree.
 - **Le lien d'un agent au travail coule** (`overview::at_work`) : tirets en
   marche et comète vers le terminal, dans la teinte du travail ; **celui d'un
   agent qui attend l'utilisateur respire**, dans la teinte d'une question, un
-  signal battant au bord du terminal — rien ne voyage, rien n'avance. Ce qui
+  signal battant au bord du terminal — rien ne voyage, rien n'avance. **Le
+  cadre du terminal porte le même habit** (`tile_outline`) : le lien et la
+  boîte où il mène se lisent comme un seul signal. Ce qui
   décide est le **statut que Claude écrit pour son pid** (`busy`, `waiting`,
   `idle`), puis le mot
   des hooks, et la devinette par le processeur en dernier : taper un prompt en

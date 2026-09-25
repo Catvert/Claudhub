@@ -22,11 +22,14 @@
 //! seen from afar is read for its name, its branch and its agent's word.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
+    popover::Popover,
     v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
 };
 use gpui_kit::{
@@ -169,44 +172,41 @@ fn placed(rect: Rect) -> gpui_kit::Div {
 }
 
 impl ClaudhubApp {
-    /// The repositories the plane shows: the one picked in the corner, the
+    /// The repositories the plane shows: the ones ticked in the corner, the
     /// active worktree's until one is, or all of them.
     pub(super) fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
         if self.overview_all {
             return self.repos.iter().collect();
         }
-        let picked = self
-            .overview_repo
-            .clone()
-            .filter(|main| self.repos.iter().any(|repo| &repo.main == main))
-            .or_else(|| {
-                self.active
-                    .as_deref()
-                    .and_then(|active| self.main_of(active))
-            });
-        match picked {
+        let ticked: Vec<&crate::ui::repos::RepoState> = self
+            .repos
+            .iter()
+            .filter(|repo| self.overview_projects.contains(&repo.main))
+            .collect();
+        if !ticked.is_empty() {
+            return ticked;
+        }
+        let followed = self
+            .active
+            .as_deref()
+            .and_then(|active| self.main_of(active));
+        match followed {
             Some(main) => self.repos.iter().filter(|repo| repo.main == main).collect(),
             None => self.repos.iter().take(1).collect(),
         }
     }
 
-    /// The worktree picked beside the project, while it is still one of the
-    /// project's: gone from it, or with every project on show, the plane
-    /// holds them all — a filter nobody can see in the corner is a plane
-    /// that is missing something without saying so.
-    pub(super) fn overview_picked_worktree(&self) -> Option<&Path> {
-        if self.overview_all {
-            return None;
-        }
-        let picked = self.overview_worktree.as_deref()?;
-        self.overview_repos()
+    /// The worktrees of a repository the plane shows: the ticked ones, or
+    /// all of them when none is — a folder gone from the disk never, having
+    /// nothing to show but its absence, which the picker already says.
+    pub(super) fn overview_worktrees_of(&self, repo: &crate::ui::repos::RepoState) -> Vec<PathBuf> {
+        let live: Vec<PathBuf> = repo
+            .worktrees
             .iter()
-            .any(|repo| {
-                repo.worktrees
-                    .iter()
-                    .any(|worktree| worktree.path == picked && !worktree.prunable)
-            })
-            .then_some(picked)
+            .filter(|worktree| !worktree.prunable)
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        overview::shown_of(&self.overview_worktrees, &live)
     }
 
     /// What the plane holds, laid out.
@@ -254,23 +254,20 @@ impl ClaudhubApp {
                 .map(|entry| entry.path.clone())
                 .collect()
         };
-        let picked = self.overview_picked_worktree();
         let groups: Vec<Group> = self
             .overview_repos()
             .into_iter()
-            .map(|repo| Group {
+            .map(|repo| (repo, self.overview_worktrees_of(repo)))
+            .map(|(repo, shown)| Group {
                 main: &repo.main,
                 notes: repo_notes(repo),
                 checkouts: repo
                     .worktrees
                     .iter()
-                    // A folder gone from the disk has nothing to show but its
-                    // absence, which the picker already says.
-                    .filter(|worktree| !worktree.prunable)
-                    // One worktree picked, the others are not on this plane;
-                    // the git node and the repository's notes stay, being
-                    // every worktree's.
-                    .filter(|worktree| picked.is_none_or(|picked| picked == worktree.path))
+                    // The worktrees not ticked are not on this plane; the git
+                    // node and the repository's notes stay, being every
+                    // worktree's.
+                    .filter(|worktree| shown.contains(&worktree.path))
                     .map(|worktree| Checkout {
                         path: &worktree.path,
                         branch: worktree.branch.as_deref(),
@@ -439,8 +436,13 @@ impl ClaudhubApp {
             .filter_map(|terminal| {
                 let id = terminal.view.entity_id();
                 let rect = plan.tile(id.as_u64())?;
+                let doing = at_work
+                    .terminals
+                    .get(&id.as_u64())
+                    .copied()
+                    .unwrap_or(overview::Doing::Rest);
                 let element =
-                    self.render_tile(terminal, view.screen(rect), rem, view.zoom, window, cx);
+                    self.render_tile(terminal, view.screen(rect), view.zoom, doing, window, cx);
                 Some((Node::Terminal(id.as_u64()), element))
             })
             .collect();
@@ -976,29 +978,48 @@ impl ClaudhubApp {
         bars
     }
 
-    /// Which project the plane shows, top right: one at a time by default,
+    /// Which projects the plane shows, top right: one at a time by default,
     /// so that five worktrees of one code are not read among a dozen of
-    /// another's.
+    /// another's — and as many as one ticks.
     fn render_project_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let shown = self.overview_repos();
-        let label: SharedString = if self.overview_all {
-            tr!("overview-all-projects")
-        } else {
-            shown
-                .first()
-                .map(|repo| SharedString::from(repo.name.clone()))
-                .unwrap_or_default()
+        let shown: Vec<PathBuf> = self
+            .overview_repos()
+            .iter()
+            .map(|repo| repo.main.clone())
+            .collect();
+        let label: SharedString = match (self.overview_all, self.overview_repos().as_slice()) {
+            (true, _) => tr!("overview-all-projects"),
+            (false, [one]) => SharedString::from(one.name.clone()),
+            (false, many) => tr!("overview-n-projects", { count: many.len() }),
         };
-        let current = (!self.overview_all)
-            .then(|| shown.first().map(|repo| repo.main.clone()))
-            .flatten();
-        let choices: Vec<(PathBuf, SharedString)> = self
+        let app = cx.entity().downgrade();
+        let everything = app.clone();
+        let rows: Vec<Pick> = self
             .repos
             .iter()
-            .map(|repo| (repo.main.clone(), SharedString::from(repo.name.clone())))
+            .map(|repo| {
+                let app = app.clone();
+                let main = repo.main.clone();
+                Pick::Item {
+                    name: SharedString::from(repo.name.clone()),
+                    ticked: shown.contains(&repo.main),
+                    press: Rc::new(move |cx: &mut App| {
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |this, cx| this.press_project(&main, cx));
+                        }
+                    }),
+                }
+            })
             .collect();
-        let all = self.overview_all;
-        let app = cx.entity().downgrade();
+        let all = Pick::Item {
+            name: tr!("overview-all-projects"),
+            ticked: self.overview_all,
+            press: Rc::new(move |cx: &mut App| {
+                if let Some(app) = everything.upgrade() {
+                    app.update(cx, |this, cx| this.press_all_projects(cx));
+                }
+            }),
+        };
         h_flex()
             .absolute()
             .top_3()
@@ -1011,39 +1032,14 @@ impl ClaudhubApp {
             .bg(cx.theme().background)
             .shadow_md()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                Button::new("overview-project")
-                    .ghost()
-                    .small()
-                    .icon(icon("folder"))
-                    .label(label)
-                    .dropdown_menu(move |menu, _, _| {
-                        let everything = app.clone();
-                        let menu = menu.item(
-                            PopupMenuItem::new(tr!("overview-all-projects"))
-                                .checked(all)
-                                .on_click(move |_, _, cx| {
-                                    if let Some(app) = everything.upgrade() {
-                                        app.update(cx, |this, cx| this.show_project(None, cx));
-                                    }
-                                }),
-                        );
-                        choices.iter().cloned().fold(menu, |menu, (main, name)| {
-                            let app = app.clone();
-                            let checked = current.as_ref() == Some(&main);
-                            menu.item(PopupMenuItem::new(name).checked(checked).on_click(
-                                move |_, _, cx| {
-                                    if let Some(app) = app.upgrade() {
-                                        let main = main.clone();
-                                        app.update(cx, |this, cx| {
-                                            this.show_project(Some(main), cx)
-                                        });
-                                    }
-                                },
-                            ))
-                        })
-                    }),
-            )
+            .child(pick_list(
+                "overview-project",
+                "folder",
+                label,
+                tr!("overview-projects-hint"),
+                all,
+                rows,
+            ))
             .children(self.render_overview_worktree_picker(cx))
             .children(self.render_hidden_menu(cx))
             .child(self.render_skill_button(cx))
@@ -1058,76 +1054,140 @@ impl ClaudhubApp {
             )
     }
 
-    /// Which of the project's worktrees the plane shows, beside the project
-    /// picker: all of them by default, or one to read on its own. Only with
-    /// one project on show — a worktree of which, among several — and only
+    /// Which worktrees of the projects on show the plane shows, beside the
+    /// project picker: all of them by default, or the ones ticked — per
+    /// project, one where nothing is ticked showing all of its own. Only
     /// when there is a choice to make.
     fn render_overview_worktree_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if self.overview_all {
+        let repos = self.overview_repos();
+        let headed = repos.len() > 1;
+        let app = cx.entity().downgrade();
+        let mut rows: Vec<Pick> = Vec::new();
+        let (mut choices, mut shown_count, mut filtered) = (0, 0, false);
+        let mut only: Option<SharedString> = None;
+        for repo in &repos {
+            let shown = self.overview_worktrees_of(repo);
+            let live = repo.worktrees.iter().filter(|worktree| !worktree.prunable);
+            if headed {
+                rows.push(Pick::Heading(SharedString::from(repo.name.clone())));
+            }
+            for worktree in live {
+                let label = worktree.label();
+                let name = SharedString::from(match worktree.branch.as_deref() {
+                    Some(branch) if branch != label => format!("{label} · {branch}"),
+                    _ => label,
+                });
+                let ticked = shown.contains(&worktree.path);
+                choices += 1;
+                if ticked {
+                    shown_count += 1;
+                    only = Some(name.clone());
+                } else {
+                    filtered = true;
+                }
+                let (app, main, path) = (app.clone(), repo.main.clone(), worktree.path.clone());
+                rows.push(Pick::Item {
+                    name,
+                    ticked,
+                    press: Rc::new(move |cx: &mut App| {
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |this, cx| this.press_worktree(&main, &path, cx));
+                        }
+                    }),
+                });
+            }
+        }
+        if choices < 2 {
             return None;
         }
-        let repo = self.overview_repos().into_iter().next()?;
-        let choices: Vec<(PathBuf, SharedString)> = repo
+        let label = match (filtered, shown_count) {
+            (false, _) => tr!("overview-all-worktrees"),
+            (true, 1) => only.unwrap_or_default(),
+            (true, count) => tr!("overview-n-worktrees", { count: count }),
+        };
+        let all = Pick::Item {
+            name: tr!("overview-all-worktrees"),
+            ticked: !filtered,
+            press: Rc::new(move |cx: &mut App| {
+                if let Some(app) = app.upgrade() {
+                    app.update(cx, |this, cx| this.show_all_worktrees(cx));
+                }
+            }),
+        };
+        Some(pick_list(
+            "overview-worktree",
+            "git-branch",
+            label,
+            tr!("overview-worktree-hint"),
+            all,
+            rows,
+        ))
+    }
+
+    /// « All projects » pressed: every project, or — pressed again — back to
+    /// the active worktree's alone.
+    fn press_all_projects(&mut self, cx: &mut Context<Self>) {
+        self.overview_all = !self.overview_all;
+        self.overview_projects.clear();
+        self.reframe(cx);
+        self.ask_skill_status();
+    }
+
+    /// A project pressed: on the plane if it was not, off if it was — never
+    /// the last one. Ticking every one is « all projects ».
+    fn press_project(&mut self, main: &Path, cx: &mut Context<Self>) {
+        let shown: Vec<PathBuf> = self
+            .overview_repos()
+            .iter()
+            .map(|repo| repo.main.clone())
+            .collect();
+        let Some(ticked) = overview::toggle(&shown, main) else {
+            return;
+        };
+        self.overview_all = ticked.len() == self.repos.iter().count();
+        self.overview_projects = if self.overview_all {
+            Vec::new()
+        } else {
+            ticked
+        };
+        self.reframe(cx);
+        self.ask_skill_status();
+    }
+
+    /// A worktree pressed: on the plane if it was not, off if it was —
+    /// never its project's last one. Ticking all of a project's is the same
+    /// as ticking none, and is kept as none: a worktree created afterwards
+    /// then comes on the plane.
+    fn press_worktree(&mut self, main: &Path, path: &Path, cx: &mut Context<Self>) {
+        let Some(repo) = self.repos.iter().find(|repo| repo.main == main) else {
+            return;
+        };
+        let live: Vec<PathBuf> = repo
             .worktrees
             .iter()
             .filter(|worktree| !worktree.prunable)
-            .map(|worktree| {
-                let label = worktree.label();
-                let name = match worktree.branch.as_deref() {
-                    Some(branch) if branch != label => format!("{label} · {branch}"),
-                    _ => label,
-                };
-                (worktree.path.clone(), SharedString::from(name))
-            })
+            .map(|worktree| worktree.path.clone())
             .collect();
-        if choices.len() < 2 {
-            return None;
+        let shown = overview::shown_of(&self.overview_worktrees, &live);
+        let Some(ticked) = overview::toggle(&shown, path) else {
+            return;
+        };
+        self.overview_worktrees
+            .retain(|picked| !live.contains(picked));
+        if ticked.len() < live.len() {
+            self.overview_worktrees.extend(ticked);
         }
-        let current = self.overview_picked_worktree().map(Path::to_path_buf);
-        let label = current
-            .as_ref()
-            .and_then(|picked| choices.iter().find(|(path, _)| path == picked))
-            .map(|(_, name)| name.clone())
-            .unwrap_or_else(|| tr!("overview-all-worktrees"));
-        let app = cx.entity().downgrade();
-        Some(
-            Button::new("overview-worktree")
-                .ghost()
-                .small()
-                .icon(icon("git-branch"))
-                .label(label)
-                .tooltip(tr!("overview-worktree-hint"))
-                .dropdown_menu(move |menu, _, _| {
-                    let everything = app.clone();
-                    let menu = menu.item(
-                        PopupMenuItem::new(tr!("overview-all-worktrees"))
-                            .checked(current.is_none())
-                            .on_click(move |_, _, cx| {
-                                if let Some(app) = everything.upgrade() {
-                                    app.update(cx, |this, cx| this.show_worktree(None, cx));
-                                }
-                            }),
-                    );
-                    choices.iter().cloned().fold(menu, |menu, (path, name)| {
-                        let app = app.clone();
-                        let checked = current.as_ref() == Some(&path);
-                        menu.item(PopupMenuItem::new(name).checked(checked).on_click(
-                            move |_, _, cx| {
-                                if let Some(app) = app.upgrade() {
-                                    let path = path.clone();
-                                    app.update(cx, |this, cx| this.show_worktree(Some(path), cx));
-                                }
-                            },
-                        ))
-                    })
-                }),
-        )
+        self.reframe(cx);
     }
 
-    /// Shows one worktree of the project — or, with `None`, all of them —
-    /// and fits it: another plane to frame, as another project is.
-    fn show_worktree(&mut self, worktree: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.overview_worktree = worktree;
+    /// Every worktree of the projects on show.
+    fn show_all_worktrees(&mut self, cx: &mut Context<Self>) {
+        self.overview_worktrees.clear();
+        self.reframe(cx);
+    }
+
+    /// Another plane to frame, as after picking another project.
+    fn reframe(&mut self, cx: &mut Context<Self>) {
         self.give_back_maximized();
         self.overview_fitted = false;
         cx.notify();
@@ -1140,20 +1200,6 @@ impl ClaudhubApp {
         if let Some(maximized) = self.overview_maximized.take() {
             self.set_node_size(&maximized.node, maximized.size);
         }
-    }
-
-    /// Shows one project — or, with `None`, all of them — and fits it.
-    fn show_project(&mut self, main: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.overview_all = main.is_none();
-        if main.is_some() {
-            self.overview_repo = main;
-        }
-        // A worktree picked in one project names nothing in another.
-        self.overview_worktree = None;
-        self.give_back_maximized();
-        self.overview_fitted = false;
-        self.ask_skill_status();
-        cx.notify();
     }
 
     /// Where an agent is at work on the plane — see `overview::at_work`.
@@ -1328,12 +1374,7 @@ impl ClaudhubApp {
         };
         let width = px((1.5 * view.zoom).clamp(1., 2.5));
         let zoom = view.zoom;
-        let seconds = FLOW_EPOCH
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_secs_f64()
-            // A jump every ten minutes, where hours of f32 would stutter.
-            .rem_euclid(600.) as f32;
+        let seconds = flow_seconds();
         canvas(
             move |_, _, _| {},
             move |bounds, _, window, _| {
@@ -1406,6 +1447,229 @@ impl ClaudhubApp {
         .absolute()
         .size_full()
     }
+}
+
+/// Where the moving links are in their motion: seconds since they first
+/// moved, read off the clock.
+fn flow_seconds() -> f32 {
+    FLOW_EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
+        // A jump every ten minutes, where hours of f32 would stutter.
+        .rem_euclid(600.) as f32
+}
+
+/// A terminal's outline, over it: the theme's line at rest — the ring when
+/// it has the focus — and **the link's own dress when its agent works or
+/// waits**, so that the link and the box it leads to read as one signal:
+/// dashes and a comet going round over a glow, or a breathing line.
+fn tile_outline(
+    doing: overview::Doing,
+    focused: bool,
+    zoom: f32,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let radius = f32::from(theme.radius_lg);
+    if doing == overview::Doing::Rest {
+        return div()
+            .absolute()
+            .inset_0()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(if focused { theme.ring } else { theme.border })
+            .into_any_element();
+    }
+    let (work, asks) = (theme.warning, theme.danger);
+    let spark = gpui_kit::Hsla {
+        l: (work.l + 0.25).min(0.95),
+        ..work
+    };
+    let width = (1.5 * zoom).clamp(1., 2.5);
+    let seconds = flow_seconds();
+    canvas(
+        move |_, _, _| {},
+        move |bounds, _, window, _| {
+            // Inside the box by half a line, so that nothing of the stroke
+            // falls outside what the node covers.
+            let inset = width / 2.;
+            let (x, y) = (
+                f32::from(bounds.origin.x) + inset,
+                f32::from(bounds.origin.y) + inset,
+            );
+            let (w, h) = (
+                f32::from(bounds.size.width) - width,
+                f32::from(bounds.size.height) - width,
+            );
+            if w <= 0. || h <= 0. {
+                return;
+            }
+            let r = radius.min(w / 2.).min(h / 2.);
+            let length = overview::outline_length(w, h, r);
+            let stroke =
+                |line: f32, dashes: Option<&[f32]>| outline(x, y, w, h, r, px(line), dashes);
+            match doing {
+                overview::Doing::Waiting => {
+                    let breath = overview::breath(seconds, PULSE_PERIOD);
+                    if let Some(path) = stroke(width * 4., None) {
+                        window.paint_path(path, asks.opacity(0.06 + 0.16 * breath));
+                    }
+                    if let Some(path) = stroke(width, None) {
+                        window.paint_path(path, asks.opacity(0.5 + 0.5 * breath));
+                    }
+                }
+                _ => {
+                    if let Some(path) = stroke(width * 4., None) {
+                        window.paint_path(path, work.opacity(0.14));
+                    }
+                    if let Some(path) = stroke(width, None) {
+                        window.paint_path(path, work.opacity(0.35));
+                    }
+                    let (dash, gap) = ((7. * zoom).max(4.), (9. * zoom).max(5.));
+                    let marching =
+                        overview::marching_round(length, seconds * 30. * zoom, dash, gap);
+                    if let Some(path) = stroke(width, Some(&overview::dash_array(&marching))) {
+                        window.paint_path(path, work);
+                    }
+                    let tail = (36. * zoom).max(16.);
+                    let comet = overview::comet_round(length, seconds * 160. * zoom, tail);
+                    if let Some(path) = stroke(width * 2., Some(&overview::dash_array(&comet))) {
+                        window.paint_path(path, spark);
+                    }
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// A rounded rectangle's outline as a stroke, clockwise from the end of the
+/// top-left corner — all of it, or the stretches a dash array lights. The
+/// corners are quarter circles, as `overview::outline_length` measures them.
+fn outline(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    width: Pixels,
+    dashes: Option<&[f32]>,
+) -> Option<gpui_kit::Path<Pixels>> {
+    let mut path = PathBuilder::stroke(width);
+    if let Some(dashes) = dashes {
+        if dashes.is_empty() {
+            return None;
+        }
+        let dashes: Vec<Pixels> = dashes.iter().map(|&d| px(d)).collect();
+        path = path.dash_array(&dashes);
+    }
+    let at = |px_: f32, py: f32| point(px(px_), px(py));
+    // A quarter circle as a cubic: the control points this far along the
+    // tangents.
+    let k = 0.552_284_8 * r;
+    let (right, bottom) = (x + w, y + h);
+    path.move_to(at(x + r, y));
+    path.line_to(at(right - r, y));
+    path.cubic_bezier_to(at(right, y + r), at(right - r + k, y), at(right, y + r - k));
+    path.line_to(at(right, bottom - r));
+    path.cubic_bezier_to(
+        at(right - r, bottom),
+        at(right, bottom - r + k),
+        at(right - r + k, bottom),
+    );
+    path.line_to(at(x + r, bottom));
+    path.cubic_bezier_to(
+        at(x, bottom - r),
+        at(x + r - k, bottom),
+        at(x, bottom - r + k),
+    );
+    path.line_to(at(x, y + r));
+    path.cubic_bezier_to(at(x + r, y), at(x, y + r - k), at(x + r - k, y));
+    path.build().ok()
+}
+
+/// A row of a ticked list.
+enum Pick {
+    /// A project's name over its worktrees, when several are on show.
+    Heading(SharedString),
+    Item {
+        name: SharedString,
+        ticked: bool,
+        press: Rc<dyn Fn(&mut App)>,
+    },
+}
+
+/// A button opening a list of boxes to tick, the « all » one first.
+///
+/// A popover and not a menu: a menu closes on every press, and ticking three
+/// projects would take three openings. Its content is built again on every
+/// frame from what the application says, so a press reads back at once.
+fn pick_list(
+    id: &'static str,
+    glyph: &'static str,
+    label: SharedString,
+    hint: SharedString,
+    all: Pick,
+    rows: Vec<Pick>,
+) -> impl IntoElement {
+    let rows = Rc::new(rows);
+    let all = Rc::new(all);
+    Popover::new(id)
+        .anchor(gpui_kit::Anchor::TopRight)
+        .trigger(
+            Button::new(SharedString::from(format!("{id}-trigger")))
+                .ghost()
+                .small()
+                .icon(icon(glyph))
+                .label(label)
+                .tooltip(hint),
+        )
+        .content(move |_, _, cx| {
+            let row = |index: usize, pick: &Pick, cx: &App| match pick {
+                Pick::Heading(name) => div()
+                    .pt_1()
+                    .px_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(name.clone())
+                    .into_any_element(),
+                Pick::Item {
+                    name,
+                    ticked,
+                    press,
+                } => {
+                    let press = press.clone();
+                    div()
+                        .px_1()
+                        .py_0p5()
+                        .child(
+                            Checkbox::new(SharedString::from(format!("{id}-{index}")))
+                                .label(name.clone())
+                                .checked(*ticked)
+                                .on_click(move |_, _, cx| press(cx)),
+                        )
+                        .into_any_element()
+                }
+            };
+            v_flex()
+                .id(SharedString::from(format!("{id}-list")))
+                .min_w(px(220.))
+                .max_w(px(420.))
+                .max_h(px(420.))
+                .overflow_y_scroll()
+                .p_1()
+                .gap_0p5()
+                .text_sm()
+                .child(row(usize::MAX, &all, cx))
+                .child(div().my_0p5().h(px(1.)).bg(cx.theme().border))
+                .children(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(index, pick)| row(index, pick, cx)),
+                )
+        })
 }
 
 /// A filled circle of `radius` around `centre`.
@@ -1928,11 +2192,13 @@ impl ClaudhubApp {
         &self,
         terminal: &super::terminal_view::OpenTerminal,
         rect: Rect,
-        rem: Pixels,
         zoom: f32,
+        doing: overview::Doing,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The plane's `rem`, as every node is laid out under.
+        let rem = window.rem_size() * zoom;
         let theme = cx.theme().clone();
         let view = terminal.view.clone();
         let id = view.entity_id();
@@ -2022,14 +2288,7 @@ impl ClaudhubApp {
                 // The outline on top rather than as the box's border: a
                 // border takes its pixel from the terminal's room, and the
                 // grid is worked out from the card's size.
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(theme.radius_lg)
-                        .border_1()
-                        .border_color(if focused { theme.ring } else { theme.border }),
-                )
+                .child(tile_outline(doing, focused, zoom, &theme))
                 .children(self.corner_unless_folded(Node::Terminal(id.as_u64()), cx))
                 .into_any_element(),
         }
@@ -2602,10 +2861,10 @@ impl ClaudhubApp {
     pub(super) fn hidden_nodes(&self, cx: &App) -> Vec<(Node, SharedString)> {
         let _ = cx;
         let mut hidden = Vec::new();
-        let picked = self.overview_picked_worktree();
         for repo in self.overview_repos() {
+            let shown = self.overview_worktrees_of(repo);
             for worktree in &repo.worktrees {
-                if picked.is_some_and(|picked| picked != worktree.path) {
+                if !shown.contains(&worktree.path) {
                     continue;
                 }
                 let node = Node::Worktree(worktree.path.clone());
