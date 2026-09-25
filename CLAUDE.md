@@ -627,9 +627,12 @@ worktree.
   à cases** et non des menus : un menu se ferme à chaque pression, et cocher
   trois projets demandait trois ouvertures. Jamais le dernier décoché.
 - **Deux vues, un onglet** (`set_overview_columns`, retenu dans la session) :
-  le plan, et des **colonnes** — une par worktree, sa carte, ses terminaux qui
-  se partagent la hauteur, ses notes ; une plus étroite par dépôt pour le nœud
-  git. Ce sont les **mêmes nœuds peints par les mêmes fonctions**, placés par
+  le plan, et des **colonnes** — une par worktree, sa carte, ses terminaux, ses
+  notes ; une plus étroite par dépôt pour le nœud git. **Chaque colonne défile
+  seule**, avec une barre qu'on attrape (la molette sur un terminal est au
+  terminal), et chaque nœud a sa hauteur, réglée par son bord bas : celle du
+  plan pour une carte ou une note, une à lui pour un terminal
+  (`column_height`), la largeur d'une colonne n'étant pas celle d'une carte. Ce sont les **mêmes nœuds peints par les mêmes fonctions**, placés par
   une disposition au lieu d'une main : ce que le plan retient (replis, masqués,
   hauteurs) vaut ici, et ce qui n'appartient qu'au plan — traîner un en-tête,
   la poignée, les tailles prédéfinies d'un terminal — n'y existe pas. Un

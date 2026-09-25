@@ -1837,6 +1837,9 @@ pub struct OpenTerminal {
     /// Here and not in a map keyed by the view: a terminal that closes takes
     /// its size with it, and there is nothing to sweep.
     pub size: (f32, f32),
+    /// Its height in the home screen's columns — apart from the plane's, a
+    /// column's width not being a card's.
+    pub column_height: f32,
 }
 
 impl OpenTerminal {}
@@ -2065,6 +2068,7 @@ impl ClaudhubApp {
             session: None,
             typed: None,
             size: crate::ui::overview::Tile::default().size(),
+            column_height: crate::ui::overview::COLUMN_TILE,
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);

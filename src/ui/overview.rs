@@ -38,6 +38,11 @@ const LEVEL_GAP: f32 = 64.;
 const GROUP_GAP: f32 = 160.;
 /// The height of a node's head: what one drags it by.
 pub const HEAD: f32 = 32.;
+/// A terminal's height in a column, until the hand gives it another.
+pub const COLUMN_TILE: f32 = 440.;
+/// The least height a terminal takes in a column: below it a program is a
+/// strip nobody reads.
+pub const MIN_COLUMN_TILE: f32 = 160.;
 
 /// The smallest a node is let be, by kind: a card that still says its name
 /// and branch, a terminal that still holds a prompt.
@@ -704,6 +709,17 @@ pub enum Doing {
     /// It asks the user something: the link pulses, and louder than work —
     /// the one state that cannot go on without a hand.
     Waiting,
+}
+
+/// A node's size before the hand touched it, and the least the hand may
+/// give it.
+pub fn start_and_least(node: &Node) -> ((f32, f32), (f32, f32)) {
+    match node {
+        Node::Git(_) => (GIT, MIN_GIT),
+        Node::Worktree(_) => (CARD, MIN_CARD),
+        Node::Note(_) => (NOTE, MIN_NOTE),
+        Node::Terminal(_) => (Tile::default().size(), MIN_TILE),
+    }
 }
 
 /// A terminal on the plane, as far as its agent goes.
