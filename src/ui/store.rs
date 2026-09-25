@@ -230,6 +230,8 @@ pub struct Session {
     pub worktree: Option<PathBuf>,
     /// The home screen was up: the window comes back on it.
     pub home: bool,
+    /// The home screen shows its columns rather than its plane.
+    pub home_columns: bool,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.

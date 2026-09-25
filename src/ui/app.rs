@@ -1118,6 +1118,11 @@ pub struct ClaudhubApp {
     /// The worktrees ticked beside them. A project none of whose worktrees
     /// is ticked shows them all — see `overview::shown_of`.
     pub(super) overview_worktrees: Vec<PathBuf>,
+    /// The home screen shows its columns — one per worktree — rather than
+    /// its plane.
+    pub(super) overview_columns: bool,
+    /// The one node the columns show, filling them — their « maximise ».
+    pub(super) overview_zoomed: Option<crate::ui::overview::Node>,
     /// An agent is at work, or waits, on the plane as of the last frame: its
     /// links move, and want frames of their own — this far apart.
     pub(super) overview_flow_frame: Option<std::time::Duration>,
@@ -1594,6 +1599,8 @@ impl ClaudhubApp {
             overview_all: false,
             overview_projects: Vec::new(),
             overview_worktrees: Vec::new(),
+            overview_columns: crate::ui::store::Store::global(cx).session.home_columns,
+            overview_zoomed: None,
             overview_flow_frame: None,
             overview_flow_ticking: false,
             claude_processes: Vec::new(),

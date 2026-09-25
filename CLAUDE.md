@@ -626,6 +626,17 @@ worktree.
   et les notes du dépôt restent, étant à chacun. Les deux sont des **popovers
   à cases** et non des menus : un menu se ferme à chaque pression, et cocher
   trois projets demandait trois ouvertures. Jamais le dernier décoché.
+- **Deux vues, un onglet** (`set_overview_columns`, retenu dans la session) :
+  le plan, et des **colonnes** — une par worktree, sa carte, ses terminaux qui
+  se partagent la hauteur, ses notes ; une plus étroite par dépôt pour le nœud
+  git. Ce sont les **mêmes nœuds peints par les mêmes fonctions**, placés par
+  une disposition au lieu d'une main : ce que le plan retient (replis, masqués,
+  hauteurs) vaut ici, et ce qui n'appartient qu'au plan — traîner un en-tête,
+  la poignée, les tailles prédéfinies d'un terminal — n'y existe pas. Un
+  terminal y mesure sa propre boîte (`set_canvas(None)`), et agrandir un nœud
+  lui donne toutes les colonnes (`overview_zoomed`). Sans liens, c'est le cadre
+  qui dit qu'un agent travaille ou attend — celui de la carte aussi, quand
+  aucun onglet d'agent n'est là.
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
   Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
   **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
