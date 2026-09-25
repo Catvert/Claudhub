@@ -45,6 +45,11 @@ use crate::tr;
 /// How often a flowing link moves: thirty frames a second is motion to the
 /// eye, and half what the display would ask — each one paints the screen.
 const FLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+/// How often a waiting link pulses, when nothing flows: a breath is slow,
+/// and a question can wait for hours — at half the frames.
+const PULSE_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
+/// A waiting link's breath, in seconds.
+const PULSE_PERIOD: f32 = 1.6;
 
 /// When the links started flowing, once: their phase is read off the clock,
 /// so a frame late is a step longer and not a slower march.
@@ -129,9 +134,9 @@ impl Element for Scaled {
 }
 
 /// A link as the canvas paints it: its two ends on screen, its kind,
-/// whether it leads into the worktree on show, and whether an agent is at
-/// work at its end.
-type Segment = (overview::Link, bool, bool);
+/// whether it leads into the worktree on show, and what the agent at its
+/// end is doing.
+type Segment = (overview::Link, bool, overview::Doing);
 
 /// What the pointer is dragging on the home screen.
 #[derive(Clone, Debug)]
@@ -382,13 +387,19 @@ impl ClaudhubApp {
         .absolute()
         .size_full();
 
-        // An agent at work flows along the link to it, and flowing needs
-        // frames nobody else asks for. Under a maximised node the links are
-        // under the veil: nothing to move.
+        // An agent at work flows along the link to it, one that waits
+        // pulses, and both need frames nobody else asks for. Under a
+        // maximised node the links are under the veil: nothing to move.
         let at_work = self.overview_at_work(&plan, cx);
-        self.overview_flow_wanted = self.overview_maximized.is_none()
-            && (!at_work.terminals.is_empty() || !at_work.cards.is_empty());
-        if self.overview_flow_wanted {
+        self.overview_flow_frame =
+            (self.overview_maximized.is_none() && !at_work.is_empty()).then(|| {
+                if at_work.flows() {
+                    FLOW_FRAME
+                } else {
+                    PULSE_FRAME
+                }
+            });
+        if self.overview_flow_frame.is_some() {
             self.tick_flow(cx);
         }
         let links = self.render_links(&plan, view, &at_work, cx);
@@ -1147,11 +1158,23 @@ impl ClaudhubApp {
 
     /// Where an agent is at work on the plane — see `overview::at_work`.
     ///
-    /// **Claude's own status first** (`busy` or `idle`, written for its pid):
-    /// the processor cannot tell a turn under way from a prompt being typed,
-    /// both burn it. Then the hooks' word for the terminal's session, then —
-    /// for another agent, or a Claude that writes no status — the guess.
+    /// **Claude's own status first** (`busy`, `waiting`, `idle`, written
+    /// for its pid): the processor cannot tell a turn under way from a prompt
+    /// being typed, both burn it. Then the hooks' word for the terminal's
+    /// session, then — for another agent, or a Claude that writes no status —
+    /// the guess.
     fn overview_at_work(&self, plan: &Plan, cx: &App) -> overview::AtWork {
+        use overview::Doing;
+        let claude_says = |status: &str| match status {
+            "busy" => Doing::Working,
+            "waiting" => Doing::Waiting,
+            _ => Doing::Rest,
+        };
+        let heard = |activity: &crate::agent::Activity| match activity {
+            crate::agent::Activity::Working => Doing::Working,
+            crate::agent::Activity::Waiting(_) => Doing::Waiting,
+            crate::agent::Activity::Idle | crate::agent::Activity::Finished => Doing::Rest,
+        };
         let status = |pid: Option<u32>, session: Option<&str>| {
             self.claude_processes
                 .iter()
@@ -1159,7 +1182,7 @@ impl ClaudhubApp {
                     pid == Some(process.pid) || session == Some(process.session.as_str())
                 })
                 .and_then(|process| process.status.as_deref())
-                .map(|status| status == "busy")
+                .map(claude_says)
         };
         let tiles: Vec<overview::AgentTile> = self
             .terminals
@@ -1188,62 +1211,75 @@ impl ClaudhubApp {
                     word: claude.or_else(|| {
                         session
                             .and_then(|session| self.agents.session(session))
-                            .map(|activity| *activity == crate::agent::Activity::Working)
+                            .map(heard)
                     }),
                 }
             })
             .collect();
         let cards: Vec<PathBuf> = plan.cards.iter().map(|card| card.path.clone()).collect();
-        let working: std::collections::HashSet<&Path> = plan
+        let worktrees: std::collections::HashMap<&Path, Doing> = plan
             .cards
             .iter()
-            .map(|card| card.path.as_path())
-            .filter(|path| {
-                // The Claudes of this worktree that say how they are: one of
-                // them busy is the answer, all idle too — the guess only
-                // speaks where none of them does.
-                let said: Vec<bool> = self
+            .map(|card| {
+                let path = card.path.as_path();
+                // The Claudes of this worktree that say how they are: the
+                // loudest of them is the answer, all idle too — the guess
+                // only speaks where none of them does.
+                let said: Vec<Doing> = self
                     .claude_processes
                     .iter()
                     .filter(|process| {
-                        crate::agent::owning_worktree(&cards, &process.cwd).as_deref()
-                            == Some(*path)
+                        crate::agent::owning_worktree(&cards, &process.cwd).as_deref() == Some(path)
                     })
                     .filter_map(|process| process.status.as_deref())
-                    .map(|status| status == "busy")
+                    .map(claude_says)
                     .collect();
-                if said.is_empty() {
-                    self.agents.get(path).is_some_and(|state| state.working)
+                let doing = if said.is_empty() {
+                    self.agents
+                        .get(path)
+                        .map(|state| heard(&state.activity))
+                        .unwrap_or(Doing::Rest)
+                } else if said.contains(&Doing::Waiting) {
+                    Doing::Waiting
+                } else if said.contains(&Doing::Working) {
+                    Doing::Working
                 } else {
-                    said.contains(&true)
-                }
+                    Doing::Rest
+                };
+                (path, doing)
             })
             .collect();
-        overview::at_work(&tiles, &working)
+        overview::at_work(&tiles, &worktrees)
     }
 
-    /// Asks for the frames a flowing link moves by, for as long as one
-    /// flows and the screen is up — the last frame that saw none ends it.
+    /// Asks for the frames a link moves by, for as long as one moves and the
+    /// screen is up — the last frame that saw none ends it. The spacing is
+    /// read again at every one: a pulse wants fewer than a flow.
     fn tick_flow(&mut self, cx: &mut Context<Self>) {
         if self.overview_flow_ticking {
             return;
         }
         self.overview_flow_ticking = true;
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(FLOW_FRAME).await;
-            let going = this
-                .update(cx, |this, cx| {
-                    let going = this.overview && this.overview_flow_wanted;
-                    if going {
-                        cx.notify();
-                    } else {
-                        this.overview_flow_ticking = false;
-                    }
-                    going
-                })
-                .unwrap_or(false);
-            if !going {
-                break;
+        cx.spawn(async move |this, cx| {
+            let mut frame = FLOW_FRAME;
+            loop {
+                cx.background_executor().timer(frame).await;
+                let next = this
+                    .update(cx, |this, cx| {
+                        let next = this.overview_flow_frame.filter(|_| this.overview);
+                        if next.is_some() {
+                            cx.notify();
+                        } else {
+                            this.overview_flow_ticking = false;
+                        }
+                        next
+                    })
+                    .ok()
+                    .flatten();
+                match next {
+                    Some(next) => frame = next,
+                    None => break,
+                }
             }
         })
         .detach();
@@ -1253,8 +1289,11 @@ impl ClaudhubApp {
     ///
     /// **A link to an agent at work flows**: dashes march from the card to
     /// the terminal and a comet runs down the line, in the colour the badge
-    /// gives work, over a glow. The phase is read off a clock and not
-    /// counted in frames, the frames being ours to skip.
+    /// gives work, over a glow. **One to an agent that waits pulses**, in the
+    /// colour the badge gives a question: the line breathes, and a beacon
+    /// pings where it meets the terminal — nothing travels, nothing is under
+    /// way. The phase is read off a clock and not counted in frames, the
+    /// frames being ours to skip.
     fn render_links(
         &self,
         plan: &Plan,
@@ -1268,20 +1307,21 @@ impl ClaudhubApp {
             .iter()
             .map(|link| {
                 let on = active.as_deref() == Some(link.worktree.as_path());
-                let flows = match &link.child {
-                    Node::Terminal(id) => at_work.terminals.contains(id),
-                    Node::Worktree(path) => at_work.cards.contains(path),
-                    Node::Git(_) | Node::Note(_) => false,
+                let doing = match &link.child {
+                    Node::Terminal(id) => at_work.terminals.get(id).copied(),
+                    Node::Worktree(path) => at_work.cards.get(path).copied(),
+                    Node::Git(_) | Node::Note(_) => None,
                 };
                 let mut link = link.clone();
                 link.from = view.point(link.from);
                 link.to = view.point(link.to);
-                (link, on, flows)
+                (link, on, doing.unwrap_or(overview::Doing::Rest))
             })
             .collect();
         let quiet = cx.theme().border;
         let lit = cx.theme().ring;
         let work = cx.theme().warning;
+        let asks = cx.theme().danger;
         let spark = gpui_kit::Hsla {
             l: (work.l + 0.25).min(0.95),
             ..work
@@ -1299,7 +1339,8 @@ impl ClaudhubApp {
             move |bounds, _, window, _| {
                 let at =
                     |(x, y): (f32, f32)| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
-                for (link, on, flows) in links {
+                for (link, on, doing) in links {
+                    let flows = doing != overview::Doing::Rest;
                     // What hangs from a card — a terminal, a note — is drawn
                     // finer than the tree itself: the branches are the shape,
                     // the rest is what the shape carries. Work is the
@@ -1317,6 +1358,24 @@ impl ClaudhubApp {
                         if let Some(path) = trace(&points, zoom, width, None, &at) {
                             window.paint_path(path, if on { lit } else { quiet });
                         }
+                        continue;
+                    }
+                    if doing == overview::Doing::Waiting {
+                        let breath = overview::breath(seconds, PULSE_PERIOD);
+                        if let Some(path) = trace(&points, zoom, width * 4., None, &at) {
+                            window.paint_path(path, asks.opacity(0.06 + 0.16 * breath));
+                        }
+                        if let Some(path) = trace(&points, zoom, width, None, &at) {
+                            window.paint_path(path, asks.opacity(0.5 + 0.5 * breath));
+                        }
+                        // The beacon: a dot on the terminal's edge, and a ring
+                        // leaving it and fading, once a breath.
+                        let end = at(points[3]);
+                        let dot = (3. * zoom).clamp(2.5, 4.5);
+                        let ping = (seconds / PULSE_PERIOD).fract();
+                        let ring = dot + ping * (10. * zoom).clamp(6., 14.);
+                        window.paint_quad(disc(end, ring, asks.opacity(0.45 * (1. - ping))));
+                        window.paint_quad(disc(end, dot, asks));
                         continue;
                     }
                     let length = overview::length(&points);
@@ -1347,6 +1406,20 @@ impl ClaudhubApp {
         .absolute()
         .size_full()
     }
+}
+
+/// A filled circle of `radius` around `centre`.
+fn disc(
+    centre: gpui_kit::Point<Pixels>,
+    radius: f32,
+    color: gpui_kit::Hsla,
+) -> gpui_kit::PaintQuad {
+    let side = px(radius * 2.);
+    gpui_kit::fill(
+        gpui_kit::Bounds::centered_at(centre, gpui_kit::size(side, side)),
+        color,
+    )
+    .corner_radii(px(radius))
 }
 
 /// A link's elbow as a stroke, its two corners rounded — all of it, or the

@@ -1117,9 +1117,9 @@ pub struct ClaudhubApp {
     /// The one worktree of that project the plane shows; `None` shows them
     /// all.
     pub(super) overview_worktree: Option<PathBuf>,
-    /// An agent is at work on the plane, as of the last frame: its links
-    /// flow, and want frames of their own.
-    pub(super) overview_flow_wanted: bool,
+    /// An agent is at work, or waits, on the plane as of the last frame: its
+    /// links move, and want frames of their own — this far apart.
+    pub(super) overview_flow_frame: Option<std::time::Duration>,
     /// The frames for them are being asked for.
     pub(super) overview_flow_ticking: bool,
     /// The Claude processes as they last wrote themselves down, status
@@ -1593,7 +1593,7 @@ impl ClaudhubApp {
             overview_all: false,
             overview_repo: None,
             overview_worktree: None,
-            overview_flow_wanted: false,
+            overview_flow_frame: None,
             overview_flow_ticking: false,
             claude_processes: Vec::new(),
             outlines: HashMap::new(),

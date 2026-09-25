@@ -695,6 +695,17 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
     plan
 }
 
+/// What an agent says it is doing, as a link shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Doing {
+    Rest,
+    /// A turn under way: the link flows.
+    Working,
+    /// It asks the user something: the link pulses, and louder than work —
+    /// the one state that cannot go on without a hand.
+    Waiting,
+}
+
 /// A terminal on the plane, as far as its agent goes.
 #[derive(Debug, Clone)]
 pub struct AgentTile<'a> {
@@ -702,57 +713,88 @@ pub struct AgentTile<'a> {
     pub worktree: &'a Path,
     /// It runs an agent: launched as one, or Claude typed at its prompt.
     pub agent: bool,
-    /// Whether its own agent says it is working — Claude's status for its
-    /// pid, or the hooks' word for its session — `None` when nothing speaks
-    /// for this terminal alone.
-    pub word: Option<bool>,
+    /// What its own agent says — Claude's status for its pid, or the hooks'
+    /// word for its session — `None` when nothing speaks for this terminal
+    /// alone.
+    pub word: Option<Doing>,
 }
 
-/// Where an agent is at work on the plane: the links that flow.
+/// Where an agent is at work, or waits, on the plane: the links that move.
+/// Nothing at rest is in either map.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AtWork {
-    /// The terminals it works in.
-    pub terminals: HashSet<u64>,
-    /// The worktrees it works in with no agent terminal on the plane to say
-    /// so — an agent started in a terminal of another program: their card's
-    /// link flows instead, or the work would not show at all.
-    pub cards: HashSet<PathBuf>,
+    /// The terminals, by id.
+    pub terminals: HashMap<u64, Doing>,
+    /// The worktrees with no agent terminal on the plane to say so — an
+    /// agent started in a terminal of another program: their card's link
+    /// moves instead, or the work would not show at all.
+    pub cards: HashMap<PathBuf, Doing>,
 }
 
-/// Which links flow, from what the agents say.
+impl AtWork {
+    pub fn is_empty(&self) -> bool {
+        self.terminals.is_empty() && self.cards.is_empty()
+    }
+
+    /// Something flows, and not only pulses: the frames it needs are
+    /// closer together.
+    pub fn flows(&self) -> bool {
+        self.terminals
+            .values()
+            .chain(self.cards.values())
+            .any(|doing| *doing == Doing::Working)
+    }
+}
+
+/// Which links move, and how, from what the agents say.
 ///
-/// A terminal's own session decides when it has one; the worktree's state
-/// only speaks for the agent terminals nothing names — and not when a named
-/// one already accounts for the work, the worktree's state being the loudest
-/// of its agents and not the sum. A shell with no agent in it never flows:
-/// the worktree working says nothing of a prompt beside it. And a card
-/// flows only where no agent terminal is on the plane: one that says it is
-/// at rest has said so, and the worktree's state — a guess from the
-/// processor, which typing a prompt burns — does not overrule it.
-pub fn at_work(tiles: &[AgentTile], working: &HashSet<&Path>) -> AtWork {
+/// A terminal's own agent decides when it speaks; the worktree's state —
+/// `worktrees`, what its agents say together, the loudest of them — only
+/// speaks for the agent terminals nothing names, and not when a named one
+/// already accounts for it. A shell with no agent in it never moves: the
+/// worktree says nothing of a prompt beside it. And a card moves only where
+/// no agent terminal is on the plane: one that says it is at rest has said
+/// so, and the worktree's state — a guess from the processor, which typing
+/// a prompt burns — does not overrule it.
+pub fn at_work(tiles: &[AgentTile], worktrees: &HashMap<&Path, Doing>) -> AtWork {
     let accounted = |worktree: &Path| {
-        tiles
-            .iter()
-            .any(|tile| tile.worktree == worktree && tile.word == Some(true))
+        tiles.iter().any(|tile| {
+            tile.worktree == worktree && tile.word.is_some_and(|word| word != Doing::Rest)
+        })
     };
-    let terminals: HashSet<u64> = tiles
+    let terminals: HashMap<u64, Doing> = tiles
         .iter()
-        .filter(|tile| match tile.word {
-            Some(word) => word,
-            None => tile.agent && working.contains(tile.worktree) && !accounted(tile.worktree),
+        .filter_map(|tile| {
+            let doing = match tile.word {
+                Some(word) => word,
+                None if tile.agent && !accounted(tile.worktree) => {
+                    worktrees.get(tile.worktree).copied().unwrap_or(Doing::Rest)
+                }
+                None => Doing::Rest,
+            };
+            (doing != Doing::Rest).then_some((tile.id, doing))
         })
-        .map(|tile| tile.id)
         .collect();
-    let cards = working
+    let cards = worktrees
         .iter()
-        .filter(|worktree| {
-            !tiles
-                .iter()
-                .any(|tile| tile.worktree == **worktree && tile.agent)
+        .filter(|(worktree, doing)| {
+            **doing != Doing::Rest
+                && !tiles
+                    .iter()
+                    .any(|tile| tile.worktree == **worktree && tile.agent)
         })
-        .map(|worktree| worktree.to_path_buf())
+        .map(|(worktree, doing)| (worktree.to_path_buf(), *doing))
         .collect();
     AtWork { terminals, cards }
+}
+
+/// A slow breath between 0 and 1, `period` seconds long: what a waiting
+/// link pulses by.
+pub fn breath(seconds: f32, period: f32) -> f32 {
+    if period <= 0. {
+        return 0.;
+    }
+    0.5 - 0.5 * (seconds / period * std::f32::consts::TAU).cos()
 }
 
 /// The length of a polyline.
@@ -1598,7 +1640,7 @@ mod tests {
         assert!(Tile::Small.size().0 < Tile::Medium.size().0);
     }
 
-    fn tile(id: u64, worktree: &str, agent: bool, word: Option<bool>) -> AgentTile<'_> {
+    fn tile(id: u64, worktree: &str, agent: bool, word: Option<Doing>) -> AgentTile<'_> {
         AgentTile {
             id,
             worktree: Path::new(worktree),
@@ -1607,56 +1649,85 @@ mod tests {
         }
     }
 
+    fn doing(pairs: &[(&'static str, Doing)]) -> HashMap<&'static Path, Doing> {
+        pairs
+            .iter()
+            .map(|&(path, doing)| (Path::new(path), doing))
+            .collect()
+    }
+
     #[test]
-    fn a_terminal_flows_by_its_own_word_first() {
-        let working: HashSet<&Path> = [Path::new("/a")].into();
-        // Two agents in one worktree, one named and working, the other
-        // named and done: only the first flows, the worktree's state being
-        // the loudest of the two.
+    fn a_terminal_moves_by_its_own_word_first() {
+        // Three agents in one worktree, each named: the one at work flows,
+        // the one asking pulses, the one done stays still — whatever the
+        // worktree's state, the loudest of the three, says.
+        let worktrees = doing(&[("/a", Doing::Waiting)]);
         let tiles = [
-            tile(1, "/a", true, Some(true)),
-            tile(2, "/a", true, Some(false)),
+            tile(1, "/a", true, Some(Doing::Working)),
+            tile(2, "/a", true, Some(Doing::Rest)),
+            tile(3, "/a", true, Some(Doing::Waiting)),
         ];
-        let found = at_work(&tiles, &working);
-        assert_eq!(found.terminals, HashSet::from([1]));
+        let found = at_work(&tiles, &worktrees);
+        assert_eq!(
+            found.terminals,
+            HashMap::from([(1, Doing::Working), (3, Doing::Waiting)])
+        );
         assert!(found.cards.is_empty());
+        assert!(found.flows());
     }
 
     #[test]
     fn an_unnamed_agent_terminal_takes_its_worktree_s_state() {
-        let working: HashSet<&Path> = [Path::new("/a")].into();
+        let worktrees = doing(&[("/a", Doing::Waiting)]);
         let tiles = [
             tile(1, "/a", true, None),
-            // A shell beside it has no agent in it, and does not flow.
+            // A shell beside it has no agent in it, and does not move.
             tile(2, "/a", false, None),
             // Nor does an agent of a worktree at rest.
             tile(3, "/b", true, None),
         ];
-        assert_eq!(at_work(&tiles, &working).terminals, HashSet::from([1]));
-        // A named terminal already accounts for the work: the unnamed one
+        let found = at_work(&tiles, &worktrees);
+        assert_eq!(found.terminals, HashMap::from([(1, Doing::Waiting)]));
+        // Only a pulse: frames can be further apart.
+        assert!(!found.flows());
+        // A named terminal already accounts for the worktree: the unnamed one
         // beside it is not lit by the same state twice.
-        let tiles = [tile(1, "/a", true, None), tile(4, "/a", true, Some(true))];
-        assert_eq!(at_work(&tiles, &working).terminals, HashSet::from([4]));
+        let tiles = [
+            tile(1, "/a", true, None),
+            tile(4, "/a", true, Some(Doing::Waiting)),
+        ];
+        let found = at_work(&tiles, &worktrees);
+        assert_eq!(found.terminals, HashMap::from([(4, Doing::Waiting)]));
     }
 
     #[test]
-    fn work_with_no_terminal_on_the_plane_flows_to_the_card() {
-        let working: HashSet<&Path> = [Path::new("/a"), Path::new("/b")].into();
+    fn work_with_no_terminal_on_the_plane_moves_the_card() {
+        let worktrees = doing(&[("/a", Doing::Working), ("/b", Doing::Waiting)]);
         let tiles = [tile(1, "/a", true, None), tile(2, "/b", false, None)];
-        let found = at_work(&tiles, &working);
-        assert_eq!(found.terminals, HashSet::from([1]));
-        assert_eq!(found.cards, HashSet::from([PathBuf::from("/b")]));
+        let found = at_work(&tiles, &worktrees);
+        assert_eq!(found.terminals, HashMap::from([(1, Doing::Working)]));
+        assert_eq!(
+            found.cards,
+            HashMap::from([(PathBuf::from("/b"), Doing::Waiting)])
+        );
     }
 
     #[test]
     fn an_agent_that_says_it_rests_is_not_overruled_by_the_guess() {
         // Typing a prompt burns processor, so the worktree is guessed at
-        // work; the agent itself says it is idle, and nothing flows — not
+        // work; the agent itself says it is idle, and nothing moves — not
         // its link, not the card's in its place.
-        let working: HashSet<&Path> = [Path::new("/a")].into();
-        let found = at_work(&[tile(1, "/a", true, Some(false))], &working);
-        assert!(found.terminals.is_empty());
-        assert!(found.cards.is_empty());
+        let worktrees = doing(&[("/a", Doing::Working)]);
+        let found = at_work(&[tile(1, "/a", true, Some(Doing::Rest))], &worktrees);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_breath_goes_from_nothing_to_full_and_back() {
+        assert!(breath(0., 2.).abs() < 1e-6);
+        assert!((breath(1., 2.) - 1.).abs() < 1e-6);
+        assert!(breath(2., 2.).abs() < 1e-5);
+        assert_eq!(breath(1., 0.), 0.);
     }
 
     #[test]
