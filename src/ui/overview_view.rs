@@ -51,10 +51,18 @@ const FLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 /// How often a waiting link pulses, when nothing flows: a breath is slow,
 /// and a question can wait for hours — at half the frames.
 const PULSE_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
-/// A worktree's column: a terminal's eighty columns, and a little.
+/// A worktree's column, when nothing measured says otherwise: a terminal's
+/// eighty columns, and a little.
 const COLUMN_WORKTREE: f32 = 640.;
+/// The least a worktree's column is given, filling or dragged: under it a
+/// terminal wraps everything it prints. Below it the row scrolls instead.
+const COLUMN_WORKTREE_MIN: f32 = 420.;
 /// A repository's column: its git node and its notes.
 const COLUMN_REPO: f32 = 320.;
+/// The least a repository's column is given.
+const COLUMN_REPO_MIN: f32 = 220.;
+/// The most any column is given by a drag.
+const COLUMN_MAX: f32 = 2400.;
 /// A waiting link's breath, in seconds.
 const PULSE_PERIOD: f32 = 1.6;
 
@@ -159,6 +167,8 @@ pub(super) enum Drag {
     Resize(Node, gpui_kit::Point<Pixels>),
     /// A node in a column, by its bottom edge: its height only.
     Height(Node, gpui_kit::Point<Pixels>),
+    /// A column, by its right edge — named by the node at its head.
+    Width(Node, gpui_kit::Point<Pixels>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -726,16 +736,24 @@ impl ClaudhubApp {
                         .chain(notes.iter().cloned().map(Node::Note))
                         .map(|node| self.column_node(&node, true, &at_work, window, cx))
                         .collect();
-                    let (key, scroll) = scroll_of(Node::Git(main.clone()));
-                    columns.push(column(&key, COLUMN_REPO, &scroll, nodes));
+                    let head = Node::Git(main.clone());
+                    let (key, scroll) = scroll_of(head.clone());
+                    // A repository's column is narrow unless told otherwise:
+                    // it holds a git node and notes, not a terminal.
+                    let width = self.column_width(&head, cx).or(Some(COLUMN_REPO));
+                    let grip = width_grip(head, cx);
+                    columns.push(column(&key, width, &scroll, nodes, grip));
                     for (path, terminals, notes) in checkouts {
                         let nodes: Vec<AnyElement> = std::iter::once(Node::Worktree(path.clone()))
                             .chain(terminals.iter().copied().map(Node::Terminal))
                             .chain(notes.iter().cloned().map(Node::Note))
                             .map(|node| self.column_node(&node, true, &at_work, window, cx))
                             .collect();
-                        let (key, scroll) = scroll_of(Node::Worktree(path.clone()));
-                        columns.push(column(&key, COLUMN_WORKTREE, &scroll, nodes));
+                        let head = Node::Worktree(path.clone());
+                        let (key, scroll) = scroll_of(head.clone());
+                        let width = self.column_width(&head, cx);
+                        let grip = width_grip(head, cx);
+                        columns.push(column(&key, width, &scroll, nodes, grip));
                     }
                 }
                 let row = h_flex()
@@ -783,6 +801,51 @@ impl ClaudhubApp {
             )
             .child(body)
             .into_any_element()
+    }
+
+    /// The width the hand gave a column, named by the node at its head.
+    fn column_width(&self, head: &Node, cx: &App) -> Option<f32> {
+        let store = super::store::Store::global(cx);
+        match head {
+            Node::Git(main) => store
+                .repos
+                .get(main)
+                .and_then(|repo| repo.home_column_width),
+            Node::Worktree(path) => store
+                .worktrees
+                .get(path)
+                .and_then(|worktree| worktree.home_column_width),
+            Node::Terminal(_) | Node::Note(_) => None,
+        }
+    }
+
+    /// Gives a column a width, or — `None` — lets it fill again.
+    fn set_column_width(&self, head: &Node, width: Option<f32>, cx: &mut App) {
+        super::store::Store::update_global(cx, |store| match head {
+            Node::Git(main) => {
+                store
+                    .repos
+                    .entry(main.clone())
+                    .or_default()
+                    .home_column_width = width;
+            }
+            Node::Worktree(path) => {
+                store
+                    .worktrees
+                    .entry(path.clone())
+                    .or_default()
+                    .home_column_width = width;
+            }
+            Node::Terminal(_) | Node::Note(_) => {}
+        });
+    }
+
+    /// The width a column was last drawn at, its bar's gutter left out —
+    /// read off its scroll, which measures the list it scrolls.
+    fn drawn_column_width(&self, head: &Node) -> Option<f32> {
+        let scroll = self.overview_column_scrolls.get(&column_key(head))?;
+        let width = f32::from(scroll.bounds().size.width - super::theme::scroll_gutter());
+        (width > 0.).then_some(width)
     }
 
     /// One node in a column — or, `in_column` false, filling the columns.
@@ -960,6 +1023,22 @@ impl ClaudhubApp {
                 }
                 Drag::Height(node, at)
             }
+            Drag::Width(head, last) => {
+                let (dx, _) = moved(last);
+                // A column that fills has no width of its own yet: it starts
+                // from the one it is drawn at.
+                let current = self
+                    .column_width(&head, cx)
+                    .or_else(|| self.drawn_column_width(&head))
+                    .unwrap_or(COLUMN_WORKTREE);
+                let least = match head {
+                    Node::Git(_) => COLUMN_REPO_MIN,
+                    _ => COLUMN_WORKTREE_MIN,
+                };
+                let width = (current + dx).clamp(least, COLUMN_MAX);
+                self.set_column_width(&head, Some(width), cx);
+                Drag::Width(head, at)
+            }
             Drag::Thumb(axis, last) => {
                 let (dx, dy) = moved(last);
                 let plan = self.overview_plan();
@@ -998,8 +1077,9 @@ impl ClaudhubApp {
                 let size = self.overview_hand.sizes.get(&node).copied();
                 (node, None, size)
             }
-            // A terminal's height lives no longer than the terminal.
-            Drag::Height(Node::Terminal(_), _) => return,
+            // A terminal's height lives no longer than the terminal, and a
+            // column's width was written to the store as it moved.
+            Drag::Height(Node::Terminal(_), _) | Drag::Width(..) => return,
             Drag::Height(node, _) => {
                 let size = self.overview_hand.sizes.get(&node).copied();
                 (node, None, size)
@@ -1212,6 +1292,7 @@ impl ClaudhubApp {
                             repo.home_offset = None;
                             repo.home_size = None;
                             repo.home_collapsed = false;
+                            repo.home_column_width = None;
                         }
                     }
                     Node::Worktree(path) => {
@@ -1220,6 +1301,7 @@ impl ClaudhubApp {
                             worktree.home_size = None;
                             worktree.home_collapsed = false;
                             worktree.home_hidden = false;
+                            worktree.home_column_width = None;
                         }
                     }
                     Node::Note(path) => {
@@ -1961,11 +2043,16 @@ fn column_key(head: &Node) -> String {
 /// are more — with a bar one can take, the wheel over a terminal being the
 /// terminal's. The bar has a gutter of its own at the column's right, so it
 /// never lies over a terminal: `width` is what the nodes get.
+///
+/// **Without a width, the column fills**: the columns that have none share
+/// what the row has left, never under `COLUMN_WORKTREE_MIN` — one worktree
+/// alone takes the screen, and five scroll sideways rather than squeeze.
 fn column(
     key: &str,
-    width: f32,
+    width: Option<f32>,
     scroll: &gpui_kit::ScrollHandle,
     nodes: Vec<AnyElement>,
+    grip: gpui_kit::Stateful<gpui_kit::Div>,
 ) -> AnyElement {
     let id = format!("overview-column-{key}");
     let gutter = super::theme::scroll_gutter();
@@ -1980,11 +2067,59 @@ fn column(
         .overflow_y_scroll()
         .children(nodes);
     div()
-        .flex_none()
-        .w(px(width) + gutter)
+        .relative()
         .h_full()
+        .map(|el| match width {
+            Some(width) => el.flex_none().w(px(width) + gutter),
+            None => el.flex_1().min_w(px(COLUMN_WORKTREE_MIN) + gutter),
+        })
         .child(super::scroll::vertical(id, scroll, list))
+        .child(grip)
         .into_any_element()
+}
+
+/// A column's right edge, taken to give it a width: a strip in the gap after
+/// it, lit under the pointer. A double click lets the column fill again —
+/// the one gesture back to where it started, and the one that asks nothing.
+fn width_grip(head: Node, cx: &Context<ClaudhubApp>) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let lit = cx.theme().ring.opacity(0.6);
+    let (press, reset) = (cx.entity().downgrade(), cx.entity().downgrade());
+    let (dragged, cleared) = (head.clone(), head.clone());
+    div()
+        .id(SharedString::from(format!("overview-width-{head:?}")))
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right(px(-10.))
+        .w(px(8.))
+        .rounded_full()
+        .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
+        .hover(move |style| style.bg(lit))
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tr!("overview-column-width-hint"))
+                .build(window, cx)
+        })
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            cx.stop_propagation();
+            if let Some(app) = press.upgrade() {
+                let head = dragged.clone();
+                app.update(cx, |this, _| {
+                    this.overview_drag = Some(Drag::Width(head, event.position));
+                });
+            }
+        })
+        .on_click(move |event, _, cx| {
+            if event.click_count() < 2 {
+                return;
+            }
+            if let Some(app) = reset.upgrade() {
+                let head = cleared.clone();
+                app.update(cx, |this, cx| {
+                    this.set_column_width(&head, None, cx);
+                    cx.notify();
+                });
+            }
+        })
 }
 
 /// A node's bottom edge in a column, taken to give it another height: a

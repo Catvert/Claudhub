@@ -632,7 +632,13 @@ worktree.
   seule**, avec une barre qu'on attrape (la molette sur un terminal est au
   terminal), et chaque nœud a sa hauteur, réglée par son bord bas : celle du
   plan pour une carte ou une note, une à lui pour un terminal
-  (`column_height`), la largeur d'une colonne n'étant pas celle d'une carte. Ce sont les **mêmes nœuds peints par les mêmes fonctions**, placés par
+  (`column_height`), la largeur d'une colonne n'étant pas celle d'une carte.
+  **Les colonnes de worktree remplissent la largeur** qu'elles se partagent,
+  jamais sous un minimum (la rangée défile alors) ; le bord droit d'une colonne
+  se tire pour lui donner la sienne, retenue dans le magasin, et un double-clic
+  la rend à l'espace. Une colonne se nomme par le **nœud** à sa tête
+  (`column_key`) : celle d'un dépôt et celle de son checkout principal ont le
+  même chemin, et partager un défilement le bloquait à zéro. Ce sont les **mêmes nœuds peints par les mêmes fonctions**, placés par
   une disposition au lieu d'une main : ce que le plan retient (replis, masqués,
   hauteurs) vaut ici, et ce qui n'appartient qu'au plan — traîner un en-tête,
   la poignée, les tailles prédéfinies d'un terminal — n'y existe pas. Un
