@@ -620,7 +620,9 @@ worktree.
   Ctrl+molette zoome autour du pointeur ; un terminal laisse passer ce cran
   (`set_canvas`), sinon il changerait la police de tous.
 - **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
-  worktrees d'un code ne se lisent pas parmi ceux d'un autre.
+  worktrees d'un code ne se lisent pas parmi ceux d'un autre. Dans ce projet,
+  un second sélecteur montre **un worktree ou tous** ; le nœud git et les notes
+  du dépôt restent, étant à chacun. Changer de projet le remet à « tous ».
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
   Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
   **versionné**, pour qu'une note ou une revue voyage avec sa branche et se

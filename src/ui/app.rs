@@ -1114,6 +1114,9 @@ pub struct ClaudhubApp {
     pub(super) overview_all: bool,
     /// The project picked in the corner; `None` follows the active worktree.
     pub(super) overview_repo: Option<PathBuf>,
+    /// The one worktree of that project the plane shows; `None` shows them
+    /// all.
+    pub(super) overview_worktree: Option<PathBuf>,
     /// What the home screen's cards say of each branch — `git::outline`.
     pub(super) outlines: HashMap<PathBuf, crate::git::Outline>,
     /// The views the user has hidden, by panel name.
@@ -1581,6 +1584,7 @@ impl ClaudhubApp {
             overview_loaded: false,
             overview_all: false,
             overview_repo: None,
+            overview_worktree: None,
             outlines: HashMap::new(),
             zen_folded: Vec::new(),
             settings_form,
