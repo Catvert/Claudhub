@@ -55,9 +55,6 @@ const PULSE_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 const COLUMN_WORKTREE: f32 = 640.;
 /// A repository's column: its git node and its notes.
 const COLUMN_REPO: f32 = 320.;
-/// The least height a terminal gets in a column: below it the column
-/// scrolls, a program being unreadable in a strip.
-const COLUMN_TERMINAL_MIN: f32 = 260.;
 /// A waiting link's breath, in seconds.
 const PULSE_PERIOD: f32 = 1.6;
 
@@ -160,6 +157,8 @@ pub(super) enum Drag {
     Thumb(Axis, gpui_kit::Point<Pixels>),
     /// A node, by its bottom-right corner.
     Resize(Node, gpui_kit::Point<Pixels>),
+    /// A node in a column, by its bottom edge: its height only.
+    Height(Node, gpui_kit::Point<Pixels>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -678,6 +677,22 @@ impl ClaudhubApp {
             })
             .collect();
 
+        // Each column keeps its scroll from one frame to the next; the ones
+        // gone take theirs with them.
+        let keys: Vec<PathBuf> = projects
+            .iter()
+            .flat_map(|(main, _, checkouts)| {
+                std::iter::once(main.clone())
+                    .chain(checkouts.iter().map(|(path, _, _)| path.clone()))
+            })
+            .collect();
+        self.overview_column_scrolls
+            .retain(|key, _| keys.contains(key));
+        for key in &keys {
+            self.overview_column_scrolls.entry(key.clone()).or_default();
+        }
+        let scroll_of = |key: &PathBuf| self.overview_column_scrolls[key].clone();
+
         let body: AnyElement = match self.overview_zoomed.clone() {
             Some(node) => div()
                 .flex_1()
@@ -704,27 +719,33 @@ impl ClaudhubApp {
                         .chain(notes.iter().cloned().map(Node::Note))
                         .map(|node| self.column_node(&node, true, &at_work, window, cx))
                         .collect();
-                    let id = ("overview-column", columns.len());
-                    columns.push(column(id, COLUMN_REPO, nodes).into_any_element());
+                    columns.push(column(main, COLUMN_REPO, &scroll_of(main), nodes));
                     for (path, terminals, notes) in checkouts {
                         let nodes: Vec<AnyElement> = std::iter::once(Node::Worktree(path.clone()))
                             .chain(terminals.iter().copied().map(Node::Terminal))
                             .chain(notes.iter().cloned().map(Node::Note))
                             .map(|node| self.column_node(&node, true, &at_work, window, cx))
                             .collect();
-                        let id = ("overview-column", columns.len());
-                        columns.push(column(id, COLUMN_WORKTREE, nodes).into_any_element());
+                        columns.push(column(path, COLUMN_WORKTREE, &scroll_of(path), nodes));
                     }
                 }
-                h_flex()
+                let row = h_flex()
                     .id("overview-columns")
-                    .flex_1()
-                    .min_h_0()
+                    .track_scroll(&self.overview_columns_scroll)
+                    .size_full()
                     .p_3()
                     .gap_3()
                     .items_start()
                     .overflow_x_scroll()
-                    .children(columns)
+                    .children(columns);
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(super::scroll::both(
+                        "overview-columns-bar",
+                        &self.overview_columns_scroll,
+                        row,
+                    ))
                     .into_any_element()
             }
         };
@@ -735,6 +756,14 @@ impl ClaudhubApp {
             .min_w_0()
             .overflow_hidden()
             .bg(super::theme::gutter(cx))
+            // A node's height is dragged from its bottom edge, and the drag
+            // is followed from here — the pointer leaves the edge at once.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.overview_dragged(event, cx);
+            }))
+            .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
+                this.end_overview_drag(cx);
+            }))
             .child(
                 h_flex()
                     .flex_none()
@@ -749,10 +778,11 @@ impl ClaudhubApp {
 
     /// One node in a column — or, `in_column` false, filling the columns.
     ///
-    /// Terminals share what the column has left, never under a height a
-    /// program can be read in; the other nodes keep the height the hand gave
-    /// them on the plane, or the one they start at there. Folded, any node is
-    /// its head.
+    /// Each node has its height, and the column scrolls when they add up to
+    /// more than the screen: a terminal its own — a column's width is not a
+    /// card's — the others the one the hand gave them on the plane, or the
+    /// one they start at there. Folded, any node is its head. Unfolded, its
+    /// bottom edge is a grip for its height.
     fn column_node(
         &self,
         node: &Node,
@@ -773,6 +803,7 @@ impl ClaudhubApp {
                     .unwrap_or(start.1)
             }
         };
+        let grip = (in_column && !folded).then(|| height_grip(node.clone(), cx));
         let boxed = |height: f32, child: AnyElement| {
             div()
                 .relative()
@@ -780,6 +811,7 @@ impl ClaudhubApp {
                 .when(!in_column, |el| el.size_full())
                 .when(in_column, |el| el.flex_none().h(px(height)))
                 .child(child)
+                .children(grip)
                 .into_any_element()
         };
         match node {
@@ -814,20 +846,13 @@ impl ClaudhubApp {
                     .get(id)
                     .copied()
                     .unwrap_or(overview::Doing::Rest);
+                let height = if folded {
+                    overview::HEAD
+                } else {
+                    terminal.column_height
+                };
                 let tile = self.render_tile(terminal, None, 1., doing, window, cx);
-                if !in_column {
-                    return div().size_full().child(tile).into_any_element();
-                }
-                if folded {
-                    return boxed(overview::HEAD, tile);
-                }
-                v_flex()
-                    .relative()
-                    .w_full()
-                    .flex_1()
-                    .min_h(px(COLUMN_TERMINAL_MIN))
-                    .child(tile)
-                    .into_any_element()
+                boxed(height, tile)
             }
         }
     }
@@ -888,11 +913,7 @@ impl ClaudhubApp {
                         }
                     }
                     Node::Git(_) | Node::Worktree(_) | Node::Note(_) => {
-                        let (default, min) = match node {
-                            Node::Git(_) => (overview::GIT, overview::MIN_GIT),
-                            Node::Note(_) => (overview::NOTE, overview::MIN_NOTE),
-                            _ => (overview::CARD, overview::MIN_CARD),
-                        };
+                        let (default, min) = overview::start_and_least(&node);
                         let size = self
                             .overview_hand
                             .sizes
@@ -902,6 +923,33 @@ impl ClaudhubApp {
                     }
                 }
                 Drag::Resize(node, at)
+            }
+            Drag::Height(node, last) => {
+                let (_, dy) = moved(last);
+                match &node {
+                    Node::Terminal(id) => {
+                        if let Some(terminal) = self
+                            .terminals
+                            .iter_mut()
+                            .find(|t| t.view.entity_id().as_u64() == *id)
+                        {
+                            terminal.column_height =
+                                (terminal.column_height + dy).max(overview::MIN_COLUMN_TILE);
+                        }
+                    }
+                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) => {
+                        // The plane's own size, height only: what one gives a
+                        // note here is what it has there.
+                        let (default, min) = overview::start_and_least(&node);
+                        let size = self
+                            .overview_hand
+                            .sizes
+                            .entry(node.clone())
+                            .or_insert(default);
+                        size.1 = (size.1 + dy).max(min.1);
+                    }
+                }
+                Drag::Height(node, at)
             }
             Drag::Thumb(axis, last) => {
                 let (dx, dy) = moved(last);
@@ -938,6 +986,12 @@ impl ClaudhubApp {
                 (node, offset, None)
             }
             Drag::Resize(node, _) => {
+                let size = self.overview_hand.sizes.get(&node).copied();
+                (node, None, size)
+            }
+            // A terminal's height lives no longer than the terminal.
+            Drag::Height(Node::Terminal(_), _) => return,
+            Drag::Height(node, _) => {
                 let size = self.overview_hand.sizes.get(&node).copied();
                 (node, None, size)
             }
@@ -1879,20 +1933,57 @@ fn outline(
     path.build().ok()
 }
 
-/// A column of nodes, as tall as the screen, scrolling when they are more.
+/// A column of nodes, as tall as the screen, scrolling on its own when they
+/// are more — with a bar one can take, the wheel over a terminal being the
+/// terminal's.
 fn column(
-    id: (&'static str, usize),
+    key: &Path,
     width: f32,
+    scroll: &gpui_kit::ScrollHandle,
     nodes: Vec<AnyElement>,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
-    v_flex()
-        .id(id)
+) -> AnyElement {
+    let id = format!("overview-column-{}", key.display());
+    let list = v_flex()
+        .id(SharedString::from(format!("{id}-list")))
+        .track_scroll(scroll)
+        .size_full()
+        .gap_2()
+        // Room under the last node for its grip.
+        .pb_2()
+        .overflow_y_scroll()
+        .children(nodes);
+    div()
         .flex_none()
         .w(px(width))
         .h_full()
-        .gap_2()
-        .overflow_y_scroll()
-        .children(nodes)
+        .child(super::scroll::vertical(id, scroll, list))
+        .into_any_element()
+}
+
+/// A node's bottom edge in a column, taken to give it another height: a
+/// strip in the gap under it, lit under the pointer.
+fn height_grip(node: Node, cx: &Context<ClaudhubApp>) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let lit = cx.theme().ring.opacity(0.6);
+    let app = cx.entity().downgrade();
+    div()
+        .id(SharedString::from(format!("overview-height-{node:?}")))
+        .absolute()
+        .left_2()
+        .right_2()
+        .bottom(px(-7.))
+        .h(px(6.))
+        .rounded_full()
+        .cursor(gpui_kit::CursorStyle::ResizeUpDown)
+        .hover(move |style| style.bg(lit))
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            cx.stop_propagation();
+            if let Some(app) = app.upgrade() {
+                let node = node.clone();
+                app.update(cx, |this, _| {
+                    this.overview_drag = Some(Drag::Height(node, event.position));
+                });
+            }
+        })
 }
 
 /// A row of a ticked list.

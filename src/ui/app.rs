@@ -1123,6 +1123,11 @@ pub struct ClaudhubApp {
     pub(super) overview_columns: bool,
     /// The one node the columns show, filling them — their « maximise ».
     pub(super) overview_zoomed: Option<crate::ui::overview::Node>,
+    /// Each column's own vertical scroll, by the path it shows — a repository
+    /// or a worktree.
+    pub(super) overview_column_scrolls: HashMap<PathBuf, gpui_kit::ScrollHandle>,
+    /// The row of columns' horizontal scroll.
+    pub(super) overview_columns_scroll: gpui_kit::ScrollHandle,
     /// An agent is at work, or waits, on the plane as of the last frame: its
     /// links move, and want frames of their own — this far apart.
     pub(super) overview_flow_frame: Option<std::time::Duration>,
@@ -1601,6 +1606,8 @@ impl ClaudhubApp {
             overview_worktrees: Vec::new(),
             overview_columns: crate::ui::store::Store::global(cx).session.home_columns,
             overview_zoomed: None,
+            overview_column_scrolls: HashMap::new(),
+            overview_columns_scroll: gpui_kit::ScrollHandle::new(),
             overview_flow_frame: None,
             overview_flow_ticking: false,
             claude_processes: Vec::new(),
