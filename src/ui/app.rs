@@ -1123,9 +1123,8 @@ pub struct ClaudhubApp {
     pub(super) overview_columns: bool,
     /// The one node the columns show, filling them — their « maximise ».
     pub(super) overview_zoomed: Option<crate::ui::overview::Node>,
-    /// Each column's own vertical scroll, by the path it shows — a repository
-    /// or a worktree.
-    pub(super) overview_column_scrolls: HashMap<PathBuf, gpui_kit::ScrollHandle>,
+    /// Each column's own vertical scroll, by `overview_view::column_key`.
+    pub(super) overview_column_scrolls: HashMap<String, gpui_kit::ScrollHandle>,
     /// The row of columns' horizontal scroll.
     pub(super) overview_columns_scroll: gpui_kit::ScrollHandle,
     /// An agent is at work, or waits, on the plane as of the last frame: its
