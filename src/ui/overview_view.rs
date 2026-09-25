@@ -30,7 +30,7 @@ use gpui_kit::component::{
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     popover::Popover,
-    v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
+    v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _, WindowExt as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Element, Focusable as _,
@@ -51,6 +51,13 @@ const FLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 /// How often a waiting link pulses, when nothing flows: a breath is slow,
 /// and a question can wait for hours — at half the frames.
 const PULSE_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
+/// A worktree's column: a terminal's eighty columns, and a little.
+const COLUMN_WORKTREE: f32 = 640.;
+/// A repository's column: its git node and its notes.
+const COLUMN_REPO: f32 = 320.;
+/// The least height a terminal gets in a column: below it the column
+/// scrolls, a program being unreadable in a strip.
+const COLUMN_TERMINAL_MIN: f32 = 260.;
 /// A waiting link's breath, in seconds.
 const PULSE_PERIOD: f32 = 1.6;
 
@@ -300,10 +307,13 @@ impl ClaudhubApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         // The places kept from the last session, once — the screen may come
         // up with the window, before any toggle has read them.
         self.load_overview_places(cx);
+        if self.overview_columns {
+            return self.render_overview_columns(window, cx);
+        }
         let mut plan = self.overview_plan();
         // A node came or went since the last frame: what was on screen stays
         // where it stood — see `overview::hold`.
@@ -441,8 +451,14 @@ impl ClaudhubApp {
                     .get(&id.as_u64())
                     .copied()
                     .unwrap_or(overview::Doing::Rest);
-                let element =
-                    self.render_tile(terminal, view.screen(rect), view.zoom, doing, window, cx);
+                let element = self.render_tile(
+                    terminal,
+                    Some(view.screen(rect)),
+                    view.zoom,
+                    doing,
+                    window,
+                    cx,
+                );
                 Some((Node::Terminal(id.as_u64()), element))
             })
             .collect();
@@ -578,8 +594,242 @@ impl ClaudhubApp {
                 )
             })
             .children(bars)
-            .child(self.render_project_picker(cx))
+            .child(
+                div()
+                    .absolute()
+                    .top_3()
+                    .right_3()
+                    .child(self.render_overview_toolbar(cx)),
+            )
             .child(self.render_zoom_bar(view, cx))
+            .into_any_element()
+    }
+
+    /// The home screen as columns: one per worktree, its card on top, its
+    /// terminals under it sharing the height, then its notes — and before a
+    /// project's worktrees, a narrower one for the repository: its git node
+    /// and its notes. The same nodes as the plane, painted by the same
+    /// functions, only placed by a layout instead of a hand.
+    ///
+    /// **What the plane's links said, the boxes say**: an agent at work or
+    /// waiting dresses its terminal's outline, and — with no agent terminal
+    /// on show — its card's.
+    fn render_overview_columns(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let plan = self.overview_plan();
+        let at_work = self.overview_at_work(&plan, cx);
+        self.overview_flow_frame = (!at_work.is_empty()).then(|| {
+            if at_work.flows() {
+                FLOW_FRAME
+            } else {
+                PULSE_FRAME
+            }
+        });
+        if self.overview_flow_frame.is_some() {
+            self.tick_flow(cx);
+        }
+        // The terminals measure the box they are given, as in the dock.
+        for terminal in &self.terminals {
+            terminal.view.update(cx, |view, _| view.set_canvas(None));
+        }
+        let hidden = self.overview_hand.hidden.clone();
+        // What the columns hold, owned: the plane's groups, in the plane's
+        // order — a worktree under the one it branched from comes after it.
+        type Checkouts = Vec<(PathBuf, Vec<u64>, Vec<PathBuf>)>;
+        let projects: Vec<(PathBuf, Vec<PathBuf>, Checkouts)> = self
+            .overview_groups()
+            .into_iter()
+            .map(|group| {
+                let mut checkouts: Checkouts = group
+                    .checkouts
+                    .iter()
+                    .filter(|checkout| {
+                        !hidden.contains(&Node::Worktree(checkout.path.to_path_buf()))
+                    })
+                    .map(|checkout| {
+                        (
+                            checkout.path.to_path_buf(),
+                            checkout.terminals.iter().map(|(id, _)| *id).collect(),
+                            checkout
+                                .notes
+                                .iter()
+                                .filter(|note| !hidden.contains(&Node::Note((*note).clone())))
+                                .cloned()
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                checkouts.sort_by_key(|(path, _, _)| {
+                    plan.cards
+                        .iter()
+                        .position(|card| &card.path == path)
+                        .unwrap_or(usize::MAX)
+                });
+                let notes = group
+                    .notes
+                    .iter()
+                    .filter(|note| !hidden.contains(&Node::Note((*note).clone())))
+                    .cloned()
+                    .collect();
+                (group.main.to_path_buf(), notes, checkouts)
+            })
+            .collect();
+
+        let body: AnyElement = match self.overview_zoomed.clone() {
+            Some(node) => div()
+                .flex_1()
+                .min_h_0()
+                .p_3()
+                .child(
+                    v_flex()
+                        .size_full()
+                        .child(self.column_node(&node, false, &at_work, window, cx)),
+                )
+                .into_any_element(),
+            None if projects.is_empty() => v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr!("overview-empty"))
+                .into_any_element(),
+            None => {
+                let mut columns: Vec<AnyElement> = Vec::new();
+                for (main, notes, checkouts) in &projects {
+                    let nodes: Vec<AnyElement> = std::iter::once(Node::Git(main.clone()))
+                        .chain(notes.iter().cloned().map(Node::Note))
+                        .map(|node| self.column_node(&node, true, &at_work, window, cx))
+                        .collect();
+                    let id = ("overview-column", columns.len());
+                    columns.push(column(id, COLUMN_REPO, nodes).into_any_element());
+                    for (path, terminals, notes) in checkouts {
+                        let nodes: Vec<AnyElement> = std::iter::once(Node::Worktree(path.clone()))
+                            .chain(terminals.iter().copied().map(Node::Terminal))
+                            .chain(notes.iter().cloned().map(Node::Note))
+                            .map(|node| self.column_node(&node, true, &at_work, window, cx))
+                            .collect();
+                        let id = ("overview-column", columns.len());
+                        columns.push(column(id, COLUMN_WORKTREE, nodes).into_any_element());
+                    }
+                }
+                h_flex()
+                    .id("overview-columns")
+                    .flex_1()
+                    .min_h_0()
+                    .p_3()
+                    .gap_3()
+                    .items_start()
+                    .overflow_x_scroll()
+                    .children(columns)
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .id("overview")
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
+            .bg(super::theme::gutter(cx))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .justify_end()
+                    .px_3()
+                    .pt_3()
+                    .child(self.render_overview_toolbar(cx)),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    /// One node in a column — or, `in_column` false, filling the columns.
+    ///
+    /// Terminals share what the column has left, never under a height a
+    /// program can be read in; the other nodes keep the height the hand gave
+    /// them on the plane, or the one they start at there. Folded, any node is
+    /// its head.
+    fn column_node(
+        &self,
+        node: &Node,
+        in_column: bool,
+        at_work: &overview::AtWork,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let folded = self.overview_hand.collapsed.contains(node);
+        let kept = |start: (f32, f32)| {
+            if folded {
+                overview::HEAD
+            } else {
+                self.overview_hand
+                    .sizes
+                    .get(node)
+                    .map(|size| size.1)
+                    .unwrap_or(start.1)
+            }
+        };
+        let boxed = |height: f32, child: AnyElement| {
+            div()
+                .relative()
+                .w_full()
+                .when(!in_column, |el| el.size_full())
+                .when(in_column, |el| el.flex_none().h(px(height)))
+                .child(child)
+                .into_any_element()
+        };
+        match node {
+            Node::Git(main) => boxed(kept(overview::GIT), self.render_git_node(main, 1., cx)),
+            Node::Note(path) => boxed(kept(overview::NOTE), self.render_home_note(path, 1., cx)),
+            Node::Worktree(path) => {
+                let doing = at_work
+                    .cards
+                    .get(path)
+                    .copied()
+                    .unwrap_or(overview::Doing::Rest);
+                let card = div()
+                    .relative()
+                    .size_full()
+                    .child(self.render_worktree_card(path, 1., cx))
+                    .when(doing != overview::Doing::Rest, |el| {
+                        el.child(tile_outline(doing, false, 1., cx.theme()))
+                    })
+                    .into_any_element();
+                boxed(kept(overview::CARD), card)
+            }
+            Node::Terminal(id) => {
+                let Some(terminal) = self
+                    .terminals
+                    .iter()
+                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)
+                else {
+                    return div().into_any_element();
+                };
+                let doing = at_work
+                    .terminals
+                    .get(id)
+                    .copied()
+                    .unwrap_or(overview::Doing::Rest);
+                let tile = self.render_tile(terminal, None, 1., doing, window, cx);
+                if !in_column {
+                    return div().size_full().child(tile).into_any_element();
+                }
+                if folded {
+                    return boxed(overview::HEAD, tile);
+                }
+                v_flex()
+                    .relative()
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(COLUMN_TERMINAL_MIN))
+                    .child(tile)
+                    .into_any_element()
+            }
+        }
     }
 
     /// A step of whatever drag is under way.
@@ -981,7 +1231,7 @@ impl ClaudhubApp {
     /// Which projects the plane shows, top right: one at a time by default,
     /// so that five worktrees of one code are not read among a dozen of
     /// another's — and as many as one ticks.
-    fn render_project_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_overview_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let shown: Vec<PathBuf> = self
             .overview_repos()
             .iter()
@@ -1020,10 +1270,8 @@ impl ClaudhubApp {
                 }
             }),
         };
+        let columns = self.overview_columns;
         h_flex()
-            .absolute()
-            .top_3()
-            .right_3()
             .gap_1()
             .p_1()
             .rounded(cx.theme().radius_lg)
@@ -1032,6 +1280,29 @@ impl ClaudhubApp {
             .bg(cx.theme().background)
             .shadow_md()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // The two ways to look at the same things, as tabs: the plane,
+            // and the columns.
+            .child(
+                Button::new("overview-mode-canvas")
+                    .ghost()
+                    .small()
+                    .icon(icon("grid-3x3"))
+                    .label(tr!("overview-mode-canvas"))
+                    .tooltip(tr!("overview-mode-hint"))
+                    .selected(!columns)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_overview_columns(false, cx))),
+            )
+            .child(
+                Button::new("overview-mode-columns")
+                    .ghost()
+                    .small()
+                    .icon(icon("square-kanban"))
+                    .label(tr!("overview-mode-columns"))
+                    .tooltip(tr!("overview-mode-hint"))
+                    .selected(columns)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_overview_columns(true, cx))),
+            )
+            .child(div().mx_0p5().w(px(1.)).h(px(18.)).bg(cx.theme().border))
             .child(pick_list(
                 "overview-project",
                 "folder",
@@ -1186,8 +1457,26 @@ impl ClaudhubApp {
         self.reframe(cx);
     }
 
+    /// Switches the home screen between its plane and its columns, and
+    /// remembers which.
+    fn set_overview_columns(&mut self, columns: bool, cx: &mut Context<Self>) {
+        if self.overview_columns == columns {
+            return;
+        }
+        self.overview_columns = columns;
+        self.overview_drag = None;
+        super::store::Store::update_global(cx, |store| store.session.home_columns = columns);
+        // The terminals measure their own box in the columns, and are told
+        // their card's grid again on the plane's next frame.
+        for terminal in &self.terminals {
+            terminal.view.update(cx, |view, _| view.set_canvas(None));
+        }
+        self.reframe(cx);
+    }
+
     /// Another plane to frame, as after picking another project.
     fn reframe(&mut self, cx: &mut Context<Self>) {
+        self.overview_zoomed = None;
         self.give_back_maximized();
         self.overview_fitted = false;
         cx.notify();
@@ -1588,6 +1877,22 @@ fn outline(
     path.line_to(at(x, y + r));
     path.cubic_bezier_to(at(x + r, y), at(x, y + r - k), at(x + r - k, y));
     path.build().ok()
+}
+
+/// A column of nodes, as tall as the screen, scrolling when they are more.
+fn column(
+    id: (&'static str, usize),
+    width: f32,
+    nodes: Vec<AnyElement>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    v_flex()
+        .id(id)
+        .flex_none()
+        .w(px(width))
+        .h_full()
+        .gap_2()
+        .overflow_y_scroll()
+        .children(nodes)
 }
 
 /// A row of a ticked list.
@@ -2191,7 +2496,7 @@ impl ClaudhubApp {
     fn render_tile(
         &self,
         terminal: &super::terminal_view::OpenTerminal,
-        rect: Rect,
+        rect: Option<Rect>,
         zoom: f32,
         doing: overview::Doing,
         window: &mut Window,
@@ -2242,7 +2547,9 @@ impl ClaudhubApp {
                     .as_ref()
                     .map(|agent| super::topbar::activity_badge(agent, px(10_000.), cx)),
             )
-            .when(detail, |el| {
+            // The preset sizes are the plane's: a column gives its terminals
+            // the room it has.
+            .when(detail && rect.is_some(), |el| {
                 el.child(
                     Button::new(("overview-tile-size", id))
                         .ghost()
@@ -2264,9 +2571,13 @@ impl ClaudhubApp {
                         })),
                 )
             });
+        let frame = match rect {
+            Some(rect) => placed(rect),
+            None => div().relative().size_full(),
+        };
         Scaled {
             rem,
-            child: placed(rect)
+            child: frame
                 // Selecting text in a terminal is a drag the plane must not
                 // take for its own.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2558,7 +2869,11 @@ pub(super) fn grab(
         cx.stop_propagation();
         if let Some(app) = app.upgrade() {
             app.update(cx, |this, _| {
-                this.overview_drag = Some(Drag::Node(node.clone(), event.position));
+                // The columns place their nodes themselves: nothing to drag,
+                // and a drag left pending would move the node on the plane.
+                if !this.overview_columns {
+                    this.overview_drag = Some(Drag::Node(node.clone(), event.position));
+                }
             });
         }
     }
@@ -2572,8 +2887,10 @@ impl ClaudhubApp {
         node: Node,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::Stateful<gpui_kit::Div>> {
-        (!self.overview_hand.collapsed.contains(&node) && self.overview_maximized.is_none())
-            .then(|| corner(cx.entity().downgrade(), node, cx))
+        (!self.overview_columns
+            && !self.overview_hand.collapsed.contains(&node)
+            && self.overview_maximized.is_none())
+        .then(|| corner(cx.entity().downgrade(), node, cx))
     }
 
     /// A window's three buttons, at the end of a node's head: fold to the
@@ -2581,10 +2898,13 @@ impl ClaudhubApp {
     /// root, and a plane without it would be a plane without a project.
     pub(super) fn window_controls(&self, node: Node, cx: &mut Context<Self>) -> impl IntoElement {
         let folded = self.overview_hand.collapsed.contains(&node);
-        let maximized = self
-            .overview_maximized
-            .as_ref()
-            .is_some_and(|maximized| maximized.node == node);
+        let maximized = if self.overview_columns {
+            self.overview_zoomed.as_ref() == Some(&node)
+        } else {
+            self.overview_maximized
+                .as_ref()
+                .is_some_and(|maximized| maximized.node == node)
+        };
         let closable = !matches!(node, Node::Git(_));
         let key = format!("{node:?}");
         let (fold, grow, close) = (node.clone(), node.clone(), node);
@@ -2653,6 +2973,16 @@ impl ClaudhubApp {
     /// columns bigger. The tree makes way around it, and the view centres on
     /// it. The second press gives back the size and the view from before.
     fn toggle_maximize(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
+        // In the columns, the node fills them, and the second press gives
+        // them back: there is no size of its own to grow.
+        if self.overview_columns {
+            self.overview_zoomed = match &self.overview_zoomed {
+                Some(zoomed) if zoomed == node => None,
+                _ => Some(node.clone()),
+            };
+            cx.notify();
+            return;
+        }
         let view_before = match self.overview_maximized.take() {
             Some(maximized) => {
                 self.set_node_size(&maximized.node, maximized.size);
