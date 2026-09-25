@@ -788,6 +788,77 @@ pub fn at_work(tiles: &[AgentTile], worktrees: &HashMap<&Path, Doing>) -> AtWork
     AtWork { terminals, cards }
 }
 
+/// What a multiple choice shows, where nothing picked means everything:
+/// the `choices` picked, in their order — or all of them, when none of the
+/// picks is still among them. A pick gone from the choices, a worktree
+/// removed, does not leave a plane showing nothing.
+pub fn shown_of(picked: &[PathBuf], choices: &[PathBuf]) -> Vec<PathBuf> {
+    let shown: Vec<PathBuf> = choices
+        .iter()
+        .filter(|choice| picked.contains(choice))
+        .cloned()
+        .collect();
+    if shown.is_empty() {
+        choices.to_vec()
+    } else {
+        shown
+    }
+}
+
+/// Pressing one entry of a multiple choice, against what is `shown`: in if
+/// it was out, out if it was in — and `None` for the last one in, a plane
+/// showing nothing being no choice at all.
+pub fn toggle(shown: &[PathBuf], item: &Path) -> Option<Vec<PathBuf>> {
+    if shown.iter().any(|path| path == item) {
+        let rest: Vec<PathBuf> = shown.iter().filter(|path| *path != item).cloned().collect();
+        (!rest.is_empty()).then_some(rest)
+    } else {
+        let mut more = shown.to_vec();
+        more.push(item.to_path_buf());
+        Some(more)
+    }
+}
+
+/// The length of a rounded rectangle's outline, its corners quarter
+/// circles.
+pub fn outline_length(w: f32, h: f32, radius: f32) -> f32 {
+    let r = radius.min(w / 2.).min(h / 2.).max(0.);
+    2. * (w + h) - 8. * r + std::f32::consts::TAU * r
+}
+
+/// Dashes marching round a closed outline: `dash` and `gap` stretched so a
+/// whole number of periods fits, or the seam where the outline closes would
+/// show a dash cut short.
+pub fn marching_round(length: f32, travelled: f32, dash: f32, gap: f32) -> Vec<(f32, f32)> {
+    let target = dash + gap;
+    if length <= 0. || target <= 0. {
+        return Vec::new();
+    }
+    let periods = (length / target).round().max(1.);
+    let stretch = length / periods / target;
+    marching(length, travelled * stretch, dash * stretch, gap * stretch)
+}
+
+/// A comet going round a closed outline, `tail` long: its stretch in one
+/// piece, or in two across the seam.
+pub fn comet_round(length: f32, travelled: f32, tail: f32) -> Vec<(f32, f32)> {
+    if length <= 0. || tail <= 0. {
+        return Vec::new();
+    }
+    let tail = tail.min(length);
+    let head = travelled.rem_euclid(length);
+    if head >= tail {
+        vec![(head - tail, head)]
+    } else {
+        let mut pieces = Vec::new();
+        if head > 0. {
+            pieces.push((0., head));
+        }
+        pieces.push((length - (tail - head), length));
+        pieces
+    }
+}
+
 /// A slow breath between 0 and 1, `period` seconds long: what a waiting
 /// link pulses by.
 pub fn breath(seconds: f32, period: f32) -> f32 {
@@ -1790,5 +1861,60 @@ mod tests {
         assert!(lit[0].1 <= 0.01);
         assert_eq!(lit[1], (5., 8.));
         assert!(dash_array(&[]).is_empty());
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn nothing_picked_shows_every_choice() {
+        let choices = paths(&["/a", "/b", "/c"]);
+        assert_eq!(shown_of(&[], &choices), choices);
+        // In the choices' order, not the picks'.
+        assert_eq!(
+            shown_of(&paths(&["/c", "/a"]), &choices),
+            paths(&["/a", "/c"])
+        );
+        // A pick gone from the choices is not a plane showing nothing.
+        assert_eq!(shown_of(&paths(&["/gone"]), &choices), choices);
+    }
+
+    #[test]
+    fn pressing_an_entry_turns_it_in_or_out_but_never_the_last() {
+        let shown = paths(&["/a", "/b"]);
+        assert_eq!(toggle(&shown, Path::new("/b")), Some(paths(&["/a"])));
+        assert_eq!(
+            toggle(&shown, Path::new("/c")),
+            Some(paths(&["/a", "/b", "/c"]))
+        );
+        assert_eq!(toggle(&paths(&["/a"]), Path::new("/a")), None);
+    }
+
+    #[test]
+    fn dashes_round_an_outline_close_on_a_whole_period() {
+        // A square of 40 without corners: 160 round. A period of 15 asked
+        // is eleven of them, stretched to 160 / 11.
+        let length = outline_length(40., 40., 0.);
+        assert_eq!(length, 160.);
+        let dashes = marching_round(length, 0., 6., 9.);
+        assert_eq!(dashes.len(), 11);
+        let period = 160. / 11.;
+        assert!((dashes[1].0 - period).abs() < 1e-3);
+        // The last one ends a gap before the seam, where the first starts.
+        let last = dashes[dashes.len() - 1];
+        assert!((160. - last.1 - (period - (last.1 - last.0))).abs() < 1e-3);
+        // Rounded corners take their quarter circles off the straight sides.
+        let round = outline_length(40., 40., 5.);
+        assert!((round - (160. - 40. + std::f32::consts::TAU * 5.)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_comet_round_an_outline_crosses_the_seam_in_two_pieces() {
+        assert_eq!(comet_round(100., 50., 10.), vec![(40., 50.)]);
+        assert_eq!(comet_round(100., 104., 10.), vec![(0., 4.), (94., 100.)]);
+        assert_eq!(comet_round(100., 100., 10.), vec![(90., 100.)]);
+        // Longer than the outline, it is the outline.
+        assert_eq!(comet_round(20., 5., 50.), vec![(0., 5.), (5., 20.)]);
     }
 }

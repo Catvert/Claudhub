@@ -1112,11 +1112,12 @@ pub struct ClaudhubApp {
     pub(super) overview_loaded: bool,
     /// Every project on the plane at once, rather than one.
     pub(super) overview_all: bool,
-    /// The project picked in the corner; `None` follows the active worktree.
-    pub(super) overview_repo: Option<PathBuf>,
-    /// The one worktree of that project the plane shows; `None` shows them
-    /// all.
-    pub(super) overview_worktree: Option<PathBuf>,
+    /// The projects ticked in the corner, by main path; none follows the
+    /// active worktree's.
+    pub(super) overview_projects: Vec<PathBuf>,
+    /// The worktrees ticked beside them. A project none of whose worktrees
+    /// is ticked shows them all — see `overview::shown_of`.
+    pub(super) overview_worktrees: Vec<PathBuf>,
     /// An agent is at work, or waits, on the plane as of the last frame: its
     /// links move, and want frames of their own — this far apart.
     pub(super) overview_flow_frame: Option<std::time::Duration>,
@@ -1591,8 +1592,8 @@ impl ClaudhubApp {
             overview_reveal: None,
             overview_loaded: false,
             overview_all: false,
-            overview_repo: None,
-            overview_worktree: None,
+            overview_projects: Vec::new(),
+            overview_worktrees: Vec::new(),
             overview_flow_frame: None,
             overview_flow_ticking: false,
             claude_processes: Vec::new(),
