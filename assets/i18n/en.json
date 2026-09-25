@@ -953,6 +953,7 @@
   "overview-mode-canvas": "Canvas",
   "overview-mode-columns": "Columns",
   "overview-mode-hint": "Show the home screen as a plane or as columns",
+  "overview-column-width-hint": "Drag: column width · double-click: fill the space",
   "overview-n-projects": "%{count} projects",
   "overview-n-worktrees": "%{count} worktrees",
   "overview-projects-hint": "The projects on the plane: tick one, several, or all",
