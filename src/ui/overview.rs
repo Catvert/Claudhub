@@ -316,6 +316,8 @@ pub struct Link {
     /// The worktree the link belongs to — the child's, or the parent's for a
     /// terminal or a note: what says it belongs to the one on screen.
     pub worktree: PathBuf,
+    /// The node it leads to: what says an agent is at work at its end.
+    pub child: Node,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -668,6 +670,7 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
                     to_side,
                     kind: nodes[child].kind,
                     worktree: nodes[child].worktree.clone(),
+                    child: nodes[child].node.clone(),
                 });
             }
             match &branch.node {
@@ -690,6 +693,131 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
     }
     plan.bounds = bounds.unwrap_or_default();
     plan
+}
+
+/// A terminal on the plane, as far as its agent goes.
+#[derive(Debug, Clone)]
+pub struct AgentTile<'a> {
+    pub id: u64,
+    pub worktree: &'a Path,
+    /// It runs an agent: launched as one, or Claude typed at its prompt.
+    pub agent: bool,
+    /// Whether its own session says it is working, when the hooks named the
+    /// session — `None` when nothing speaks for this terminal alone.
+    pub word: Option<bool>,
+}
+
+/// Where an agent is at work on the plane: the links that flow.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AtWork {
+    /// The terminals it works in.
+    pub terminals: HashSet<u64>,
+    /// The worktrees it works in with no terminal on the plane to say so — an
+    /// agent started in a terminal of another program: their card's link
+    /// flows instead, or the work would not show at all.
+    pub cards: HashSet<PathBuf>,
+}
+
+/// Which links flow, from what the agents say.
+///
+/// A terminal's own session decides when it has one; the worktree's state
+/// only speaks for the agent terminals nothing names — and not when a named
+/// one already accounts for the work, the worktree's state being the loudest
+/// of its agents and not the sum. A shell with no agent in it never flows:
+/// the worktree working says nothing of a prompt beside it.
+pub fn at_work(tiles: &[AgentTile], working: &HashSet<&Path>) -> AtWork {
+    let accounted = |worktree: &Path| {
+        tiles
+            .iter()
+            .any(|tile| tile.worktree == worktree && tile.word == Some(true))
+    };
+    let terminals: HashSet<u64> = tiles
+        .iter()
+        .filter(|tile| match tile.word {
+            Some(word) => word,
+            None => tile.agent && working.contains(tile.worktree) && !accounted(tile.worktree),
+        })
+        .map(|tile| tile.id)
+        .collect();
+    let cards = working
+        .iter()
+        .filter(|worktree| {
+            !tiles
+                .iter()
+                .any(|tile| tile.worktree == **worktree && terminals.contains(&tile.id))
+        })
+        .map(|worktree| worktree.to_path_buf())
+        .collect();
+    AtWork { terminals, cards }
+}
+
+/// The length of a polyline.
+pub fn length(points: &[(f32, f32)]) -> f32 {
+    points
+        .windows(2)
+        .map(|pair| ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt())
+        .sum()
+}
+
+/// The stretches of a link of `length` that dashes marching from parent to
+/// child light, once they have `travelled` that far: each `dash` long,
+/// `gap` apart, clipped to the link.
+pub fn marching(length: f32, travelled: f32, dash: f32, gap: f32) -> Vec<(f32, f32)> {
+    let period = dash + gap;
+    if length <= 0. || period <= 0. {
+        return Vec::new();
+    }
+    let mut start = travelled.rem_euclid(period) - period;
+    let mut stretches = Vec::new();
+    while start < length {
+        let (from, to) = (start.max(0.), (start + dash).min(length));
+        if to > from {
+            stretches.push((from, to));
+        }
+        start += period;
+    }
+    stretches
+}
+
+/// The stretch a comet lights, its head having `travelled` that far: it
+/// runs from parent to child, `tail` long, and comes back in from the parent
+/// once its tail has left — a pause the length of its tail between two runs.
+pub fn comet(length: f32, travelled: f32, tail: f32) -> Option<(f32, f32)> {
+    if length <= 0. || tail <= 0. {
+        return None;
+    }
+    let head = travelled.rem_euclid(length + tail);
+    let (from, to) = ((head - tail).max(0.), head.min(length));
+    (to > from).then_some((from, to))
+}
+
+/// A dash array — what gpui's stroke takes — that lights exactly these
+/// stretches, sorted and apart. gpui has no dash offset and every array
+/// starts with a dash: a stretch that does not start at the origin is led
+/// by one too short to see. Nothing to light is an empty array, which the
+/// caller must not stroke: gpui doubles an odd array, and a lone gap would
+/// come back a dash the length of the link.
+pub fn dash_array(stretches: &[(f32, f32)]) -> Vec<f32> {
+    const INVISIBLE: f32 = 0.01;
+    if stretches.is_empty() {
+        return Vec::new();
+    }
+    let mut array = Vec::with_capacity(stretches.len() * 2 + 2);
+    let mut at = 0.;
+    for &(from, to) in stretches {
+        if array.is_empty() && from > INVISIBLE {
+            array.push(INVISIBLE);
+            at = INVISIBLE;
+        }
+        if !array.is_empty() {
+            array.push((from - at).max(0.));
+        }
+        array.push(to - from);
+        at = to;
+    }
+    // What follows the last one is dark, however long the link is.
+    array.push(f32::MAX / 4.);
+    array
 }
 
 /// The grid's step in plane units, at a zoom of one.
@@ -1464,5 +1592,117 @@ mod tests {
         assert_eq!(Tile::default(), Tile::Medium);
         assert_eq!(Tile::Large.next(), Tile::Small);
         assert!(Tile::Small.size().0 < Tile::Medium.size().0);
+    }
+
+    fn tile(id: u64, worktree: &str, agent: bool, word: Option<bool>) -> AgentTile<'_> {
+        AgentTile {
+            id,
+            worktree: Path::new(worktree),
+            agent,
+            word,
+        }
+    }
+
+    #[test]
+    fn a_terminal_flows_by_its_own_word_first() {
+        let working: HashSet<&Path> = [Path::new("/a")].into();
+        // Two agents in one worktree, one named and working, the other
+        // named and done: only the first flows, the worktree's state being
+        // the loudest of the two.
+        let tiles = [
+            tile(1, "/a", true, Some(true)),
+            tile(2, "/a", true, Some(false)),
+        ];
+        let found = at_work(&tiles, &working);
+        assert_eq!(found.terminals, HashSet::from([1]));
+        assert!(found.cards.is_empty());
+    }
+
+    #[test]
+    fn an_unnamed_agent_terminal_takes_its_worktree_s_state() {
+        let working: HashSet<&Path> = [Path::new("/a")].into();
+        let tiles = [
+            tile(1, "/a", true, None),
+            // A shell beside it has no agent in it, and does not flow.
+            tile(2, "/a", false, None),
+            // Nor does an agent of a worktree at rest.
+            tile(3, "/b", true, None),
+        ];
+        assert_eq!(at_work(&tiles, &working).terminals, HashSet::from([1]));
+        // A named terminal already accounts for the work: the unnamed one
+        // beside it is not lit by the same state twice.
+        let tiles = [tile(1, "/a", true, None), tile(4, "/a", true, Some(true))];
+        assert_eq!(at_work(&tiles, &working).terminals, HashSet::from([4]));
+    }
+
+    #[test]
+    fn work_with_no_terminal_on_the_plane_flows_to_the_card() {
+        let working: HashSet<&Path> = [Path::new("/a"), Path::new("/b")].into();
+        let tiles = [tile(1, "/a", true, None), tile(2, "/b", false, None)];
+        let found = at_work(&tiles, &working);
+        assert_eq!(found.terminals, HashSet::from([1]));
+        assert_eq!(found.cards, HashSet::from([PathBuf::from("/b")]));
+    }
+
+    #[test]
+    fn dashes_march_toward_the_child() {
+        // Dash 4, gap 6, on a link of 20: at rest, dashes at 0 and 10.
+        assert_eq!(marching(20., 0., 4., 6.), vec![(0., 4.), (10., 14.)]);
+        // Three further on, everything has moved three toward the child.
+        assert_eq!(marching(20., 3., 4., 6.), vec![(3., 7.), (13., 17.)]);
+        // Eight on, a dash comes in from the parent and one leaves at the
+        // child.
+        assert_eq!(
+            marching(20., 8., 4., 6.),
+            vec![(0., 2.), (8., 12.), (18., 20.)]
+        );
+        // A whole period on, the same picture.
+        assert_eq!(marching(20., 10., 4., 6.), marching(20., 0., 4., 6.));
+        // Clipped at the child.
+        assert_eq!(marching(12., 0., 4., 6.), vec![(0., 4.), (10., 12.)]);
+        assert!(marching(0., 0., 4., 6.).is_empty());
+    }
+
+    #[test]
+    fn a_comet_runs_the_link_and_comes_back() {
+        assert_eq!(comet(100., 0., 10.), None);
+        assert_eq!(comet(100., 5., 10.), Some((0., 5.)));
+        assert_eq!(comet(100., 50., 10.), Some((40., 50.)));
+        // Its head gone past the child, its tail still in.
+        assert_eq!(comet(100., 105., 10.), Some((95., 100.)));
+        // The whole run is the link and the tail, and it starts over.
+        assert_eq!(comet(100., 115., 10.), Some((0., 5.)));
+    }
+
+    #[test]
+    fn a_dash_array_lights_exactly_the_stretches() {
+        // Replays the array the way gpui walks it: dash, gap, dash…
+        fn lit(array: &[f32], length: f32) -> Vec<(f32, f32)> {
+            let mut at = 0.;
+            let mut out = Vec::new();
+            for (index, step) in array.iter().enumerate() {
+                let next = (at + step).min(length);
+                if index % 2 == 0 && next > at {
+                    out.push((at, next));
+                }
+                at = next;
+                if at >= length {
+                    break;
+                }
+            }
+            out
+        }
+        let stretches = [(0., 4.), (10., 14.)];
+        let array = dash_array(&stretches);
+        assert_eq!(array.len() % 2, 0);
+        assert_eq!(lit(&array, 20.), stretches.to_vec());
+        // Not from the origin: led by a dash nobody sees.
+        let array = dash_array(&[(5., 8.)]);
+        assert_eq!(array.len() % 2, 0);
+        let lit = lit(&array, 20.);
+        assert_eq!(lit.len(), 2);
+        assert!(lit[0].1 <= 0.01);
+        assert_eq!(lit[1], (5., 8.));
+        assert!(dash_array(&[]).is_empty());
     }
 }

@@ -42,6 +42,14 @@ use super::overview::{self, Checkout, Group, LinkKind, Node, Plan, Rect, View};
 use super::terminal_view::{Canvas, Launch};
 use crate::tr;
 
+/// How often a flowing link moves: thirty frames a second is motion to the
+/// eye, and half what the display would ask — each one paints the screen.
+const FLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// When the links started flowing, once: their phase is read off the clock,
+/// so a frame late is a step longer and not a slower march.
+static FLOW_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 /// Below this zoom, cards are read and not handled.
 pub(super) const DETAIL: f32 = 0.55;
 /// The commits a card lists.
@@ -120,9 +128,10 @@ impl Element for Scaled {
     }
 }
 
-/// A link as the canvas paints it: its two ends on screen, its kind, and
-/// whether it leads into the worktree on show.
-type Segment = (overview::Link, bool);
+/// A link as the canvas paints it: its two ends on screen, its kind,
+/// whether it leads into the worktree on show, and whether an agent is at
+/// work at its end.
+type Segment = (overview::Link, bool, bool);
 
 /// What the pointer is dragging on the home screen.
 #[derive(Clone, Debug)]
@@ -373,7 +382,16 @@ impl ClaudhubApp {
         .absolute()
         .size_full();
 
-        let links = self.render_links(&plan, view, cx);
+        // An agent at work flows along the link to it, and flowing needs
+        // frames nobody else asks for. Under a maximised node the links are
+        // under the veil: nothing to move.
+        let at_work = self.overview_at_work(&plan);
+        self.overview_flow_wanted = self.overview_maximized.is_none()
+            && (!at_work.terminals.is_empty() || !at_work.cards.is_empty());
+        if self.overview_flow_wanted {
+            self.tick_flow(cx);
+        }
+        let links = self.render_links(&plan, view, &at_work, cx);
         let gits: Vec<(Node, AnyElement)> = plan
             .gits
             .iter()
@@ -1127,66 +1145,153 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Where an agent is at work on the plane — see `overview::at_work`.
+    fn overview_at_work(&self, plan: &Plan) -> overview::AtWork {
+        let tiles: Vec<overview::AgentTile> = self
+            .terminals
+            .iter()
+            .filter(|terminal| plan.tile(terminal.view.entity_id().as_u64()).is_some())
+            .map(|terminal| overview::AgentTile {
+                id: terminal.view.entity_id().as_u64(),
+                worktree: &terminal.worktree,
+                agent: matches!(
+                    terminal.relaunch,
+                    Some(crate::ui::store::Relaunch::Agent { .. })
+                ) || terminal.typed.is_some(),
+                word: terminal
+                    .session
+                    .as_deref()
+                    .and_then(|session| self.agents.session(session))
+                    .map(|activity| *activity == crate::agent::Activity::Working),
+            })
+            .collect();
+        let working: std::collections::HashSet<&Path> = plan
+            .cards
+            .iter()
+            .map(|card| card.path.as_path())
+            .filter(|path| self.agents.get(path).is_some_and(|state| state.working))
+            .collect();
+        overview::at_work(&tiles, &working)
+    }
+
+    /// Asks for the frames a flowing link moves by, for as long as one
+    /// flows and the screen is up — the last frame that saw none ends it.
+    fn tick_flow(&mut self, cx: &mut Context<Self>) {
+        if self.overview_flow_ticking {
+            return;
+        }
+        self.overview_flow_ticking = true;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(FLOW_FRAME).await;
+            let going = this
+                .update(cx, |this, cx| {
+                    let going = this.overview && this.overview_flow_wanted;
+                    if going {
+                        cx.notify();
+                    } else {
+                        this.overview_flow_ticking = false;
+                    }
+                    going
+                })
+                .unwrap_or(false);
+            if !going {
+                break;
+            }
+        })
+        .detach();
+    }
+
     /// The lines between the nodes, under them.
-    fn render_links(&self, plan: &Plan, view: View, cx: &App) -> impl IntoElement {
+    ///
+    /// **A link to an agent at work flows**: dashes march from the card to
+    /// the terminal and a comet runs down the line, in the colour the badge
+    /// gives work, over a glow. The phase is read off a clock and not
+    /// counted in frames, the frames being ours to skip.
+    fn render_links(
+        &self,
+        plan: &Plan,
+        view: View,
+        at_work: &overview::AtWork,
+        cx: &App,
+    ) -> impl IntoElement {
         let active = self.active.clone();
         let links: Vec<Segment> = plan
             .links
             .iter()
             .map(|link| {
                 let on = active.as_deref() == Some(link.worktree.as_path());
+                let flows = match &link.child {
+                    Node::Terminal(id) => at_work.terminals.contains(id),
+                    Node::Worktree(path) => at_work.cards.contains(path),
+                    Node::Git(_) | Node::Note(_) => false,
+                };
                 let mut link = link.clone();
                 link.from = view.point(link.from);
                 link.to = view.point(link.to);
-                (link, on)
+                (link, on, flows)
             })
             .collect();
         let quiet = cx.theme().border;
         let lit = cx.theme().ring;
+        let work = cx.theme().warning;
+        let spark = gpui_kit::Hsla {
+            l: (work.l + 0.25).min(0.95),
+            ..work
+        };
         let width = px((1.5 * view.zoom).clamp(1., 2.5));
         let zoom = view.zoom;
+        let seconds = FLOW_EPOCH
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            // A jump every ten minutes, where hours of f32 would stutter.
+            .rem_euclid(600.) as f32;
         canvas(
             move |_, _, _| {},
             move |bounds, _, window, _| {
                 let at =
                     |(x, y): (f32, f32)| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
-                for (link, on) in links {
+                for (link, on, flows) in links {
                     // What hangs from a card — a terminal, a note — is drawn
                     // finer than the tree itself: the branches are the shape,
-                    // the rest is what the shape carries.
+                    // the rest is what the shape carries. Work is the
+                    // exception: it is what one looks for.
                     let width = match link.kind {
                         LinkKind::Root | LinkKind::Branch => width,
+                        LinkKind::Terminal | LinkKind::Note if flows => width,
                         LinkKind::Terminal | LinkKind::Note => width * 0.6,
                     };
                     // An elbow: out square to the parent's side, across
                     // half way, into the child square to its own — and the
                     // two corners rounded, never wider than half a leg.
                     let points = overview::elbow(link.from, link.from_side, link.to);
-                    let radius = (10. * zoom).max(3.);
-                    let mut path = PathBuilder::stroke(width);
-                    path.move_to(at(points[0]));
-                    for corner in 1..=2 {
-                        let (before, here, after) =
-                            (points[corner - 1], points[corner], points[corner + 1]);
-                        let length = |a: (f32, f32), b: (f32, f32)| {
-                            ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
-                        };
-                        let (into, out) = (length(before, here), length(here, after));
-                        let r = radius.min(into / 2.).min(out / 2.);
-                        if r < 0.5 {
-                            path.line_to(at(here));
-                            continue;
+                    if !flows {
+                        if let Some(path) = trace(&points, zoom, width, None, &at) {
+                            window.paint_path(path, if on { lit } else { quiet });
                         }
-                        let toward = |a: (f32, f32), b: (f32, f32), by: f32| {
-                            let d = length(a, b);
-                            (a.0 + (b.0 - a.0) / d * by, a.1 + (b.1 - a.1) / d * by)
-                        };
-                        path.line_to(at(toward(here, before, r)));
-                        path.curve_to(at(toward(here, after, r)), at(here));
+                        continue;
                     }
-                    path.line_to(at(points[3]));
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, if on { lit } else { quiet });
+                    let length = overview::length(&points);
+                    // A glow under the line, the line itself dimmed, then
+                    // what moves along it.
+                    if let Some(path) = trace(&points, zoom, width * 4., None, &at) {
+                        window.paint_path(path, work.opacity(0.14));
+                    }
+                    if let Some(path) = trace(&points, zoom, width, None, &at) {
+                        window.paint_path(path, work.opacity(0.35));
+                    }
+                    let (dash, gap) = ((7. * zoom).max(4.), (9. * zoom).max(5.));
+                    let marching = overview::marching(length, seconds * 30. * zoom, dash, gap);
+                    let dashes = overview::dash_array(&marching);
+                    if let Some(path) = trace(&points, zoom, width, Some(&dashes), &at) {
+                        window.paint_path(path, work);
+                    }
+                    let tail = (36. * zoom).max(16.);
+                    if let Some(stretch) = overview::comet(length, seconds * 160. * zoom, tail) {
+                        let dashes = overview::dash_array(&[stretch]);
+                        if let Some(path) = trace(&points, zoom, width * 2., Some(&dashes), &at) {
+                            window.paint_path(path, spark);
+                        }
                     }
                 }
             },
@@ -1194,7 +1299,48 @@ impl ClaudhubApp {
         .absolute()
         .size_full()
     }
+}
 
+/// A link's elbow as a stroke, its two corners rounded — all of it, or the
+/// stretches a dash array lights; `None` when there is nothing to paint.
+fn trace(
+    points: &[(f32, f32); 4],
+    zoom: f32,
+    width: Pixels,
+    dashes: Option<&[f32]>,
+    at: &impl Fn((f32, f32)) -> gpui_kit::Point<Pixels>,
+) -> Option<gpui_kit::Path<Pixels>> {
+    let mut path = PathBuilder::stroke(width);
+    if let Some(dashes) = dashes {
+        if dashes.is_empty() {
+            return None;
+        }
+        let dashes: Vec<Pixels> = dashes.iter().map(|&d| px(d)).collect();
+        path = path.dash_array(&dashes);
+    }
+    let radius = (10. * zoom).max(3.);
+    let length = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    path.move_to(at(points[0]));
+    for corner in 1..=2 {
+        let (before, here, after) = (points[corner - 1], points[corner], points[corner + 1]);
+        let (into, out) = (length(before, here), length(here, after));
+        let r = radius.min(into / 2.).min(out / 2.);
+        if r < 0.5 {
+            path.line_to(at(here));
+            continue;
+        }
+        let toward = |a: (f32, f32), b: (f32, f32), by: f32| {
+            let d = length(a, b);
+            (a.0 + (b.0 - a.0) / d * by, a.1 + (b.1 - a.1) / d * by)
+        };
+        path.line_to(at(toward(here, before, r)));
+        path.curve_to(at(toward(here, after, r)), at(here));
+    }
+    path.line_to(at(points[3]));
+    path.build().ok()
+}
+
+impl ClaudhubApp {
     /// The zoom's own controls, in a corner and at the window's size: the one
     /// part of the screen that does not move with the plane.
     fn render_zoom_bar(&self, view: View, cx: &mut Context<Self>) -> impl IntoElement {

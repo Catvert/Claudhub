@@ -691,6 +691,13 @@ worktree.
   traîné l'enfant à côté — l'axe où les deux nœuds sont le plus écartés décide.
   Il est tracé **en coude** (`overview::elbow`), coins arrondis : une courbe
   étirée sur toute la distance faisait des boucles, pas un arbre.
+- **Le lien d'un agent au travail coule** (`overview::at_work`) : tirets en
+  marche et comète vers le terminal, dans la teinte du travail. La session du
+  terminal décide ; sans elle, l'état du worktree ne vaut que pour un onglet
+  d'agent, et un travail sans terminal sur le plan fait couler le lien de la
+  carte. gpui n'a pas de décalage de tirets : le mouvement est un tableau de
+  tirets recalculé à chaque image (`overview::dash_array`), trente par seconde
+  et seulement tant qu'un lien coule (`tick_flow`).
 - Le plan **suit le focus** (`View::reveal`) quand la main passe à un autre
   terminal, jamais à chaque image. Un clic sur une carte la sélectionne, un
   double clic y emmène (`work_in_worktree`) : quitter l'écran est le seul geste
