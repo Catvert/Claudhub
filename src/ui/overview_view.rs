@@ -176,6 +176,25 @@ impl ClaudhubApp {
         }
     }
 
+    /// The worktree picked beside the project, while it is still one of the
+    /// project's: gone from it, or with every project on show, the plane
+    /// holds them all — a filter nobody can see in the corner is a plane
+    /// that is missing something without saying so.
+    pub(super) fn overview_picked_worktree(&self) -> Option<&Path> {
+        if self.overview_all {
+            return None;
+        }
+        let picked = self.overview_worktree.as_deref()?;
+        self.overview_repos()
+            .iter()
+            .any(|repo| {
+                repo.worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == picked && !worktree.prunable)
+            })
+            .then_some(picked)
+    }
+
     /// What the plane holds, laid out.
     fn overview_plan(&self) -> Plan {
         overview::plan(&self.overview_groups(), &self.overview_hand)
@@ -221,6 +240,7 @@ impl ClaudhubApp {
                 .map(|entry| entry.path.clone())
                 .collect()
         };
+        let picked = self.overview_picked_worktree();
         let groups: Vec<Group> = self
             .overview_repos()
             .into_iter()
@@ -233,6 +253,10 @@ impl ClaudhubApp {
                     // A folder gone from the disk has nothing to show but its
                     // absence, which the picker already says.
                     .filter(|worktree| !worktree.prunable)
+                    // One worktree picked, the others are not on this plane;
+                    // the git node and the repository's notes stay, being
+                    // every worktree's.
+                    .filter(|worktree| picked.is_none_or(|picked| picked == worktree.path))
                     .map(|worktree| Checkout {
                         path: &worktree.path,
                         branch: worktree.branch.as_deref(),
@@ -991,6 +1015,7 @@ impl ClaudhubApp {
                         })
                     }),
             )
+            .children(self.render_overview_worktree_picker(cx))
             .children(self.render_hidden_menu(cx))
             .child(self.render_skill_button(cx))
             .child(
@@ -1004,12 +1029,99 @@ impl ClaudhubApp {
             )
     }
 
+    /// Which of the project's worktrees the plane shows, beside the project
+    /// picker: all of them by default, or one to read on its own. Only with
+    /// one project on show — a worktree of which, among several — and only
+    /// when there is a choice to make.
+    fn render_overview_worktree_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.overview_all {
+            return None;
+        }
+        let repo = self.overview_repos().into_iter().next()?;
+        let choices: Vec<(PathBuf, SharedString)> = repo
+            .worktrees
+            .iter()
+            .filter(|worktree| !worktree.prunable)
+            .map(|worktree| {
+                let label = worktree.label();
+                let name = match worktree.branch.as_deref() {
+                    Some(branch) if branch != label => format!("{label} · {branch}"),
+                    _ => label,
+                };
+                (worktree.path.clone(), SharedString::from(name))
+            })
+            .collect();
+        if choices.len() < 2 {
+            return None;
+        }
+        let current = self.overview_picked_worktree().map(Path::to_path_buf);
+        let label = current
+            .as_ref()
+            .and_then(|picked| choices.iter().find(|(path, _)| path == picked))
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| tr!("overview-all-worktrees"));
+        let app = cx.entity().downgrade();
+        Some(
+            Button::new("overview-worktree")
+                .ghost()
+                .small()
+                .icon(icon("git-branch"))
+                .label(label)
+                .tooltip(tr!("overview-worktree-hint"))
+                .dropdown_menu(move |menu, _, _| {
+                    let everything = app.clone();
+                    let menu = menu.item(
+                        PopupMenuItem::new(tr!("overview-all-worktrees"))
+                            .checked(current.is_none())
+                            .on_click(move |_, _, cx| {
+                                if let Some(app) = everything.upgrade() {
+                                    app.update(cx, |this, cx| this.show_worktree(None, cx));
+                                }
+                            }),
+                    );
+                    choices.iter().cloned().fold(menu, |menu, (path, name)| {
+                        let app = app.clone();
+                        let checked = current.as_ref() == Some(&path);
+                        menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                            move |_, _, cx| {
+                                if let Some(app) = app.upgrade() {
+                                    let path = path.clone();
+                                    app.update(cx, |this, cx| this.show_worktree(Some(path), cx));
+                                }
+                            },
+                        ))
+                    })
+                }),
+        )
+    }
+
+    /// Shows one worktree of the project — or, with `None`, all of them —
+    /// and fits it: another plane to frame, as another project is.
+    fn show_worktree(&mut self, worktree: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.overview_worktree = worktree;
+        self.give_back_maximized();
+        self.overview_fitted = false;
+        cx.notify();
+    }
+
+    /// Gives a maximised node back its size, the view being about to be
+    /// framed anew: another plane may not hold the node, and the veil would
+    /// then be gone while the screen still refused the wheel and the drags.
+    fn give_back_maximized(&mut self) {
+        if let Some(maximized) = self.overview_maximized.take() {
+            self.set_node_size(&maximized.node, maximized.size);
+        }
+    }
+
     /// Shows one project — or, with `None`, all of them — and fits it.
     fn show_project(&mut self, main: Option<PathBuf>, cx: &mut Context<Self>) {
         self.overview_all = main.is_none();
         if main.is_some() {
             self.overview_repo = main;
         }
+        // A worktree picked in one project names nothing in another.
+        self.overview_worktree = None;
+        self.give_back_maximized();
         self.overview_fitted = false;
         self.ask_skill_status();
         cx.notify();
@@ -2223,8 +2335,12 @@ impl ClaudhubApp {
     pub(super) fn hidden_nodes(&self, cx: &App) -> Vec<(Node, SharedString)> {
         let _ = cx;
         let mut hidden = Vec::new();
+        let picked = self.overview_picked_worktree();
         for repo in self.overview_repos() {
             for worktree in &repo.worktrees {
+                if picked.is_some_and(|picked| picked != worktree.path) {
+                    continue;
+                }
                 let node = Node::Worktree(worktree.path.clone());
                 if self.overview_hand.hidden.contains(&node) {
                     let (repo, label) = self.project_label(&worktree.path);

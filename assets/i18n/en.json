@@ -950,6 +950,8 @@
   "overview-recent": "Latest commits",
   "overview-tile-size": "Card size",
   "overview-all-projects": "All projects",
+  "overview-all-worktrees": "All worktrees",
+  "overview-worktree-hint": "The project's worktrees: one, or all of them",
   "overview-fetch": "Fetch",
   "overview-branches": "%{local} local branch(es) · %{remote} remote",
   "overview-idle-branches": "No worktree:",
