@@ -208,6 +208,9 @@ pub struct Tracker {
     heard_once: bool,
     now: Option<Instant>,
     states: HashMap<PathBuf, State>,
+    /// What each live session is doing, by its id: the worktree's state is
+    /// the loudest of its sessions, and a terminal asks after its own.
+    activities: HashMap<String, Activity>,
 }
 
 impl Tracker {
@@ -289,6 +292,12 @@ impl Tracker {
         self.states.get(worktree)
     }
 
+    /// What one session is doing, by the id its hooks gave — `None` for a
+    /// session not heard of, or no longer alive.
+    pub fn session(&self, id: &str) -> Option<&Activity> {
+        self.activities.get(id)
+    }
+
     /// Where a session lives, if it is alive: the worktree its process was
     /// found in, or — its pid never seen — the one its directory names, as
     /// long as an agent still runs there.
@@ -350,6 +359,7 @@ impl Tracker {
             }
         }
         let mut states = HashMap::with_capacity(self.processes.len());
+        let mut activities = HashMap::new();
         for (worktree, processes) in &self.processes {
             let sessions = live.get(worktree).map(Vec::as_slice).unwrap_or_default();
             let claimed: Vec<u32> = sessions
@@ -366,7 +376,9 @@ impl Tracker {
                         (true, Some(pid)) => self.cpu_of(std::iter::once(pid)),
                         _ => self.cpu_of(all.clone()),
                     };
-                    resolve(&session.record.signal, session.said_at, cpu, now)
+                    let activity = resolve(&session.record.signal, session.said_at, cpu, now);
+                    activities.insert(session.record.session.clone(), activity.clone());
+                    activity
                 })
                 .collect();
             // The agents no word accounts for — no hooks, or another program —
@@ -402,6 +414,7 @@ impl Tracker {
             );
         }
         self.states = states;
+        self.activities = activities;
     }
 }
 
@@ -853,6 +866,29 @@ mod hook_tests {
         let state = tracker.get(Path::new(WT)).expect("state");
         assert_eq!(state.activity, Activity::Working);
         assert!(!state.heard);
+    }
+
+    #[test]
+    fn each_session_answers_for_itself() {
+        // Two agents in one worktree: the badge speaks of the one that works,
+        // and each terminal asks after its own — the other is not lit by it.
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0), (11, 0)]), t0);
+        tracker.hear(
+            vec![
+                said("busy", Some(10), Signal::Working, 1),
+                said("done", Some(11), Signal::Finished, 1),
+            ],
+            t0,
+        );
+        assert_eq!(activity(&tracker), Activity::Working);
+        assert_eq!(tracker.session("busy"), Some(&Activity::Working));
+        assert_eq!(tracker.session("done"), Some(&Activity::Finished));
+        assert_eq!(tracker.session("elsewhere"), None);
+        // Its process gone, a session answers nothing any more.
+        tracker.update(agents(&[(11, 0)]), t0 + secs(2));
+        assert_eq!(tracker.session("busy"), None);
     }
 
     #[test]

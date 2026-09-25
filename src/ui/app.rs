@@ -1117,6 +1117,11 @@ pub struct ClaudhubApp {
     /// The one worktree of that project the plane shows; `None` shows them
     /// all.
     pub(super) overview_worktree: Option<PathBuf>,
+    /// An agent is at work on the plane, as of the last frame: its links
+    /// flow, and want frames of their own.
+    pub(super) overview_flow_wanted: bool,
+    /// The frames for them are being asked for.
+    pub(super) overview_flow_ticking: bool,
     /// What the home screen's cards say of each branch — `git::outline`.
     pub(super) outlines: HashMap<PathBuf, crate::git::Outline>,
     /// The views the user has hidden, by panel name.
@@ -1585,6 +1590,8 @@ impl ClaudhubApp {
             overview_all: false,
             overview_repo: None,
             overview_worktree: None,
+            overview_flow_wanted: false,
+            overview_flow_ticking: false,
             outlines: HashMap::new(),
             zen_folded: Vec::new(),
             settings_form,
