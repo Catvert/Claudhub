@@ -724,8 +724,14 @@ impl ClaudhubApp {
     }
 
     /// A worktree's title in a laid-out view: its name, and its branch
-    /// when the name is not already the branch.
-    pub(super) fn worktree_title(&self, path: &Path, cx: &App) -> AnyElement {
+    /// when the name is not already the branch — then `trailing`, right
+    /// after them.
+    pub(super) fn worktree_title(
+        &self,
+        path: &Path,
+        trailing: Option<AnyElement>,
+        cx: &App,
+    ) -> AnyElement {
         let (_, label) = self.project_label(path);
         let branch = self
             .repos
@@ -734,7 +740,7 @@ impl ClaudhubApp {
             .filter(|branch| branch.as_str() != label.as_ref())
             .map(SharedString::from);
         let lit = self.active.as_deref() == Some(path);
-        column_title("git-branch", label, branch, lit, cx)
+        column_title("git-branch", label, branch, lit, trailing, cx)
     }
 
     /// One node in a column — or, `in_column` false, filling the columns.
@@ -1752,6 +1758,7 @@ pub(super) fn column_title(
     name: SharedString,
     detail: Option<SharedString>,
     lit: bool,
+    trailing: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -1785,6 +1792,7 @@ pub(super) fn column_title(
                 .text_color(theme.muted_foreground)
                 .child(detail)
         }))
+        .children(trailing.map(|trailing| div().flex_none().child(trailing)))
         .into_any_element()
 }
 

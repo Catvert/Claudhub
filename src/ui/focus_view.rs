@@ -1131,12 +1131,26 @@ impl ClaudhubApp {
                     .items_center()
                     .gap_2()
                     .when_some(reserve, |el, width| el.pr(width))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.worktree_title(path, cx)),
-                    )
+                    // Going to work in it, right after its name: the card's
+                    // double click, said where the board is named.
+                    .child(div().flex_1().min_w_0().child({
+                        let open = path.to_path_buf();
+                        let edit = Button::new(SharedString::from(format!(
+                            "focus-edit-{}",
+                            path.display()
+                        )))
+                        .ghost()
+                        .small()
+                        .icon(icon("pencil"))
+                        .label(tr!("focus-edit"))
+                        .tooltip(tr!("overview-open-worktree"))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.work_in_worktree(&open, window, cx);
+                            },
+                        ));
+                        self.worktree_title(path, Some(edit.into_any_element()), cx)
+                    }))
                     .when(alone, |el| {
                         el.child(
                             div()
@@ -1146,21 +1160,7 @@ impl ClaudhubApp {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr!("focus-drag-hint")),
                         )
-                    })
-                    // Going to work in it, beside its name: the card's
-                    // double click, said where the board is named.
-                    .child(div().flex_none().pb_2().child({
-                        let open = path.to_path_buf();
-                        Button::new(SharedString::from(format!("focus-edit-{}", path.display())))
-                            .ghost()
-                            .small()
-                            .icon(icon("pencil"))
-                            .label(tr!("focus-edit"))
-                            .tooltip(tr!("overview-open-worktree"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.work_in_worktree(&open, window, cx);
-                            }))
-                    })),
+                    }),
             )
             .child(row)
             .children(drag.map(|drag| self.render_drag_ghost(&drag, aim, count, cx)))
