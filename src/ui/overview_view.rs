@@ -346,7 +346,11 @@ impl ClaudhubApp {
             .min_w_0()
             .bg(super::theme::gutter(cx))
             .child(div().flex_none().h_full().p_3().pr_0().child(sidebar))
-            .child(plane)
+            // The plane's height is the row's, given and not taken from what
+            // it holds: an `h_flex` centres its children, and the plane,
+            // whose nodes are all placed absolutely, had none — zero high,
+            // it showed nothing.
+            .child(div().flex().flex_1().min_w_0().h_full().child(plane))
             .children(self.render_window_buttons(window, cx))
             .into_any_element()
     }
