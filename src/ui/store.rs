@@ -39,9 +39,6 @@ pub struct WorktreeState {
     pub home_offset: Option<(f32, f32)>,
     /// The size the hand gave its card, when it gave one.
     pub home_size: Option<(f32, f32)>,
-    /// The width the hand gave its column on the home screen; none, and the
-    /// columns of worktrees share the width there is.
-    pub home_column_width: Option<f32>,
     /// Its card folded to its head.
     pub home_collapsed: bool,
     /// Its card taken off the plane, with what hangs from it.
@@ -241,10 +238,15 @@ pub struct Session {
     pub worktree: Option<PathBuf>,
     /// The home screen was up: the window comes back on it.
     pub home: bool,
-    /// Which of its three views the home screen shows. The key written
+    /// Which of its two views the home screen shows. The key written
     /// before, `home_columns`, is left unread: the focus view is the new
     /// default, for everyone.
     pub home_mode: crate::ui::overview::HomeMode,
+    /// The worktrees the focus view shows side by side — see
+    /// `focus::shown_worktrees`.
+    pub focus_shown: Vec<PathBuf>,
+    /// Its sidebar folded to a rail of initials.
+    pub focus_rail: bool,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.
@@ -272,8 +274,6 @@ pub struct RepoState {
     pub home_offset: Option<(f32, f32)>,
     /// The size the hand gave the git node, when it gave one.
     pub home_size: Option<(f32, f32)>,
-    /// The width the hand gave the repository's column on the home screen.
-    pub home_column_width: Option<f32>,
     /// The git node folded to its head.
     pub home_collapsed: bool,
     /// **Legacy**: what a plugin had remembered about this repository, read

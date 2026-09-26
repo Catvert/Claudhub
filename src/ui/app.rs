@@ -1124,17 +1124,23 @@ pub struct ClaudhubApp {
     /// The worktrees ticked beside them. A project none of whose worktrees
     /// is ticked shows them all — see `overview::shown_of`.
     pub(super) overview_worktrees: Vec<PathBuf>,
-    /// Which view the home screen shows: one worktree, the columns, or the
+    /// Which view the home screen shows: the worktrees chosen, or the
     /// plane — see `overview::HomeMode`.
     pub(super) home_mode: crate::ui::overview::HomeMode,
     /// Each worktree's board in the focus view — which card in which
     /// column — see `ui::focus`.
     pub(super) focus_boards: HashMap<PathBuf, crate::ui::focus::Board>,
-    /// A card being dragged to another place on the board.
+    /// The worktrees chosen in the focus view's sidebar — see
+    /// `focus::shown_worktrees`.
+    pub(super) focus_chosen: Vec<PathBuf>,
+    /// The sidebar folded to a rail.
+    pub(super) focus_rail: bool,
+    /// A card being dragged to another place on its board.
     pub(super) focus_drag: Option<crate::ui::focus_view::FocusDrag>,
-    /// Where the board's columns and cards stood at the last frame, which
+    /// Where each board's columns and cards stood at the last frame, which
     /// is what a drop is read against.
-    pub(super) focus_geometry: std::rc::Rc<std::cell::RefCell<crate::ui::focus::Geometry>>,
+    pub(super) focus_geometry:
+        HashMap<PathBuf, std::rc::Rc<std::cell::RefCell<crate::ui::focus::Geometry>>>,
     /// The column a « new terminal » of the board was pressed in, for the
     /// terminal to land in when it comes.
     pub(super) focus_pending: Option<(PathBuf, usize)>,
@@ -1144,23 +1150,19 @@ pub struct ClaudhubApp {
     /// The worktrees whose status has been read at least once: before that,
     /// the status a review holds is the empty default, not an answer.
     pub(super) status_seen: std::collections::HashSet<PathBuf>,
-    /// A board column being widened by its right edge: which, where the
-    /// pointer was pressed, and the width it had then.
-    pub(super) focus_resize: Option<(usize, f32, f32)>,
+    /// A board column being widened by its right edge: whose board, which
+    /// column, where the pointer was pressed, and the width it had then.
+    pub(super) focus_resize: Option<(PathBuf, usize, f32, f32)>,
     /// The card last dropped, and the count of drops: its landing plays
     /// once, under an id that changes with every drop.
     pub(super) focus_landed: Option<(crate::ui::overview::Node, usize)>,
-    /// The board's own scroll, sideways, and each column's.
+    /// The boards' row scroll, sideways, and each board's columns'.
     pub(super) focus_scroll: gpui_kit::ScrollHandle,
-    pub(super) focus_column_scrolls: Vec<gpui_kit::ScrollHandle>,
+    pub(super) focus_column_scrolls: HashMap<PathBuf, Vec<gpui_kit::ScrollHandle>>,
     /// The focus view's sidebar scroll.
     pub(super) focus_sidebar_scroll: gpui_kit::ScrollHandle,
     /// The one node a laid-out view shows, filling it — its « maximise ».
     pub(super) overview_zoomed: Option<crate::ui::overview::Node>,
-    /// Each column's own vertical scroll, by `overview_view::column_key`.
-    pub(super) overview_column_scrolls: HashMap<String, gpui_kit::ScrollHandle>,
-    /// The row of columns' horizontal scroll.
-    pub(super) overview_columns_scroll: gpui_kit::ScrollHandle,
     /// An agent is at work, or waits, on the plane as of the last frame: its
     /// links move, and want frames of their own — this far apart.
     pub(super) overview_flow_frame: Option<std::time::Duration>,
@@ -1641,19 +1643,22 @@ impl ClaudhubApp {
             overview_worktrees: Vec::new(),
             home_mode: crate::ui::store::Store::global(cx).session.home_mode,
             focus_boards: HashMap::new(),
+            focus_chosen: crate::ui::store::Store::global(cx)
+                .session
+                .focus_shown
+                .clone(),
+            focus_rail: crate::ui::store::Store::global(cx).session.focus_rail,
             focus_drag: None,
-            focus_geometry: Default::default(),
+            focus_geometry: HashMap::new(),
             focus_pending: None,
             focus_pending_note: None,
             status_seen: std::collections::HashSet::new(),
             focus_resize: None,
             focus_landed: None,
             focus_scroll: gpui_kit::ScrollHandle::new(),
-            focus_column_scrolls: Vec::new(),
+            focus_column_scrolls: HashMap::new(),
             focus_sidebar_scroll: gpui_kit::ScrollHandle::new(),
             overview_zoomed: None,
-            overview_column_scrolls: HashMap::new(),
-            overview_columns_scroll: gpui_kit::ScrollHandle::new(),
             overview_flow_frame: None,
             overview_flow_ticking: false,
             claude_processes: Vec::new(),

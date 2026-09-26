@@ -10,7 +10,7 @@
 //! Pure: the view hands in what is on show and what it measured, this says
 //! where things go.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ui::overview::Node;
 
@@ -334,6 +334,14 @@ pub struct Geometry {
 }
 
 impl Geometry {
+    /// Whether a point this far across falls on one of the board's columns:
+    /// which of the boards side by side a press was on.
+    pub fn covers(&self, x: f32) -> bool {
+        self.spans
+            .iter()
+            .any(|span| span.left <= x && x <= span.right)
+    }
+
     /// The columns as they would stand without the room opened for a drop.
     ///
     /// The drop is read against these and not against what was painted: the
@@ -398,6 +406,74 @@ fn distance(span: &ColumnSpan, x: f32) -> f32 {
     } else {
         0.
     }
+}
+
+/// The worktrees on show, side by side: the ones chosen in the sidebar, as
+/// long as the window's own — `primary` — is among them; else that one
+/// alone. Choosing a worktree anywhere else in the window is choosing it
+/// here, and the others go.
+///
+/// In the sidebar's order, the boards reading as the list they were picked
+/// from; what the pickers no longer show drops out, the primary never.
+pub fn shown_worktrees(
+    chosen: &[PathBuf],
+    primary: Option<&Path>,
+    on_show: &[PathBuf],
+) -> Vec<PathBuf> {
+    let Some(primary) = primary else {
+        return Vec::new();
+    };
+    if !chosen.iter().any(|path| path == primary) {
+        return vec![primary.to_path_buf()];
+    }
+    let mut shown: Vec<PathBuf> = chosen
+        .iter()
+        .filter(|path| path.as_path() == primary || on_show.contains(path))
+        .cloned()
+        .collect();
+    shown.dedup();
+    // Not in the list — another project's — reads first.
+    shown.sort_by_key(|path| on_show.iter().position(|shown| shown == path));
+    shown
+}
+
+/// A Ctrl+click in the sidebar: the worktree joins what is shown, or
+/// leaves it — never the last one, a screen with nothing on it being no
+/// answer to anything.
+pub fn toggled(shown: &[PathBuf], path: &Path) -> Vec<PathBuf> {
+    if !shown.iter().any(|shown| shown == path) {
+        let mut shown = shown.to_vec();
+        shown.push(path.to_path_buf());
+        return shown;
+    }
+    if shown.len() == 1 {
+        return shown.to_vec();
+    }
+    shown
+        .iter()
+        .filter(|shown| shown.as_path() != path)
+        .cloned()
+        .collect()
+}
+
+/// What stands for a worktree on the sidebar's rail: two letters of its
+/// name — the first of two words, or the start of one.
+pub fn initials(label: &str) -> String {
+    let name = label.rsplit('/').next().unwrap_or(label);
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let letters: String = match words.as_slice() {
+        [] => String::new(),
+        [one] => one.chars().take(2).collect(),
+        [first, second, ..] => first
+            .chars()
+            .take(1)
+            .chain(second.chars().take(1))
+            .collect(),
+    };
+    letters.to_uppercase()
 }
 
 #[cfg(test)]
@@ -798,5 +874,50 @@ mod tests {
             })
         );
         assert_eq!(drop_target(&[], (0., 0.)), None);
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn the_primary_alone_unless_chosen() {
+        let on_show = paths(&["/a", "/b", "/c"]);
+        // Chosen elsewhere: that one alone.
+        assert_eq!(
+            shown_worktrees(&paths(&["/a", "/b"]), Some(Path::new("/c")), &on_show),
+            paths(&["/c"])
+        );
+        // Among the chosen: all of them, in the sidebar's order.
+        assert_eq!(
+            shown_worktrees(&paths(&["/c", "/a"]), Some(Path::new("/a")), &on_show),
+            paths(&["/a", "/c"])
+        );
+        // What the pickers no longer show drops out, the primary never.
+        assert_eq!(
+            shown_worktrees(&paths(&["/z", "/b", "/y"]), Some(Path::new("/z")), &on_show),
+            paths(&["/z", "/b"])
+        );
+        assert!(shown_worktrees(&[], None, &on_show).is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_click_adds_or_removes_never_the_last() {
+        let shown = paths(&["/a"]);
+        assert_eq!(toggled(&shown, Path::new("/b")), paths(&["/a", "/b"]));
+        assert_eq!(toggled(&shown, Path::new("/a")), paths(&["/a"]));
+        assert_eq!(
+            toggled(&paths(&["/a", "/b"]), Path::new("/a")),
+            paths(&["/b"])
+        );
+    }
+
+    #[test]
+    fn two_letters_stand_for_a_worktree() {
+        assert_eq!(initials("feature-login"), "FL");
+        assert_eq!(initials("wt/fix_merge"), "FM");
+        assert_eq!(initials("claudhub"), "CL");
+        assert_eq!(initials("é"), "É");
+        assert_eq!(initials("--"), "");
     }
 }

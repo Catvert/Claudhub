@@ -209,13 +209,14 @@ src/
                     ouvre : le panneau des changements et le diff, en dialogue
     context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
-                    zoom, ses trois vues — pur, testé
+                    zoom, ses deux vues — pur, testé
     focus.rs        le tableau du focus : quelle carte dans quelle colonne, ce
-                    qui arrive se place par règle, où tombe un dépôt — pur, testé
+                    qui arrive se place par règle, où tombe un dépôt, quels
+                    worktrees sont montrés — pur, testé
     focus_view.rs   la vue par défaut de l'accueil : la barre latérale des
-                    worktrees, et un worktree à la fois sur son tableau
-    overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
-                    et les colonnes
+                    worktrees (ou son rail), et ceux choisis côte à côte,
+                    chacun sur son tableau
+    overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes
     revive.rs       les terminaux qui survivent à la fenêtre : quelle session
                     Claude un onglet porte, la commande qui la reprend — pur
     review.rs / terminal_view.rs
@@ -642,12 +643,25 @@ worktree.
   et les notes du dépôt restent, étant à chacun. Les deux sont des **popovers
   à cases** et non des menus : un menu se ferme à chaque pression, et cocher
   trois projets demandait trois ouvertures. Jamais le dernier décoché.
-- **Trois vues, un onglet** (`HomeMode`, `set_home_mode`, retenu dans la
+- **Deux vues, un onglet** (`HomeMode`, `set_home_mode`, retenu dans la
   session). **Par défaut le focus** (`ui::focus_view`) : une barre latérale
   des worktrees affichés — qui travaille, combien est en cours — et au milieu
-  **un seul** worktree, le regardé (`active`, celui de toute la fenêtre), sur
-  un **tableau** (`ui::focus`) : des colonnes de cartes que la main arrange,
-  retenues par worktree. Une carte se **traîne par son en-tête** — celui que
+  **ceux qu'on y a choisis, côte à côte**, chacun sur son **tableau**
+  (`ui::focus`). Un clic montre un worktree seul et le rend regardé
+  (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
+  retire, jamais le dernier ; choisir un worktree ailleurs dans la fenêtre le
+  montre seul (`focus::shown_worktrees`). La sélection et la barre repliée en
+  **rail d'initiales** sont retenues dans la session. C'était la vue
+  Colonnes, tous les worktrees à la fois et sans main dans la disposition :
+  deux vues des mêmes tableaux ne différaient que par le nombre choisi, et
+  une session enregistrée sur elle se relit en focus (`serde(alias)`). Un
+  tableau prend sa part de la largeur, **jamais moins que ses colonnes** —
+  c'est la rangée des tableaux qui défile, jamais un tableau seul — et ce
+  qu'il tient dans l'instant (géométrie, défilements, colonne qu'on élargit)
+  est **rangé par worktree** : une note du dépôt est sur chaque tableau à la
+  fois, et c'est la pression qui dit sur lequel elle bouge (`FocusDrag::board`).
+  Un tableau, ce sont des colonnes de cartes que la main arrange, retenues par
+  worktree. Une carte se **traîne par son en-tête** — celui que
   chaque nœud a déjà, `grab` — vers une autre colonne, ou à droite de la
   dernière, ce qui en crée une ; pendant le trajet la carte reste en place,
   pâlie, une carte miniature suit le pointeur en disant où elle tombera, et
@@ -659,37 +673,22 @@ worktree.
   déposée se pose d'un glissement et d'un halo qui s'éteint
   (`with_animation`, un identifiant par dépôt). Une colonne se règle par son
   bord droit, largeur retenue avec le tableau, double-clic pour la rendre à
-  l'espace — jamais sous la largeur des réglages (`terminal.column_min`) ; le
-  tableau défile de côté plutôt que de serrer un terminal. Seul ce qui arrive se place par règle — un terminal
+  l'espace — jamais sous la largeur des réglages (`terminal.column_min`).
+  Seul ce qui arrive se place par règle — un terminal
   dans la colonne dont on a pressé « Terminal », sinon dans une colonne à lui.
   Un terminal n'a pas d'identité qui survive au processus : le magasin garde
   **qu'un terminal était là**, et ceux qui reviennent reprennent ces places
   dans l'ordre de lecture. **La carte du worktree porte ses modifications**
   (`render_changes_section`) : sur ce tableau, c'est une seule carte. Un
-  terminal au pied d'une colonne en prend le reste. Le plan et les colonnes
-  répondent « où en est chacun », et le paient en place ; la journée se passe
-  dans un worktree avec un œil sur les autres, ce qu'est la disposition d'un
-  éditeur. Puis le plan, et des
-  **colonnes**, chacune sous un **titre** plus grand que tout ce qu'elle
-  porte (`column_title`), qui reste quand ses nœuds défilent — une par worktree, sa carte, ses terminaux, ses
-  notes ; une plus étroite par dépôt pour le nœud git. **Chaque colonne défile
-  seule**, avec une barre qu'on attrape (la molette sur un terminal est au
-  terminal), et chaque nœud a sa hauteur, réglée par son bord bas : celle du
-  plan pour une carte ou une note, une à lui pour un terminal
-  (`column_height`), la largeur d'une colonne n'étant pas celle d'une carte.
-  **Les colonnes de worktree remplissent la largeur** qu'elles se partagent,
-  jamais sous un minimum (la rangée défile alors) ; le bord droit d'une colonne
-  se tire pour lui donner la sienne, retenue dans le magasin, et un double-clic
-  la rend à l'espace. Une colonne se nomme par le **nœud** à sa tête
-  (`column_key`) : celle d'un dépôt et celle de son checkout principal ont le
-  même chemin, et partager un défilement le bloquait à zéro. Ce sont les **mêmes nœuds peints par les mêmes fonctions**, placés par
-  une disposition au lieu d'une main : ce que le plan retient (replis, masqués,
-  hauteurs) vaut ici, et ce qui n'appartient qu'au plan — traîner un en-tête,
-  la poignée, les tailles prédéfinies d'un terminal — n'y existe pas. Un
-  terminal y mesure sa propre boîte (`set_canvas(None)`), et agrandir un nœud
-  lui donne toutes les colonnes (`overview_zoomed`). Sans liens, c'est le cadre
-  qui dit qu'un agent travaille ou attend — celui de la carte aussi, quand
-  aucun onglet d'agent n'est là.
+  terminal au pied d'une colonne en prend le reste. Ce sont les **mêmes
+  nœuds peints par les mêmes fonctions** que le plan (`column_node`) : ce que
+  le plan retient (replis, masqués, hauteurs) vaut ici. Un terminal y mesure
+  sa propre boîte (`set_canvas(None)`), et agrandir un nœud lui donne le
+  milieu (`overview_zoomed`). Sans liens, c'est le cadre qui dit qu'un agent
+  travaille ou attend — celui de la carte aussi, quand aucun onglet d'agent
+  n'est là — et **seuls les tableaux montrés demandent des frames**
+  (`prepare_laid_out`) : un agent au travail dans un worktree que seule la
+  barre liste repeignait la fenêtre trente fois par seconde pour rien.
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
   Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
   **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
@@ -713,9 +712,9 @@ worktree.
   terminal est un nœud où on le voit travailler, et **cède la place** au
   résultat une fois le fichier là et le tour de l'agent fini — le `status` que
   Claude écrit pour son pid. Ce terminal n'est pas retenu : rouvert, il
-  relancerait la demande. **En colonnes, ce `+` quitte l'en-tête** pour une
-  tuile au pied des terminaux (`add_tile`) : un shell d'un clic, le reste
-  sous le chevron — « un de plus » se lit après le dernier.
+  relancerait la demande. **Sur un tableau, ce `+` quitte l'en-tête** pour
+  le bouton à droite de la dernière colonne : un shell d'un clic, le reste
+  sous le chevron.
 - **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
   sa branche fusionnée (plus aucun commit d'avance sur sa base) :
   `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de
@@ -1145,7 +1144,13 @@ fermait le dialogue et jetait ce qu'on venait d'écrire.
 
 **Le terminal** (`terminal/`) — `alacritty_terminal` fournit le parseur, la
 grille et le pty. Le verrou de la grille est partagé avec la boucle d'E/S :
-**ne jamais dessiner sous ce verrou**, d'où l'instantané. Une police à chasse
+**ne jamais dessiner sous ce verrou**, d'où l'instantané. **Sur l'accueil, un terminal
+est une vue en cache** (`Entity::cached`) : la frame que demande le lien
+d'un agent, ou la sortie d'un autre terminal, ne le repeint pas. Il ne se
+repeint que s'il se notifie, si sa boîte bouge, ou sur un rafraîchissement
+(focus, réglages, thème) — donc ce qui le change du dehors notifie
+(`set_canvas`), et ce qu'il pose au prepaint demande sa frame
+(`on_next_frame`) : sinon l'image reste l'ancienne, sans erreur. Une police à chasse
 fixe ne suffit pas à aligner les colonnes : chaque run est posé **à sa colonne**
 en absolu, et un caractère mesuré hors grille reçoit une case à lui. Les lignes
 de l'historique sont numérotées **négativement**. Le redimensionnement attend que

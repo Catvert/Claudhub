@@ -1,13 +1,18 @@
 //! The home screen's focus view, its default: a sidebar of every worktree on
-//! show, and one of them at a time in the middle, its cards on a board.
+//! show, and the ones chosen in it in the middle, side by side, each one's
+//! cards on its board.
 //!
-//! The plane answers « where does each worktree stand », the columns « what
-//! is each doing », and both pay for it in room: five worktrees share one
-//! screen. Most of a day is spent in one worktree with a glance at the
-//! others, which is what an editor's layout is — a list to choose from on
-//! the left, what was chosen filling the rest. The sidebar is that list, and
-//! it says of each worktree what one glances at: whether an agent works in
-//! it, how much it has in progress, how many terminals it has open.
+//! The plane answers « where does each worktree stand », and pays for it in
+//! room: five worktrees share one screen. Most of a day is spent in one
+//! worktree with a glance at the others, which is what an editor's layout
+//! is — a list to choose from on the left, what was chosen filling the rest.
+//! The sidebar is that list, and it says of each worktree what one glances
+//! at: whether an agent works in it, how much it has in progress, how many
+//! terminals it has open. A click shows a worktree alone, `Ctrl`+click adds
+//! it beside the others or takes it away (`focus::shown_worktrees`) — which
+//! is what the columns view was, every worktree at once, and why it went:
+//! two views of the same boards differed only by how many were chosen. The
+//! sidebar folds to a rail of initials, for the room.
 //!
 //! **The middle is a board** (`ui::focus`, pure): columns of cards the hand
 //! arranges. A card is dragged by its head — the head every node already
@@ -28,7 +33,13 @@
 //!
 //! **Which worktree is the one on show** — `active`, the window's: choosing
 //! one here is choosing it for the editor too, and the branch picker, the
-//! review and the title bar all speak of it already.
+//! review and the title bar all speak of it already. The others shown beside
+//! it are only shown.
+//!
+//! **What a board holds in the moment is its own** — its geometry, its
+//! columns' scrolls, the column being widened — keyed by worktree: two
+//! boards side by side measure two sets of columns, and a card only ever
+//! moves within its own.
 
 use std::path::{Path, PathBuf};
 
@@ -52,6 +63,8 @@ use crate::ui::overview::{self, Node};
 
 /// The sidebar's width.
 const SIDEBAR_WIDTH: f32 = 260.;
+/// The sidebar folded to its rail: a column of initials.
+const RAIL_WIDTH: f32 = 52.;
 /// The button right of the last column.
 const ADD_COLUMN_WIDTH: f32 = 44.;
 /// How far the pointer travels before a press on a head is a drag: a click
@@ -94,6 +107,9 @@ struct FocusColumn<'a> {
 /// A card on its way to another place.
 #[derive(Clone, Debug)]
 pub(super) struct FocusDrag {
+    /// The board it was taken from, and the only one it is dropped on: a
+    /// repository's note stands on every board at once.
+    pub board: PathBuf,
     pub node: Node,
     pub from: Point<Pixels>,
     pub at: Point<Pixels>,
@@ -102,24 +118,28 @@ pub(super) struct FocusDrag {
 }
 
 impl ClaudhubApp {
-    /// The focus view: the sidebar, and the worktree on show.
+    /// The focus view: the sidebar, and the worktrees on show.
     pub(super) fn render_overview_focus(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (_, at_work) = self.prepare_laid_out(cx);
+        let shown = self.focus_worktrees();
+        let at_work = self.prepare_laid_out(&shown, cx);
         let gap = window.rem_size() * 0.75;
-        let sidebar = self.render_focus_sidebar(cx);
-        let shown = self.focus_worktree();
-        let main: AnyElement = match (shown, self.overview_zoomed.clone()) {
+        let sidebar = self.render_focus_sidebar(&shown, cx);
+        // The boards gone take what they held in the moment with them.
+        self.focus_geometry.retain(|path, _| shown.contains(path));
+        self.focus_column_scrolls
+            .retain(|path, _| shown.contains(path));
+        let main: AnyElement = match self.overview_zoomed.clone() {
             // A maximised node fills the middle, the sidebar staying: it is
             // how one goes elsewhere.
-            (_, Some(node)) => v_flex()
+            Some(node) => v_flex()
                 .size_full()
                 .child(self.column_node(&node, false, &at_work, window, cx))
                 .into_any_element(),
-            (None, None) => v_flex()
+            None if shown.is_empty() => v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
@@ -127,11 +147,42 @@ impl ClaudhubApp {
                 .text_color(cx.theme().muted_foreground)
                 .child(tr!("overview-empty"))
                 .into_any_element(),
-            (Some(path), None) => {
-                // Its list of changes, even if the pickers leave it out of
-                // what the home screen reads.
-                self.ensure_changes_read(std::slice::from_ref(&path), cx);
-                self.render_focus_board(&path, gap, &at_work, window, cx)
+            None => {
+                // Their lists of changes, even if the pickers leave them out
+                // of what the home screen reads.
+                self.ensure_changes_read(&shown, cx);
+                let alone = shown.len() == 1;
+                let mut boards: Vec<AnyElement> = Vec::new();
+                for (index, path) in shown.iter().enumerate() {
+                    // Between two boards, a line: side by side, one's last
+                    // column reads as the next one's first otherwise.
+                    if index > 0 {
+                        boards.push(
+                            div()
+                                .flex_none()
+                                .w(px(1.))
+                                .h_full()
+                                .bg(cx.theme().border)
+                                .into_any_element(),
+                        );
+                    }
+                    boards.push(self.render_focus_board(path, gap, alone, &at_work, window, cx));
+                }
+                // The row scrolls sideways, never a board alone: each takes
+                // its share of the width, and never less than its columns'.
+                let row = h_flex()
+                    .id("focus-boards")
+                    .track_scroll(&self.focus_scroll)
+                    .size_full()
+                    .gap(gap)
+                    // The wheel scrolls what it is over, up and down: a row
+                    // that scrolls only sideways would otherwise turn every
+                    // notch that misses a column into a slide of the whole
+                    // row. Sideways is the bar's, or a sideways wheel's.
+                    .restrict_scroll_to_axis()
+                    .overflow_x_scroll()
+                    .children(boards);
+                super::scroll::both("focus-board-bar", &self.focus_scroll, row).into_any_element()
             }
         };
         let dragging = self.focus_drag.as_ref().is_some_and(|drag| drag.moving);
@@ -163,21 +214,81 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The worktree the middle shows: the one on show if there is one, else
+    /// The worktrees the middle shows, side by side — see
+    /// `focus::shown_worktrees`. The window's own is the one on show, else
     /// the first of the projects on show.
-    fn focus_worktree(&self) -> Option<PathBuf> {
-        self.active.clone().or_else(|| {
-            self.overview_repos()
-                .into_iter()
-                .find_map(|repo| self.overview_worktrees_of(repo).into_iter().next())
-        })
+    pub(super) fn focus_worktrees(&self) -> Vec<PathBuf> {
+        let on_show: Vec<PathBuf> = self
+            .overview_repos()
+            .into_iter()
+            .flat_map(|repo| self.overview_worktrees_of(repo))
+            .collect();
+        let primary = self.active.clone().or_else(|| on_show.first().cloned());
+        focus::shown_worktrees(&self.focus_chosen, primary.as_deref(), &on_show)
+    }
+
+    /// Keeps what the sidebar chose, for the next session too.
+    fn choose_focus(&mut self, chosen: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.focus_chosen = chosen.clone();
+        super::store::Store::update_global(cx, |store| store.session.focus_shown = chosen);
+    }
+
+    /// A worktree of the sidebar clicked: shown alone; with `Ctrl`, added
+    /// beside the others or taken away; twice, gone to work in.
+    fn focus_row_clicked(
+        &mut self,
+        path: &Path,
+        event: &gpui_kit::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let beside = event.modifiers().secondary();
+        if event.click_count() >= 2 {
+            // The second press of a `Ctrl` double click has nothing more to
+            // say than the first did.
+            if !beside {
+                self.work_in_worktree(path, window, cx);
+            }
+            return;
+        }
+        self.overview_zoomed = None;
+        if beside {
+            let next = focus::toggled(&self.focus_worktrees(), path);
+            // The window's own worktree taken away: the first left is.
+            let gone = self
+                .active
+                .as_deref()
+                .is_some_and(|active| !next.iter().any(|shown| shown == active));
+            let first = next.first().cloned();
+            self.choose_focus(next, cx);
+            if let (true, Some(first)) = (gone, first) {
+                self.select_worktree(first, window, cx);
+            }
+        } else {
+            self.choose_focus(vec![path.to_path_buf()], cx);
+            if self.active.as_deref() != Some(path) {
+                self.select_worktree(path.to_path_buf(), window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Folds the sidebar to its rail, or unfolds it.
+    fn toggle_focus_rail(&mut self, cx: &mut Context<Self>) {
+        self.focus_rail = !self.focus_rail;
+        let rail = self.focus_rail;
+        super::store::Store::update_global(cx, |store| store.session.focus_rail = rail);
+        cx.notify();
     }
 
     // — The sidebar ————————————————————————————————————————————————
 
     /// Every worktree of the projects on show, under its project's name —
-    /// the one on show lit, as a list's selection is.
-    fn render_focus_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// the ones shown lit, as a list's selection is. Folded, a rail.
+    fn render_focus_sidebar(&self, shown: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
+        if self.focus_rail {
+            return self.render_focus_rail(shown, cx);
+        }
         let theme = cx.theme().clone();
         let mut rows: Vec<AnyElement> = Vec::new();
         for repo in self.overview_repos() {
@@ -218,7 +329,7 @@ impl ClaudhubApp {
                     .into_any_element(),
             );
             for path in self.overview_worktrees_of(repo) {
-                rows.push(self.render_focus_row(&path, cx));
+                rows.push(self.render_focus_row(&path, shown, cx));
             }
         }
         let list = v_flex()
@@ -228,6 +339,33 @@ impl ClaudhubApp {
             .pb_2()
             .overflow_y_scroll()
             .children(rows);
+        // What `Ctrl` does is said where it is done, and the fold beside
+        // it: the one gesture of the list nothing on it would show.
+        let head = h_flex()
+            .flex_none()
+            .w_full()
+            .pl_2()
+            .pr_1()
+            .pt_1()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(tr!("focus-sidebar-hint")),
+            )
+            .child(
+                Button::new("focus-rail-fold")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("panel-left-close"))
+                    .tooltip(tr!("focus-sidebar-fold"))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
+            );
         v_flex()
             .flex_none()
             .w(px(SIDEBAR_WIDTH))
@@ -237,18 +375,147 @@ impl ClaudhubApp {
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(super::scroll::vertical(
+            .child(head)
+            .child(div().flex_1().min_h_0().child(super::scroll::vertical(
                 "focus-sidebar-bar",
                 &self.focus_sidebar_scroll,
                 list,
-            ))
+            )))
+            .into_any_element()
+    }
+
+    /// The sidebar folded: a column of initials, a line between two
+    /// projects. The same clicks as the list's, and each worktree's name in
+    /// its tooltip.
+    fn render_focus_rail(&self, shown: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let mut pills: Vec<AnyElement> = Vec::new();
+        for (index, repo) in self.overview_repos().into_iter().enumerate() {
+            if index > 0 {
+                pills.push(
+                    div()
+                        .flex_none()
+                        .w(px(24.))
+                        .h(px(1.))
+                        .my_1()
+                        .bg(theme.border)
+                        .into_any_element(),
+                );
+            }
+            for path in self.overview_worktrees_of(repo) {
+                pills.push(self.render_focus_pill(&path, shown, cx));
+            }
+        }
+        let list = v_flex()
+            .id("focus-rail-list")
+            .track_scroll(&self.focus_sidebar_scroll)
+            .size_full()
+            .items_center()
+            .gap_1()
+            .py_1()
+            .overflow_y_scroll()
+            .children(pills);
+        v_flex()
+            .flex_none()
+            .w(px(RAIL_WIDTH))
+            .h_full()
+            .items_center()
+            .overflow_hidden()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(
+                div().flex_none().pt_1().child(
+                    Button::new("focus-rail-unfold")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("panel-left-open"))
+                        .tooltip(tr!("focus-sidebar-unfold"))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
+                ),
+            )
+            .child(div().flex_1().min_h_0().w_full().child(list))
+            .into_any_element()
+    }
+
+    /// A worktree on the rail: two letters, lit when shown, ringed when it
+    /// is the window's own, and the dot of its agent at the corner.
+    fn render_focus_pill(
+        &self,
+        path: &Path,
+        shown: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (_, label) = self.project_label(path);
+        let branch = self
+            .repos
+            .worktree(path)
+            .and_then(|worktree| worktree.branch.clone())
+            .filter(|branch| branch.as_str() != label.as_ref());
+        let name = SharedString::from(match &branch {
+            Some(branch) => format!("{label} · {branch}"),
+            None => label.to_string(),
+        });
+        let lit = shown.iter().any(|shown| shown == path);
+        let own = self.active.as_deref() == Some(path);
+        let agent = self.agents.get(path).cloned();
+        let open = path.to_path_buf();
+        div()
+            .id(SharedString::from(format!("focus-pill-{}", path.display())))
+            .relative()
+            .flex_none()
+            .size(px(34.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(if own {
+                theme.ring
+            } else {
+                gpui_kit::transparent_black()
+            })
+            .when(lit, |el| el.bg(theme.list_active))
+            .when(!lit, |el| el.hover(|style| style.bg(theme.list_hover)))
+            .cursor_pointer()
+            .text_xs()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .text_color(if lit {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx)
+            })
+            .on_click(
+                cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                    this.focus_row_clicked(&open, event, window, cx);
+                }),
+            )
+            .child(SharedString::from(focus::initials(&label)))
+            .children(agent.map(|agent| {
+                div()
+                    .absolute()
+                    .top(px(-2.))
+                    .right(px(-2.))
+                    .child(super::topbar::agent_dot(&agent, cx))
+            }))
             .into_any_element()
     }
 
     /// A worktree in the sidebar: its name and branch, who works in it, how
     /// many terminals it has, and how much it has in progress. A click shows
-    /// it; twice goes to work in it, as a card's double click does.
-    fn render_focus_row(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// it alone, `Ctrl`+click beside the others; twice goes to work in it,
+    /// as a card's double click does.
+    fn render_focus_row(
+        &self,
+        path: &Path,
+        shown: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let (_, label) = self.project_label(path);
         let branch = self
@@ -257,7 +524,8 @@ impl ClaudhubApp {
             .and_then(|worktree| worktree.branch.clone())
             .filter(|branch| branch.as_str() != label.as_ref())
             .map(SharedString::from);
-        let lit = self.focus_worktree().as_deref() == Some(path);
+        let lit = shown.iter().any(|shown| shown == path);
+        let own = self.active.as_deref() == Some(path);
         let agent = self.agents.get(path).cloned();
         let summary = self
             .summaries
@@ -290,12 +558,7 @@ impl ClaudhubApp {
             .when(!lit, |el| el.hover(|style| style.bg(theme.list_hover)))
             .on_click(
                 cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                    if event.click_count() >= 2 {
-                        this.work_in_worktree(&open, window, cx);
-                    } else if this.active.as_deref() != Some(open.as_path()) {
-                        this.overview_zoomed = None;
-                        this.select_worktree(open.clone(), window, cx);
-                    }
+                    this.focus_row_clicked(&open, event, window, cx);
                 }),
             )
             .child(icon("git-branch").xsmall().text_color(if lit {
@@ -311,7 +574,8 @@ impl ClaudhubApp {
                         div()
                             .truncate()
                             .text_sm()
-                            .when(lit, |el| el.font_weight(gpui_kit::FontWeight::SEMIBOLD))
+                            // The window's own, among those shown.
+                            .when(own, |el| el.font_weight(gpui_kit::FontWeight::SEMIBOLD))
                             .child(label),
                     )
                     .children(branch.map(|branch| {
@@ -440,11 +704,18 @@ impl ClaudhubApp {
         });
     }
 
-    /// The worktree on show: its title, and its board.
+    /// A worktree on show: its title, and its board. `alone`, it says how
+    /// a card is moved; beside others, the room goes to the cards.
+    ///
+    /// **A board is as wide as its share, never narrower than its columns**
+    /// — each at the width the hand gave it or the least the settings give,
+    /// the gaps and the button after the last: the row of boards scrolls,
+    /// never a board alone.
     fn render_focus_board(
         &mut self,
         path: &Path,
         gap: Pixels,
+        alone: bool,
         at_work: &overview::AtWork,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -455,18 +726,29 @@ impl ClaudhubApp {
             .get(path)
             .map(Board::shown)
             .unwrap_or_default();
-        while self.focus_column_scrolls.len() < shown.len() {
-            self.focus_column_scrolls
-                .push(gpui_kit::ScrollHandle::new());
+        let scrolls = self
+            .focus_column_scrolls
+            .entry(path.to_path_buf())
+            .or_default();
+        while scrolls.len() < shown.len() {
+            scrolls.push(gpui_kit::ScrollHandle::new());
         }
+        let geometry = self
+            .focus_geometry
+            .entry(path.to_path_buf())
+            .or_default()
+            .clone();
         // Where a drop would land, read against what the last frame
         // measured, the room it opened taken back out — before this frame
-        // measures anew.
-        let drag = self.focus_drag.clone().filter(|drag| drag.moving);
+        // measures anew. Only on the board the card was taken from.
+        let drag = self
+            .focus_drag
+            .clone()
+            .filter(|drag| drag.moving && drag.board == path);
         let count = shown.len();
         let list_gap = f32::from(window.rem_size() * 0.5);
         let (aim, room_height) = match &drag {
-            Some(drag) => self.focus_aim(drag, &shown),
+            Some(drag) => self.focus_aim(drag, &shown, &geometry),
             None => (None, 0.),
         };
         // The room's height is what it is painted at — it grows as it opens,
@@ -475,7 +757,7 @@ impl ClaudhubApp {
         let opened = aim
             .filter(|target| target.column < count)
             .map(|target| (target.column, target.index, 0.));
-        *self.focus_geometry.borrow_mut() = focus::Geometry {
+        *geometry.borrow_mut() = focus::Geometry {
             spans: shown
                 .iter()
                 .map(|(_, cards)| ColumnSpan {
@@ -488,32 +770,41 @@ impl ClaudhubApp {
         };
 
         let column_min = super::settings::Settings::global(cx).terminal.column_min;
+        let widths: Vec<Option<f32>> = shown
+            .iter()
+            .map(|(board_column, _)| {
+                self.focus_boards
+                    .get(path)
+                    .and_then(|board| board.width(*board_column))
+            })
+            .collect();
+        let least_width = widths
+            .iter()
+            .map(|width| width.map_or(column_min, |width| width.max(column_min)))
+            .sum::<f32>()
+            + f32::from(gap) * count as f32
+            + ADD_COLUMN_WIDTH;
         let mut columns: Vec<AnyElement> = Vec::new();
         for (rank, (board_column, cards)) in shown.into_iter().enumerate() {
             let room = opened
                 .filter(|(column, _, _)| *column == rank)
                 .map(|(_, index, _)| (index, room_height, list_gap));
-            columns.push(
-                self.render_focus_column(
-                    path,
-                    rank,
-                    board_column,
-                    cards,
-                    FocusColumn {
-                        drag: drag.as_ref(),
-                        room,
-                        least: column_min,
-                        width: self
-                            .focus_boards
-                            .get(path)
-                            .and_then(|board| board.width(board_column)),
-                        gap,
-                    },
-                    at_work,
-                    window,
-                    cx,
-                ),
-            );
+            columns.push(self.render_focus_column(
+                path,
+                rank,
+                board_column,
+                cards,
+                FocusColumn {
+                    drag: drag.as_ref(),
+                    room,
+                    least: column_min,
+                    width: widths[rank],
+                    gap,
+                },
+                at_work,
+                window,
+                cx,
+            ));
         }
         let new_column = aim.is_some_and(|target| target.column >= count);
         if let (true, Some(drag)) = (new_column, drag.as_ref()) {
@@ -522,19 +813,21 @@ impl ClaudhubApp {
         columns.push(self.render_add_column(path, new_column, cx));
 
         let row = h_flex()
-            .id("focus-board")
-            .track_scroll(&self.focus_scroll)
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .gap(gap)
-            .overflow_x_scroll()
-            // The wheel scrolls what it is over, up and down: a row that
-            // scrolls only sideways would otherwise turn every notch that
-            // misses a column into a slide of the whole board. Sideways is
-            // the bar's, or a sideways wheel's.
-            .restrict_scroll_to_axis()
             .children(columns);
         v_flex()
-            .size_full()
+            // Its own id, under which its columns' ids are told apart from
+            // the next board's.
+            .id(SharedString::from(format!(
+                "focus-board-{}",
+                path.display()
+            )))
+            .flex_1()
+            .min_w(px(least_width))
+            .h_full()
             .child(
                 h_flex()
                     .flex_none()
@@ -546,20 +839,18 @@ impl ClaudhubApp {
                             .min_w_0()
                             .child(self.worktree_title(path, cx)),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .pb_2()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("focus-drag-hint")),
-                    ),
+                    .when(alone, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .pb_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr!("focus-drag-hint")),
+                        )
+                    }),
             )
-            .child(div().flex_1().min_h_0().child(super::scroll::both(
-                "focus-board-bar",
-                &self.focus_scroll,
-                row,
-            )))
+            .child(row)
             .children(drag.map(|drag| self.render_drag_ghost(&drag, aim, count, cx)))
             .into_any_element()
     }
@@ -571,8 +862,9 @@ impl ClaudhubApp {
         &self,
         drag: &FocusDrag,
         shown: &[(usize, Vec<(usize, Node)>)],
+        geometry: &std::rc::Rc<std::cell::RefCell<focus::Geometry>>,
     ) -> (Option<Target>, f32) {
-        let geometry = self.focus_geometry.borrow();
+        let geometry = geometry.borrow();
         let closed = geometry.closed();
         let target = focus::drop_target(&closed, (f32::from(drag.at.x), f32::from(drag.at.y)));
         let from = shown.iter().enumerate().find_map(|(column, (_, cards))| {
@@ -616,6 +908,7 @@ impl ClaudhubApp {
             width,
             gap,
         } = column;
+        let geometry = self.focus_geometry[path].clone();
         let last = cards.len().saturating_sub(1);
         let holds_terminal = cards
             .iter()
@@ -634,7 +927,7 @@ impl ClaudhubApp {
                 && !self.overview_hand.collapsed.contains(&node);
             let faded = drag.is_some_and(|drag| drag.node == node);
             let card = self.render_focus_card(&node, fills, at_work, window, cx);
-            let measured = self.focus_geometry.clone();
+            let measured = geometry.clone();
             let measure = canvas(
                 move |_, _, _| {},
                 move |bounds, _, _, _| {
@@ -714,7 +1007,7 @@ impl ClaudhubApp {
                     .into_any_element(),
             );
         }
-        let measured = self.focus_geometry.clone();
+        let measured = geometry.clone();
         let measure = canvas(
             move |_, _, _| {},
             move |bounds, _, _, _| {
@@ -727,7 +1020,7 @@ impl ClaudhubApp {
         .absolute()
         .size_full();
         let gutter = super::theme::scroll_gutter();
-        let scroll = self.focus_column_scrolls[rank].clone();
+        let scroll = self.focus_column_scrolls[path][rank].clone();
         let list = v_flex()
             .id(("focus-column-list", rank))
             .track_scroll(&scroll)
@@ -738,7 +1031,7 @@ impl ClaudhubApp {
             .overflow_y_scroll()
             .children(elements);
         let grip = self
-            .width_grip(board_column, rank, cx)
+            .width_grip(path, board_column, rank, cx)
             .right(-super::overview_view::grip_offset(gap, &scroll));
         div()
             .relative()
@@ -764,6 +1057,7 @@ impl ClaudhubApp {
     /// lets the column fill again — the one gesture back to where it started.
     fn width_grip(
         &self,
+        path: &Path,
         board_column: usize,
         rank: usize,
         cx: &mut Context<Self>,
@@ -771,7 +1065,9 @@ impl ClaudhubApp {
         let theme = cx.theme().clone();
         let held = self
             .focus_resize
-            .is_some_and(|(column, _, _)| column == board_column);
+            .as_ref()
+            .is_some_and(|(board, column, _, _)| board == path && *column == board_column);
+        let (pressed, reset) = (path.to_path_buf(), path.to_path_buf());
         let lit = theme.ring.opacity(0.6);
         div()
             .id(("focus-width-grip", rank))
@@ -795,14 +1091,20 @@ impl ClaudhubApp {
                     // fills has no width of its own yet.
                     let drawn = this
                         .focus_geometry
-                        .borrow()
-                        .spans
-                        .get(rank)
-                        .map(|span| span.right - span.left)
+                        .get(&pressed)
+                        .and_then(|geometry| {
+                            let geometry = geometry.borrow();
+                            let span = geometry.spans.get(rank)?;
+                            Some(span.right - span.left)
+                        })
                         .unwrap_or(0.);
                     if drawn > 0. {
-                        this.focus_resize =
-                            Some((board_column, f32::from(event.position.x), drawn));
+                        this.focus_resize = Some((
+                            pressed.clone(),
+                            board_column,
+                            f32::from(event.position.x),
+                            drawn,
+                        ));
                         cx.notify();
                     }
                 }),
@@ -813,12 +1115,10 @@ impl ClaudhubApp {
                         return;
                     }
                     this.focus_resize = None;
-                    if let Some(path) = this.focus_worktree() {
-                        if let Some(board) = this.focus_boards.get_mut(&path) {
-                            board.set_width(board_column, None);
-                        }
-                        this.remember_focus_board(&path, cx);
+                    if let Some(board) = this.focus_boards.get_mut(&reset) {
+                        board.set_width(board_column, None);
                     }
+                    this.remember_focus_board(&reset, cx);
                     cx.notify();
                 }),
             )
@@ -955,8 +1255,33 @@ impl ClaudhubApp {
     // — Dragging a card —————————————————————————————————————————————
 
     /// A press on a card's head, on the focus board: a drag, once it moves.
+    ///
+    /// Its board is the one under the press: a repository's note stands on
+    /// every board, and only where it was taken says which it moves on.
     pub(super) fn focus_grab(&mut self, node: Node, at: Point<Pixels>) {
+        let x = f32::from(at.x);
+        let under = self
+            .focus_geometry
+            .iter()
+            .find(|(_, geometry)| geometry.borrow().covers(x))
+            .map(|(path, _)| path.clone());
+        let own = match &node {
+            Node::Worktree(path) | Node::Changes(path) => Some(path.clone()),
+            Node::Terminal(id) => self
+                .terminals
+                .iter()
+                .find(|terminal| terminal.view.entity_id().as_u64() == *id)
+                .map(|terminal| terminal.worktree.clone()),
+            Node::Note(_) | Node::Git(_) => None,
+        };
+        let Some(board) = under
+            .or(own)
+            .or_else(|| self.focus_worktrees().into_iter().next())
+        else {
+            return;
+        };
         self.focus_drag = Some(FocusDrag {
+            board,
             node,
             from: at,
             at,
@@ -967,13 +1292,11 @@ impl ClaudhubApp {
     fn focus_dragged(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         // A column's edge, held: its width follows the pointer, never under
         // the least the settings give.
-        if let Some((column, from, start)) = self.focus_resize {
+        if let Some((path, column, from, start)) = self.focus_resize.clone() {
             let least = super::settings::Settings::global(cx).terminal.column_min;
             let width = (start + f32::from(at.x) - from).max(least);
-            if let Some(path) = self.focus_worktree() {
-                if let Some(board) = self.focus_boards.get_mut(&path) {
-                    board.set_width(column, Some(width));
-                }
+            if let Some(board) = self.focus_boards.get_mut(&path) {
+                board.set_width(column, Some(width));
             }
             cx.notify();
             return;
@@ -994,10 +1317,8 @@ impl ClaudhubApp {
     /// The card let go: moved where the bar said, and the board kept.
     fn focus_dropped(&mut self, cx: &mut Context<Self>) {
         // A column's edge let go: its width is kept.
-        if self.focus_resize.take().is_some() {
-            if let Some(path) = self.focus_worktree() {
-                self.remember_focus_board(&path, cx);
-            }
+        if let Some((path, ..)) = self.focus_resize.take() {
+            self.remember_focus_board(&path, cx);
             cx.notify();
             return;
         }
@@ -1007,13 +1328,11 @@ impl ClaudhubApp {
         if !drag.moving {
             return;
         }
-        let Some(path) = self.focus_worktree() else {
-            return;
-        };
-        let target = {
-            let closed = self.focus_geometry.borrow().closed();
+        let path = drag.board.clone();
+        let target = self.focus_geometry.get(&path).and_then(|geometry| {
+            let closed = geometry.borrow().closed();
             focus::drop_target(&closed, (f32::from(drag.at.x), f32::from(drag.at.y)))
-        };
+        });
         if let (Some(target), Some(board)) = (target, self.focus_boards.get_mut(&path)) {
             let target = board.resolve(target);
             board.move_card(&drag.node, target);
@@ -1037,10 +1356,13 @@ impl ClaudhubApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let (glyph, name) = self.card_name(&drag.node, cx);
-        let measured = self.focus_geometry.clone();
+        let measured = self.focus_geometry.get(&drag.board).cloned();
         let measure = canvas(
             move |_, _, _| {},
             move |bounds, _, _, _| {
+                let Some(measured) = &measured else {
+                    return;
+                };
                 if let Some(opened) = measured.borrow_mut().opened.as_mut() {
                     opened.2 = f32::from(bounds.size.height) + gap;
                 }

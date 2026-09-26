@@ -352,14 +352,16 @@ pub struct Plan {
     pub bounds: Rect,
 }
 
-/// The three ways the home screen shows what is open.
+/// The two ways the home screen shows what is open.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HomeMode {
-    /// One worktree at a time, chosen in a sidebar, its nodes as cards.
+    /// The worktrees chosen in a sidebar, each on its board of cards, side
+    /// by side. It took over the columns view, which was the same thing
+    /// with every worktree at once and no hand in the arrangement — hence
+    /// the alias, for a session saved on it.
     #[default]
+    #[serde(alias = "Columns")]
     Focus,
-    /// A column per worktree, side by side.
-    Columns,
     /// The plane, zoomed and panned, every tree at once.
     Canvas,
 }
