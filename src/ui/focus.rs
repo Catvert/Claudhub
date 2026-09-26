@@ -518,9 +518,77 @@ pub fn header_span(board: (f32, f32), at: f32, room: f32) -> Option<(f32, f32)> 
     (right - left >= LEAST).then_some((left, right))
 }
 
+/// What a worktree's row in the sidebar says: a title, and a second line
+/// only when it adds something. The main checkout is named by its branch —
+/// its folder is the project's, already the heading above it. A linked
+/// worktree is named by its folder, and its branch follows only when it is
+/// not the same word again: `wt/rentability-v2` under `rentability-v2`
+/// said it twice.
+pub fn row_words(label: &str, branch: Option<&str>, is_main: bool) -> (String, Option<String>) {
+    match (is_main, branch) {
+        (true, Some(branch)) => (branch.to_string(), None),
+        (_, None) => (label.to_string(), None),
+        (false, Some(branch)) => {
+            let last = branch.rsplit('/').next().unwrap_or(branch);
+            let same = branch == label || last == label;
+            (label.to_string(), (!same).then(|| branch.to_string()))
+        }
+    }
+}
+
+/// A count in few characters, for a line that has little room: the lines a
+/// worktree has in progress read as an order of size, not a figure.
+pub fn short_count(count: usize) -> String {
+    match count {
+        0..=999 => count.to_string(),
+        1_000..=9_999 => {
+            let tenths = (count + 50) / 100;
+            if tenths.is_multiple_of(10) {
+                format!("{}k", tenths / 10)
+            } else {
+                format!("{}.{}k", tenths / 10, tenths % 10)
+            }
+        }
+        10_000..=999_999 => format!("{}k", (count + 500) / 1_000),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_says_each_thing_once() {
+        // The main checkout: its branch, the project being the heading.
+        assert_eq!(
+            row_words("app-tech", Some("main"), true),
+            ("main".into(), None)
+        );
+        // A linked one whose branch is its folder again, prefixed or not.
+        assert_eq!(
+            row_words("rentability-v2", Some("wt/rentability-v2"), false),
+            ("rentability-v2".into(), None)
+        );
+        assert_eq!(row_words("dev", Some("dev"), false), ("dev".into(), None));
+        // One whose branch says something else.
+        assert_eq!(
+            row_words("review", Some("fix/login"), false),
+            ("review".into(), Some("fix/login".into()))
+        );
+        // Detached: the folder.
+        assert_eq!(row_words("app", None, true), ("app".into(), None));
+    }
+
+    #[test]
+    fn a_count_shortens_to_its_order_of_size() {
+        assert_eq!(short_count(106), "106");
+        assert_eq!(short_count(1_000), "1k");
+        assert_eq!(short_count(1_240), "1.2k");
+        assert_eq!(short_count(9_960), "10k");
+        assert_eq!(short_count(160_293), "160k");
+        assert_eq!(short_count(2_450_000), "2.5M");
+    }
 
     #[test]
     fn the_arrows_go_from_column_to_column() {

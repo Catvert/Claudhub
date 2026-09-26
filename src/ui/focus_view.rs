@@ -371,14 +371,20 @@ impl ClaudhubApp {
                 )
             });
             let (fold, pick) = (main.clone(), main.clone());
+            // A project is a heading, not a row: small capitals in the muted
+            // tone, so that the worktrees under it are what the eye reads.
+            // Its `+` shows under the pointer only — five of them, one a
+            // project, were five more things to read on every look.
+            let group = SharedString::from(format!("focus-project-group-{}", main.display()));
             rows.push(
                 h_flex()
+                    .group(group.clone())
                     .w_full()
                     .pl_1()
                     .pr_2()
                     .pt_3()
                     .pb_1()
-                    .gap_1()
+                    .gap_0p5()
                     .items_center()
                     // The chevron folds; the name shows the whole project.
                     .child(
@@ -407,11 +413,15 @@ impl ClaudhubApp {
                             .flex_1()
                             .min_w_0()
                             .px_1()
-                            .gap_1()
+                            .py_0p5()
+                            .gap_1p5()
                             .items_center()
                             .rounded(theme.radius)
                             .cursor_pointer()
-                            .hover(|style| style.bg(theme.list_hover))
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .hover(|style| style.text_color(theme.foreground))
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(tr!(
                                     "focus-project-hint"
@@ -428,35 +438,37 @@ impl ClaudhubApp {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_sm()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child(SharedString::from(repo.name.clone())),
+                                    .child(SharedString::from(repo.name.to_uppercase())),
                             )
                             .when(folded, |el| {
                                 el.child(
                                     div()
                                         .flex_none()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
+                                        .font_weight(gpui_kit::FontWeight::NORMAL)
                                         .child(SharedString::from(worktrees.len().to_string())),
                                 )
                             })
                             .children(outline_of(hidden_doing.as_ref(), &theme)),
                     )
                     .child(
-                        Button::new(SharedString::from(format!(
-                            "focus-new-worktree-{}",
-                            main.display()
-                        )))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("plus"))
-                        .tooltip(tr!("worktree-new"))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.prompt_new_worktree(main.clone(), window, cx);
-                            },
-                        )),
+                        div()
+                            .opacity(0.)
+                            .group_hover(group, |style| style.opacity(1.))
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "focus-new-worktree-{}",
+                                    main.display()
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("plus"))
+                                .tooltip(tr!("worktree-new"))
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.prompt_new_worktree(main.clone(), window, cx);
+                                    },
+                                )),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -908,10 +920,12 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// A worktree in the sidebar: its name and branch, who works in it, how
-    /// many terminals it has, and how much it has in progress. A click shows
-    /// it alone, `Ctrl`+click beside the others; twice goes to work in it,
-    /// as a card's double click does.
+    /// A worktree in the sidebar: one line, most of the time — its name,
+    /// and its branch only when that says something else (`row_words`) —
+    /// and at the right, quiet and short, how many terminals it has and how
+    /// much it has in progress. Who works in it is its outline, or its dot
+    /// when nothing moves. A click shows it alone, `Ctrl`+click beside the
+    /// others; twice goes to work in it, as a card's double click does.
     fn render_focus_row(
         &self,
         path: &Path,
@@ -920,16 +934,21 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let (_, label) = self.project_label(path);
-        let branch = self
-            .repos
-            .worktree(path)
-            .and_then(|worktree| worktree.branch.clone())
-            .filter(|branch| branch.as_str() != label.as_ref())
-            .map(SharedString::from);
+        let worktree = self.repos.worktree(path);
+        let is_main = worktree.is_some_and(|worktree| worktree.is_main);
+        let label = worktree
+            .map(|worktree| worktree.label())
+            .unwrap_or_else(|| self.project_label(path).1.to_string());
+        let (title, detail) = focus::row_words(
+            &label,
+            worktree.and_then(|worktree| worktree.branch.as_deref()),
+            is_main,
+        );
         let lit = shown.iter().any(|shown| shown == path);
         let own = self.active.as_deref() == Some(path);
-        let agent = self.agents.get(path).cloned();
+        let dressed = dressed(doings, path);
+        // The dot says what the outline does not: an agent at rest, or done.
+        let agent = self.agents.get(path).cloned().filter(|_| !dressed);
         let summary = self
             .summaries
             .get(path)
@@ -940,12 +959,37 @@ impl ClaudhubApp {
             .iter()
             .filter(|terminal| terminal.worktree == path)
             .count();
+        let diff = super::theme::DiffColors::of(cx);
         let open = path.to_path_buf();
+        let volume = summary.map(|summary| {
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .when(summary.added > 0, |el| {
+                    el.child(
+                        div()
+                            .text_color(diff.added_fg)
+                            .child(format!("+{}", focus::short_count(summary.added))),
+                    )
+                })
+                .when(summary.removed > 0, |el| {
+                    el.child(
+                        div()
+                            .text_color(diff.removed_fg)
+                            .child(format!("−{}", focus::short_count(summary.removed))),
+                    )
+                })
+                // A rename or a binary moves no line: the files, then.
+                .when(summary.added == 0 && summary.removed == 0, |el| {
+                    el.child(SharedString::from(summary.files.to_string()))
+                })
+        });
         h_flex()
             .id(SharedString::from(format!("focus-row-{}", path.display())))
             .relative()
             .w_full()
-            .px_2()
+            .pl_3()
+            .pr_2()
             .py_1()
             .gap_2()
             .items_center()
@@ -953,7 +997,7 @@ impl ClaudhubApp {
             // The selection is a band, and a bar at its edge says it louder
             // than a tint alone — the sidebar is read at a glance.
             .border_l_2()
-            .border_color(if lit && !dressed(doings, path) {
+            .border_color(if lit && !dressed {
                 theme.ring
             } else {
                 gpui_kit::transparent_black()
@@ -965,11 +1009,16 @@ impl ClaudhubApp {
                     this.focus_row_clicked(&open, event, window, cx);
                 }),
             )
-            .child(icon("git-branch").xsmall().text_color(if lit {
-                theme.ring
-            } else {
-                theme.muted_foreground
-            }))
+            // The main checkout is the project's house; the others branch.
+            .child(
+                icon(if is_main { "house" } else { "git-branch" })
+                    .xsmall()
+                    .text_color(if lit {
+                        theme.ring
+                    } else {
+                        theme.muted_foreground
+                    }),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -978,32 +1027,38 @@ impl ClaudhubApp {
                         div()
                             .truncate()
                             .text_sm()
+                            .text_color(theme.foreground)
                             // The window's own, among those shown.
                             .when(own, |el| el.font_weight(gpui_kit::FontWeight::SEMIBOLD))
-                            .child(label),
+                            .child(SharedString::from(title)),
                     )
-                    .children(branch.map(|branch| {
+                    .children(detail.map(|detail| {
                         div()
                             .truncate()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(branch)
+                            .child(SharedString::from(detail))
                     })),
             )
-            .children(agent.map(|agent| super::topbar::agent_dot(&agent, cx)))
-            .when(terminals > 0, |el| {
-                el.child(
-                    h_flex()
-                        .flex_none()
-                        .gap_0p5()
-                        .items_center()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(icon("square-terminal").xsmall())
-                        .child(SharedString::from(terminals.to_string())),
-                )
-            })
-            .children(summary.map(|summary| super::topbar::volume_on(summary, None, cx)))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .children(agent.map(|agent| super::topbar::agent_dot(&agent, cx)))
+                    .when(terminals > 0, |el| {
+                        el.child(
+                            h_flex()
+                                .gap_0p5()
+                                .items_center()
+                                .child(icon("square-terminal").xsmall())
+                                .child(SharedString::from(terminals.to_string())),
+                        )
+                    })
+                    .children(volume),
+            )
             .children(outline_of(doings.get(path), &theme))
             .into_any_element()
     }
