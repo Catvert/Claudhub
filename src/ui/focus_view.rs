@@ -852,7 +852,7 @@ impl ClaudhubApp {
     }
 
     /// A worktree on the rail: two letters, lit when shown, ringed when it
-    /// is the window's own, and the dot of its agent at the corner.
+    /// is the window's own, and its agent's signal on its edge.
     fn render_focus_pill(
         &self,
         path: &Path,
@@ -873,7 +873,6 @@ impl ClaudhubApp {
         });
         let lit = shown.iter().any(|shown| shown == path);
         let own = self.active.as_deref() == Some(path);
-        let agent = self.agents.get(path).cloned();
         let open = path.to_path_buf();
         div()
             .id(SharedString::from(format!("focus-pill-{}", path.display())))
@@ -910,21 +909,14 @@ impl ClaudhubApp {
             )
             .child(SharedString::from(focus::initials(&label)))
             .children(edge_signal(doings.get(path), 7., &theme))
-            .children(agent.map(|agent| {
-                div()
-                    .absolute()
-                    .top(px(-2.))
-                    .right(px(-2.))
-                    .child(super::topbar::agent_dot(&agent, cx))
-            }))
             .into_any_element()
     }
 
     /// A worktree in the sidebar: one line, most of the time — its name,
     /// and its branch only when that says something else (`row_words`) —
     /// and at the right, quiet and short, how many terminals it has and how
-    /// much it has in progress. Who works in it is its outline, or its dot
-    /// when nothing moves. A click shows it alone, `Ctrl`+click beside the
+    /// much it has in progress. Who works in it is its edge — no dot besides:
+    /// it said again what the edge says. A click shows it alone, `Ctrl`+click beside the
     /// others; twice goes to work in it, as a card's double click does.
     fn render_focus_row(
         &self,
@@ -947,8 +939,6 @@ impl ClaudhubApp {
         let lit = shown.iter().any(|shown| shown == path);
         let own = self.active.as_deref() == Some(path);
         let dressed = dressed(doings, path);
-        // The dot says what the outline does not: an agent at rest, or done.
-        let agent = self.agents.get(path).cloned().filter(|_| !dressed);
         let summary = self
             .summaries
             .get(path)
@@ -1047,7 +1037,6 @@ impl ClaudhubApp {
                     .items_center()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .children(agent.map(|agent| super::topbar::agent_dot(&agent, cx)))
                     .when(terminals > 0, |el| {
                         el.child(
                             h_flex()
