@@ -554,9 +554,39 @@ pub fn short_count(count: usize) -> String {
     }
 }
 
+/// The bright run going down a sidebar entry's edge while its agent works:
+/// where it stands `seconds` in, on an edge `height` tall — from above the
+/// top, where it enters, to past the bottom, where it leaves — cut to the
+/// edge. `None` between two passes.
+pub fn edge_run(height: f32, seconds: f32) -> Option<(f32, f32)> {
+    /// Fast enough to read as work, slow enough not to flicker on a row.
+    const SPEED: f32 = 48.;
+    if height <= 0. {
+        return None;
+    }
+    let run = (height * 0.45).clamp(8., height);
+    let at = (seconds * SPEED).rem_euclid(height + run) - run;
+    let (top, bottom) = (at.max(0.), (at + run).min(height));
+    (bottom > top).then_some((top, bottom))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_run_goes_down_the_edge_and_leaves_it() {
+        // An edge of 40: a run of 18, a cycle of 58 points.
+        let at = |points: f32| edge_run(40., points / 48.);
+        // Entering from above: only its end shows.
+        assert_eq!(at(0.), None);
+        assert_eq!(at(9.), Some((0., 9.)));
+        // Whole, halfway down.
+        assert_eq!(at(30.), Some((12., 30.)));
+        // Leaving at the bottom, cut to the edge.
+        assert_eq!(at(50.), Some((32., 40.)));
+        assert_eq!(edge_run(0., 1.), None);
+    }
 
     #[test]
     fn a_row_says_each_thing_once() {

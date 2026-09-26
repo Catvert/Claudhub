@@ -909,7 +909,7 @@ impl ClaudhubApp {
                 }),
             )
             .child(SharedString::from(focus::initials(&label)))
-            .children(outline_of(doings.get(path), &theme))
+            .children(edge_signal(doings.get(path), 7., &theme))
             .children(agent.map(|agent| {
                 div()
                     .absolute()
@@ -2189,36 +2189,65 @@ impl ClaudhubApp {
     }
 }
 
-/// A sidebar entry's outline when its agents work or wait — the terminal's
-/// own dress, so that the row and the box it leads to read as one signal.
-///
-/// **It replaces the entry's own edge rather than adding to it**: over the
-/// selection's bar or the rail's ring it made two borders, one square and
-/// one round. Drawn a little inside, at the small radius, so that it hugs a
-/// band as it hugs a card.
+/// A sidebar entry's signal when its agents work or wait: **its own left
+/// edge**, where the selection's bar is, and not a box drawn round it — a
+/// dashed frame over a selected band spoke two languages at once. Working,
+/// the edge glows in the tone of work and a bright run goes down it;
+/// waiting, it breathes in the tone of a question. `inset` keeps it off the
+/// ends of an entry with rounded corners.
 fn outline_of(doing: Option<&Doing>, theme: &gpui_kit::component::Theme) -> Option<AnyElement> {
-    doing
-        .copied()
-        .filter(|doing| *doing != Doing::Rest)
-        .map(|doing| {
-            div()
-                .absolute()
-                .top(px(2.))
-                .bottom(px(2.))
-                .left(px(2.))
-                .right(px(2.))
-                .child(super::overview_view::outline_rounded(
-                    doing,
-                    false,
-                    1.,
-                    theme.radius,
-                    theme,
-                ))
-                .into_any_element()
-        })
+    edge_signal(doing, 0., theme)
 }
 
-/// Whether an entry of the sidebar wears the outline — see `outline_of`.
+fn edge_signal(
+    doing: Option<&Doing>,
+    inset: f32,
+    theme: &gpui_kit::component::Theme,
+) -> Option<AnyElement> {
+    let doing = doing.copied().filter(|doing| *doing != Doing::Rest)?;
+    let (work, asks) = (theme.warning, theme.danger);
+    let seconds = super::overview_view::flow_seconds();
+    Some(
+        canvas(
+            move |_, _, _| {},
+            move |bounds, _, window, _| {
+                let (x, y) = (bounds.origin.x, bounds.origin.y);
+                let (w, h) = (bounds.size.width, bounds.size.height);
+                let bar = |top: f32, bottom: f32, color: gpui_kit::Hsla| {
+                    gpui_kit::fill(
+                        gpui_kit::Bounds::new(
+                            point(x, y + px(top)),
+                            gpui_kit::size(w, px(bottom - top)),
+                        ),
+                        color,
+                    )
+                    .corner_radii(w / 2.)
+                };
+                let height = f32::from(h);
+                match doing {
+                    Doing::Waiting => {
+                        let breath = overview::breath(seconds, super::overview_view::PULSE_PERIOD);
+                        window.paint_quad(bar(0., height, asks.opacity(0.35 + 0.65 * breath)));
+                    }
+                    _ => {
+                        window.paint_quad(bar(0., height, work.opacity(0.3)));
+                        if let Some((top, bottom)) = focus::edge_run(height, seconds) {
+                            window.paint_quad(bar(top, bottom, work));
+                        }
+                    }
+                }
+            },
+        )
+        .absolute()
+        .left_0()
+        .top(px(inset))
+        .bottom(px(inset))
+        .w(px(3.))
+        .into_any_element(),
+    )
+}
+
+/// Whether an entry of the sidebar wears the signal — see `edge_signal`.
 fn dressed(doings: &Doings, path: &Path) -> bool {
     doings.get(path).is_some_and(|doing| *doing != Doing::Rest)
 }

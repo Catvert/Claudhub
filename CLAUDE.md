@@ -702,10 +702,12 @@ worktree.
   sa propre boîte (`set_canvas(None)`), et agrandir un nœud lui donne le
   milieu (`overview_zoomed`). Sans liens, c'est le cadre qui dit qu'un agent
   travaille ou attend — celui de la carte aussi, quand aucun onglet d'agent
-  n'est là. **Chaque ligne de la barre latérale porte le même habit**
-  (`worktree_doing`, `overview::loudest`) — le plus pressant de ses Claude :
-  celui qui attend, puis celui qui travaille —, une pastille du rail aussi,
-  et l'en-tête d'un projet replié pour ce que le repli cache. Ne demande des
+  n'est là. **Chaque ligne de la barre latérale porte le signal sur son
+  bord gauche** (`edge_signal`, `worktree_doing`, `overview::loudest`) — le
+  plus pressant de ses Claude : celui qui attend, puis celui qui travaille —,
+  une pastille du rail aussi, et l'en-tête d'un projet replié pour ce que le
+  repli cache ; un cadre pointillé posé sur un bandeau sélectionné parlait
+  deux langues à la fois. Ne demande des
   frames que ce qui est à l'écran (`prepare_laid_out`) : les tableaux
   montrés et ces habits.
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un

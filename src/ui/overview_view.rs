@@ -49,7 +49,7 @@ const FLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 /// and a question can wait for hours — at half the frames.
 const PULSE_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 /// A waiting link's breath, in seconds.
-const PULSE_PERIOD: f32 = 1.6;
+pub(super) const PULSE_PERIOD: f32 = 1.6;
 
 /// When the links started flowing, once: their phase is read off the clock,
 /// so a frame late is a step longer and not a slower march.
@@ -1592,7 +1592,7 @@ impl ClaudhubApp {
 
 /// Where the moving links are in their motion: seconds since they first
 /// moved, read off the clock.
-fn flow_seconds() -> f32 {
+pub(super) fn flow_seconds() -> f32 {
     FLOW_EPOCH
         .get_or_init(std::time::Instant::now)
         .elapsed()
