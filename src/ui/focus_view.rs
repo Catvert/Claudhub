@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::DropdownMenu as _,
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu},
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
 use gpui_kit::{
@@ -748,6 +748,27 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// A worktree's own menu under a right click on its row or its pill —
+    /// the editor's `…`, for any worktree of the list and not only the one
+    /// on show: open, run its tasks, integrate, remove, and the rest.
+    fn worktree_context_menu(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let entity = cx.entity();
+        let main = self.main_of(path);
+        let worktree = path.to_path_buf();
+        move |menu, _window, cx| match &main {
+            // Built on the right click, not in a render: the application is
+            // free to be read.
+            Some(main) => entity.update(cx, |this, cx| {
+                this.worktree_menu(menu, main.clone(), worktree.clone(), cx)
+            }),
+            None => menu,
+        }
+    }
+
     /// Folds a project of the sidebar to its name, or unfolds it.
     fn toggle_focus_project(&mut self, main: &Path, cx: &mut Context<Self>) {
         if let Some(at) = self.focus_folded.iter().position(|folded| folded == main) {
@@ -909,6 +930,7 @@ impl ClaudhubApp {
             )
             .child(SharedString::from(focus::initials(&label)))
             .children(edge_signal(doings.get(path), 7., &theme))
+            .context_menu(self.worktree_context_menu(path, cx))
             .into_any_element()
     }
 
@@ -1049,6 +1071,7 @@ impl ClaudhubApp {
                     .children(volume),
             )
             .children(outline_of(doings.get(path), &theme))
+            .context_menu(self.worktree_context_menu(path, cx))
             .into_any_element()
     }
 

@@ -652,7 +652,9 @@ worktree.
   (`overview_repos`, `overview_worktrees_of` : les projets « affichés » sont
   ceux des worktrees choisis). Un autre choix est un autre plan à cadrer
   (`overview_framed`). Le nom d'un projet les choisit tous, son chevron le
-  replie à son nom sans cacher ce qui en est montré. Il y a eu deux
+  replie à son nom sans cacher ce qui en est montré. Un clic droit sur un
+  worktree ouvre son menu — le `…` de l'éditeur (`worktree_menu`), pour
+  n'importe lequel de la liste. Il y a eu deux
   sélecteurs à cases dans la barre de titre, pour le plan seul : deux façons
   de choisir la même chose. **Par défaut le focus** (`ui::focus_view`) :
   chaque worktree choisi sur son **tableau** (`ui::focus`). « Réinitialiser »
