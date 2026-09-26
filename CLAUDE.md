@@ -635,8 +635,8 @@ worktree.
   le plan. **Le sélecteur de branches reste une seule surface** : il parle du
   checkout regardé, donc l'ouvrir depuis une carte la sélectionne d'abord
   (`branch_popover`).
-- **Un projet à la fois** par défaut (sélecteur dans la barre de titre, qui
-  vaut aussi pour la barre latérale du focus) : cinq
+- **Un projet à la fois** par défaut sur le plan (sélecteur dans la barre
+  de titre ; le focus n'en a pas, sa barre latérale listant tout) : cinq
   worktrees d'un code ne se lisent pas parmi ceux d'un autre — et autant qu'on
   en coche. Un second sélecteur coche les **worktrees**, par projet : un projet
   dont rien n'est coché les montre tous (`overview::shown_of`), et le nœud git
@@ -647,7 +647,13 @@ worktree.
   session). **Par défaut le focus** (`ui::focus_view`) : une barre latérale
   des worktrees affichés — qui travaille, combien est en cours — et au milieu
   **ceux qu'on y a choisis, côte à côte**, chacun sur son **tableau**
-  (`ui::focus`). Un clic montre un worktree seul et le rend regardé
+  (`ui::focus`). La barre latérale liste **tous les projets ouverts et tous
+  leurs worktrees** — elle est le choix, les sélecteurs de la barre de titre
+  n'étant qu'au plan —, un projet s'y replie à son nom sans cacher ce qui en
+  est montré, et elle porte à son pied la skill et « Réinitialiser », qui
+  rend aussi aux tableaux montrés la disposition par règle ; les projets
+  « affichés » (`overview_repos`) y sont ceux des worktrees montrés. Le titre
+  d'un tableau porte « Éditer », le double clic de sa carte. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
   retire, jamais le dernier ; choisir un worktree ailleurs dans la fenêtre le
   montre seul (`focus::shown_worktrees`). La sélection et la barre repliée en

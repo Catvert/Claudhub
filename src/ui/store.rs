@@ -247,6 +247,8 @@ pub struct Session {
     pub focus_shown: Vec<PathBuf>,
     /// Its sidebar folded to a rail of initials.
     pub focus_rail: bool,
+    /// The projects folded to their name in its sidebar, by main checkout.
+    pub focus_folded: Vec<PathBuf>,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.

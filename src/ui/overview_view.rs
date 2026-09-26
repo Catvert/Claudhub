@@ -173,10 +173,35 @@ fn placed(rect: Rect) -> gpui_kit::Div {
         .h(px(rect.h))
 }
 
+/// A repository's worktrees on the disk — a folder gone from it never,
+/// having nothing to show but its absence, which the worktree picker
+/// already says.
+pub(super) fn live_worktrees(repo: &crate::ui::repos::RepoState) -> Vec<PathBuf> {
+    repo.worktrees
+        .iter()
+        .filter(|worktree| !worktree.prunable)
+        .map(|worktree| worktree.path.clone())
+        .collect()
+}
+
 impl ClaudhubApp {
-    /// The repositories the plane shows: the ones ticked in the corner, the
-    /// active worktree's until one is, or all of them.
+    /// The repositories the home screen shows. On the plane, the ones
+    /// ticked in the corner, the active worktree's until one is, or all of
+    /// them; in the focus view, whose sidebar lists every one, those of the
+    /// worktrees chosen there.
     pub(super) fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
+        if self.home_mode == HomeMode::Focus {
+            let shown = self.focus_worktrees();
+            return self
+                .repos
+                .iter()
+                .filter(|repo| {
+                    repo.worktrees
+                        .iter()
+                        .any(|worktree| shown.contains(&worktree.path))
+                })
+                .collect();
+        }
         if self.overview_all {
             return self.repos.iter().collect();
         }
@@ -199,15 +224,13 @@ impl ClaudhubApp {
     }
 
     /// The worktrees of a repository the plane shows: the ticked ones, or
-    /// all of them when none is — a folder gone from the disk never, having
-    /// nothing to show but its absence, which the picker already says.
+    /// all of them when none is. The focus view picks in its sidebar, and
+    /// its boards are read among all of them.
     pub(super) fn overview_worktrees_of(&self, repo: &crate::ui::repos::RepoState) -> Vec<PathBuf> {
-        let live: Vec<PathBuf> = repo
-            .worktrees
-            .iter()
-            .filter(|worktree| !worktree.prunable)
-            .map(|worktree| worktree.path.clone())
-            .collect();
+        let live = live_worktrees(repo);
+        if self.home_mode == HomeMode::Focus {
+            return live;
+        }
         overview::shown_of(&self.overview_worktrees, &live)
     }
 
@@ -1112,7 +1135,7 @@ impl ClaudhubApp {
     /// The projects on show and not every one: resetting what one is looking
     /// at is the gesture, and another project's arrangement is not in sight
     /// to be missed.
-    fn reset_overview(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reset_overview(&mut self, cx: &mut Context<Self>) {
         let plan = self.overview_plan();
         let nodes: Vec<Node> = plan
             .gits
@@ -1181,6 +1204,22 @@ impl ClaudhubApp {
                 }
             }
         });
+        // On the boards, the cards go back where the rules put them: read
+        // anew from nothing, as a worktree never arranged is.
+        if self.home_mode == HomeMode::Focus {
+            let shown = self.focus_worktrees();
+            for path in &shown {
+                self.focus_boards.remove(path);
+            }
+            super::store::Store::update_global(cx, |store| {
+                for path in &shown {
+                    if let Some(state) = store.worktrees.get_mut(path) {
+                        state.focus_board = Default::default();
+                        state.focus_widths = Default::default();
+                    }
+                }
+            });
+        }
         self.overview_fitted = false;
         cx.notify();
     }
@@ -1244,9 +1283,11 @@ impl ClaudhubApp {
     }
 
     /// The home screen's toolbar, at the right of the title bar: the view,
-    /// which projects and worktrees the plane shows — one project at a time
-    /// by default, so that five worktrees of one code are not read among a
-    /// dozen of another's — what is hidden, the skill, and the reset.
+    /// what is hidden and, on the plane, which projects and worktrees it
+    /// shows — one project at a time by default, so that five worktrees of
+    /// one code are not read among a dozen of another's — the skill, and
+    /// the reset. The focus view's sidebar lists every project, and carries
+    /// the skill and the reset at its foot.
     ///
     /// It floated over the plane's top right corner, and hid the nodes under
     /// it; the title bar had nothing left to say on this screen once the
@@ -1319,39 +1360,69 @@ impl ClaudhubApp {
                 HomeMode::Canvas,
             ))
             .child(div().mx_0p5().w(px(1.)).h(px(18.)).bg(cx.theme().border))
-            .child(pick_list(
+            // The focus view's sidebar lists every project and worktree, and
+            // carries the rest at its foot: what is left here is the plane's.
+            .when(mode == HomeMode::Focus, |el| {
+                el.children(self.render_hidden_menu(cx))
+            })
+            .when(mode == HomeMode::Canvas, |el| {
+                el.children(self.render_canvas_tools(label, all, rows, cx))
+            })
+    }
+
+    /// What only the plane has at the right of the title bar: which projects
+    /// and worktrees it shows, what it hid, the skill and the reset.
+    fn render_canvas_tools(
+        &self,
+        label: SharedString,
+        all: Pick,
+        rows: Vec<Pick>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        vec![
+            pick_list(
                 "overview-project",
                 "folder",
                 label,
                 tr!("overview-projects-hint"),
                 all,
                 rows,
-            ))
+            )
+            .into_any_element(),
             // Opening another repository, beside the list of those open: the
             // editor's worktree picker carried it, and it is not on this
             // screen.
-            .child(
-                Button::new("overview-open-repo")
-                    .ghost()
-                    .small()
-                    .icon(icon("folder-plus"))
-                    .tooltip(tr!("repo-open"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.prompt_open_repository(window, cx);
-                    })),
-            )
-            .children(self.render_overview_worktree_picker(cx))
-            .children(self.render_hidden_menu(cx))
-            .child(self.render_skill_button(cx))
-            .child(
-                Button::new("overview-reset")
-                    .ghost()
-                    .small()
-                    .icon(icon("layout-dashboard"))
-                    .label(tr!("overview-reset"))
-                    .tooltip(tr!("overview-reset-hint"))
-                    .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx))),
-            )
+            Button::new("overview-open-repo")
+                .ghost()
+                .small()
+                .icon(icon("folder-plus"))
+                .tooltip(tr!("repo-open"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.prompt_open_repository(window, cx);
+                }))
+                .into_any_element(),
+        ]
+        .into_iter()
+        .chain(
+            self.render_overview_worktree_picker(cx)
+                .map(IntoElement::into_any_element),
+        )
+        .chain(
+            self.render_hidden_menu(cx)
+                .map(IntoElement::into_any_element),
+        )
+        .chain([
+            self.render_skill_button(false, cx).into_any_element(),
+            Button::new("overview-reset")
+                .ghost()
+                .small()
+                .icon(icon("layout-dashboard"))
+                .label(tr!("overview-reset"))
+                .tooltip(tr!("overview-reset-hint"))
+                .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx)))
+                .into_any_element(),
+        ])
+        .collect()
     }
 
     /// Which worktrees of the projects on show the plane shows, beside the

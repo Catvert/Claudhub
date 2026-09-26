@@ -1135,6 +1135,8 @@ pub struct ClaudhubApp {
     pub(super) focus_chosen: Vec<PathBuf>,
     /// The sidebar folded to a rail.
     pub(super) focus_rail: bool,
+    /// The projects folded to their name in the sidebar.
+    pub(super) focus_folded: Vec<PathBuf>,
     /// A card being dragged to another place on its board.
     pub(super) focus_drag: Option<crate::ui::focus_view::FocusDrag>,
     /// Where each board's columns and cards stood at the last frame, which
@@ -1648,6 +1650,10 @@ impl ClaudhubApp {
                 .focus_shown
                 .clone(),
             focus_rail: crate::ui::store::Store::global(cx).session.focus_rail,
+            focus_folded: crate::ui::store::Store::global(cx)
+                .session
+                .focus_folded
+                .clone(),
             focus_drag: None,
             focus_geometry: HashMap::new(),
             focus_pending: None,

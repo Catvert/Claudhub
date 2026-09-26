@@ -959,6 +959,8 @@
   "focus-drop-stays": "Reste à sa place",
   "focus-drop-column": "Colonne %{n}",
   "focus-drag-hint": "Glisser une carte par son en-tête pour la changer de colonne",
+  "focus-edit": "Éditer",
+  "focus-reset-hint": "Remettre les cartes des tableaux affichés à leur place, et chaque nœud à sa taille",
   "focus-sidebar-hint": "Ctrl+clic : afficher à côté",
   "focus-sidebar-fold": "Réduire la barre latérale",
   "focus-sidebar-unfold": "Déplier la barre latérale",

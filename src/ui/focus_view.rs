@@ -60,6 +60,7 @@ use crate::ui::canvas_view::Hang;
 use crate::ui::focus::{self, Board, ColumnSpan, Target};
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Node};
+use crate::ui::overview_view::live_worktrees;
 
 /// The sidebar's width.
 const SIDEBAR_WIDTH: f32 = 260.;
@@ -215,14 +216,10 @@ impl ClaudhubApp {
     }
 
     /// The worktrees the middle shows, side by side — see
-    /// `focus::shown_worktrees`. The window's own is the one on show, else
-    /// the first of the projects on show.
+    /// `focus::shown_worktrees`, among every project's. The window's own is
+    /// the one on show, else the first of all.
     pub(super) fn focus_worktrees(&self) -> Vec<PathBuf> {
-        let on_show: Vec<PathBuf> = self
-            .overview_repos()
-            .into_iter()
-            .flat_map(|repo| self.overview_worktrees_of(repo))
-            .collect();
+        let on_show: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
         let primary = self.active.clone().or_else(|| on_show.first().cloned());
         focus::shown_worktrees(&self.focus_chosen, primary.as_deref(), &on_show)
     }
@@ -270,6 +267,9 @@ impl ClaudhubApp {
                 self.select_worktree(path.to_path_buf(), window, cx);
             }
         }
+        // The skill speaks for a checkout on show, which may have changed
+        // project.
+        self.ask_skill_status();
         cx.notify();
     }
 
@@ -283,33 +283,74 @@ impl ClaudhubApp {
 
     // — The sidebar ————————————————————————————————————————————————
 
-    /// Every worktree of the projects on show, under its project's name —
-    /// the ones shown lit, as a list's selection is. Folded, a rail.
+    /// Every project open and every worktree of each, under its project's
+    /// name — the ones shown lit, as a list's selection is. The title bar's
+    /// pickers are the plane's: here, the list is the choice. A project
+    /// folds to its name, keeping in sight only what of it is on show.
+    /// Folded, a rail.
     fn render_focus_sidebar(&self, shown: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
         if self.focus_rail {
             return self.render_focus_rail(shown, cx);
         }
         let theme = cx.theme().clone();
         let mut rows: Vec<AnyElement> = Vec::new();
-        for repo in self.overview_repos() {
+        for repo in self.repos.iter() {
             let main = repo.main.clone();
+            let folded = self.focus_folded.contains(&main);
+            let worktrees = live_worktrees(repo);
+            let fold = main.clone();
             rows.push(
                 h_flex()
                     .w_full()
-                    .px_2()
+                    .pl_1()
+                    .pr_2()
                     .pt_3()
                     .pb_1()
-                    .gap_1p5()
+                    .gap_1()
                     .items_center()
-                    .child(icon("git-merge").text_color(theme.muted_foreground))
                     .child(
-                        div()
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "focus-project-{}",
+                                main.display()
+                            )))
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(SharedString::from(repo.name.clone())),
+                            .gap_1()
+                            .items_center()
+                            .rounded(theme.radius)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.list_hover))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_focus_project(&fold, cx);
+                            }))
+                            .child(
+                                icon(if folded {
+                                    "chevron-right"
+                                } else {
+                                    "chevron-down"
+                                })
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(SharedString::from(repo.name.clone())),
+                            )
+                            .when(folded, |el| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(SharedString::from(worktrees.len().to_string())),
+                                )
+                            }),
                     )
                     .child(
                         Button::new(SharedString::from(format!(
@@ -328,7 +369,10 @@ impl ClaudhubApp {
                     )
                     .into_any_element(),
             );
-            for path in self.overview_worktrees_of(repo) {
+            for path in worktrees {
+                if folded && !shown.contains(&path) {
+                    continue;
+                }
                 rows.push(self.render_focus_row(&path, shown, cx));
             }
         }
@@ -358,6 +402,7 @@ impl ClaudhubApp {
                     .text_color(theme.muted_foreground)
                     .child(tr!("focus-sidebar-hint")),
             )
+            .child(self.open_repo_button(cx))
             .child(
                 Button::new("focus-rail-fold")
                     .ghost()
@@ -365,6 +410,27 @@ impl ClaudhubApp {
                     .icon(icon("panel-left-close"))
                     .tooltip(tr!("focus-sidebar-fold"))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
+            );
+        // What speaks for the whole screen and not a worktree, at the foot:
+        // the skill, and putting the boards back as the rules lay them.
+        let foot = h_flex()
+            .flex_none()
+            .w_full()
+            .p_1()
+            .gap_1()
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(self.render_skill_button(false, cx))
+            .child(div().flex_1())
+            .child(
+                Button::new("focus-reset")
+                    .ghost()
+                    .small()
+                    .icon(icon("layout-dashboard"))
+                    .label(tr!("overview-reset"))
+                    .tooltip(tr!("focus-reset-hint"))
+                    .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx))),
             );
         v_flex()
             .flex_none()
@@ -381,16 +447,43 @@ impl ClaudhubApp {
                 &self.focus_sidebar_scroll,
                 list,
             )))
+            .child(foot)
             .into_any_element()
     }
 
+    /// Opening another repository: it joins the list at once.
+    fn open_repo_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("focus-open-repo")
+            .ghost()
+            .xsmall()
+            .icon(icon("folder-plus"))
+            .tooltip(tr!("repo-open"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.prompt_open_repository(window, cx);
+            }))
+    }
+
+    /// Folds a project of the sidebar to its name, or unfolds it.
+    fn toggle_focus_project(&mut self, main: &Path, cx: &mut Context<Self>) {
+        if let Some(at) = self.focus_folded.iter().position(|folded| folded == main) {
+            self.focus_folded.remove(at);
+        } else {
+            self.focus_folded.push(main.to_path_buf());
+            self.focus_folded.sort();
+        }
+        let folded = self.focus_folded.clone();
+        super::store::Store::update_global(cx, |store| store.session.focus_folded = folded);
+        cx.notify();
+    }
+
     /// The sidebar folded: a column of initials, a line between two
-    /// projects. The same clicks as the list's, and each worktree's name in
-    /// its tooltip.
+    /// projects — every worktree, a project's fold being the list's. The
+    /// same clicks as the list's, and each worktree's name in its tooltip;
+    /// the foot's buttons, their glyphs alone.
     fn render_focus_rail(&self, shown: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mut pills: Vec<AnyElement> = Vec::new();
-        for (index, repo) in self.overview_repos().into_iter().enumerate() {
+        for (index, repo) in self.repos.iter().enumerate() {
             if index > 0 {
                 pills.push(
                     div()
@@ -402,7 +495,7 @@ impl ClaudhubApp {
                         .into_any_element(),
                 );
             }
-            for path in self.overview_worktrees_of(repo) {
+            for path in live_worktrees(repo) {
                 pills.push(self.render_focus_pill(&path, shown, cx));
             }
         }
@@ -415,6 +508,24 @@ impl ClaudhubApp {
             .py_1()
             .overflow_y_scroll()
             .children(pills);
+        let foot = v_flex()
+            .flex_none()
+            .w_full()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(self.open_repo_button(cx))
+            .child(self.render_skill_button(true, cx))
+            .child(
+                Button::new("focus-reset")
+                    .ghost()
+                    .small()
+                    .icon(icon("layout-dashboard"))
+                    .tooltip(tr!("focus-reset-hint"))
+                    .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx))),
+            );
         v_flex()
             .flex_none()
             .w(px(RAIL_WIDTH))
@@ -436,6 +547,7 @@ impl ClaudhubApp {
                 ),
             )
             .child(div().flex_1().min_h_0().w_full().child(list))
+            .child(foot)
             .into_any_element()
     }
 
@@ -848,7 +960,21 @@ impl ClaudhubApp {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr!("focus-drag-hint")),
                         )
-                    }),
+                    })
+                    // Going to work in it, beside its name: the card's
+                    // double click, said where the board is named.
+                    .child(div().flex_none().pb_2().child({
+                        let open = path.to_path_buf();
+                        Button::new(SharedString::from(format!("focus-edit-{}", path.display())))
+                            .ghost()
+                            .small()
+                            .icon(icon("pencil"))
+                            .label(tr!("focus-edit"))
+                            .tooltip(tr!("overview-open-worktree"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.work_in_worktree(&open, window, cx);
+                            }))
+                    })),
             )
             .child(row)
             .children(drag.map(|drag| self.render_drag_ghost(&drag, aim, count, cx)))

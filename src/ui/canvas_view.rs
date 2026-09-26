@@ -967,7 +967,12 @@ impl ClaudhubApp {
     /// The skill's button: its state at a glance — a dot, green when this
     /// build's version is installed somewhere, amber when only an older one
     /// is, none when it is nowhere — and the gestures in its menu.
-    pub(super) fn render_skill_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `compact`, its glyph alone — on the sidebar's rail.
+    pub(super) fn render_skill_button(
+        &self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         use crate::skill::Scope;
         let worktree = self.skill_worktree();
         let status = worktree
@@ -1009,7 +1014,7 @@ impl ClaudhubApp {
             .ghost()
             .small()
             .icon(icon("sparkles"))
-            .label(tr!("skill-button"))
+            .when(!compact, |button| button.label(tr!("skill-button")))
             .when_some(dot, |button, color| {
                 button.child(div().size(px(7.)).rounded_full().bg(color))
             })
