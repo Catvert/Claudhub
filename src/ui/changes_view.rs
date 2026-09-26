@@ -518,6 +518,7 @@ impl ClaudhubApp {
             // Picked once the list is known — it may still be on its way.
             None => self.review_sheet_pick = true,
         }
+        self.forget_closed_sheets(window, cx);
         if self.commit_sheet {
             // Already open: the file pressed is now the one it shows.
             cx.notify();
@@ -541,10 +542,40 @@ impl ClaudhubApp {
             self.select_worktree(worktree.to_path_buf(), window, cx);
         }
         self.branch_sheet_pick = true;
+        self.forget_closed_sheets(window, cx);
         if !self.branch_sheet {
             self.show_sheet(SheetKind::Review, window, cx);
         }
         cx.notify();
+    }
+
+    /// A sheet closed from its own head. **`close_dialog` does not call the
+    /// dialog's `on_close`** — it only pops it — so what that would have
+    /// reset is reset here, or the sheet stays « open » and its button
+    /// never opens it again.
+    fn close_sheet(&mut self, kind: SheetKind, window: &mut Window, cx: &mut Context<Self>) {
+        match kind {
+            SheetKind::Commit => {
+                self.commit_sheet = false;
+                self.review_sheet_pick = false;
+            }
+            SheetKind::Review => {
+                self.branch_sheet = false;
+                self.branch_sheet_pick = false;
+            }
+        }
+        window.close_dialog(cx);
+        cx.notify();
+    }
+
+    /// A sheet is open only while a dialog is: whichever way one went —
+    /// and a path that closes dialogs without their `on_close` is easy to
+    /// add — a flag left up must not keep a sheet from opening again.
+    fn forget_closed_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.has_active_dialog(cx) {
+            self.commit_sheet = false;
+            self.branch_sheet = false;
+        }
     }
 
     /// The sheet's dialog: its size read off the window at every frame —
@@ -771,7 +802,9 @@ impl ClaudhubApp {
                     .small()
                     .icon(icon("x"))
                     .tooltip(tr!("sheet-close"))
-                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_sheet(kind, window, cx);
+                    })),
             )
             .into_any_element()
     }
