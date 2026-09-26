@@ -13,7 +13,9 @@
 //! does: one surface, and what is started here is finished in the editor and
 //! back. A second copy of either panel would be a second set of bugs.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
@@ -35,12 +37,31 @@ const MAX_WIDTH: gpui_kit::Pixels = px(1440.);
 const MAX_HEIGHT: gpui_kit::Pixels = px(900.);
 /// The list's column in the review; the diff takes the rest.
 const LIST_WIDTH: gpui_kit::Pixels = px(380.);
+/// What a maximized sheet leaves of the window round it.
+const SHEET_MARGIN: gpui_kit::Pixels = px(16.);
 
-/// The review in its dialog: a child entity, for the reason of the settings
+/// What a sheet shows beside the diff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SheetKind {
+    /// The changes in progress and the commit box: « Commit ».
+    Commit,
+    /// What the branch has written since its base: « Review ».
+    Review,
+}
+
+/// A sheet in its dialog: a child entity, for the reason of the settings
 /// form — `open_dialog` keeps a `Fn` called back from the root's render,
 /// where reading the application panics, and a child's render runs after.
+///
+/// **It draws its own head** — its title, what it is compared against, and
+/// the buttons of a window: the dialog's title could say none of the rest,
+/// and a sheet two columns of code wide is one that wants the whole screen
+/// now and then. `maximized` is shared with the dialog's closure, which
+/// cannot read the application to size itself.
 pub(super) struct ReviewSheet {
     app: WeakEntity<ClaudhubApp>,
+    kind: SheetKind,
+    maximized: Rc<Cell<bool>>,
 }
 
 impl Render for ReviewSheet {
@@ -48,7 +69,10 @@ impl Render for ReviewSheet {
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        app.update(cx, |app, cx| app.render_review_sheet(window, cx))
+        let (kind, maximized) = (self.kind, self.maximized.clone());
+        app.update(cx, |app, cx| {
+            app.render_review_sheet(kind, maximized, window, cx)
+        })
     }
 }
 
@@ -499,79 +523,292 @@ impl ClaudhubApp {
             cx.notify();
             return;
         }
-        let (repo, label) = self.project_label(worktree);
-        let name = match repo {
-            Some(repo) => format!("{repo} · {label}"),
-            None => label.to_string(),
-        };
-        let title = tr!("overview-commit-title", { name: name });
-        let app = cx.entity().downgrade();
-        let sheet = cx.new(|_| ReviewSheet { app: app.clone() });
-        self.commit_sheet = true;
-        window.open_dialog(cx, move |dialog, window, _| {
-            // Read off the window, as the quick palette is: two columns of
-            // which one is code, and code in six hundred pixels is read a
-            // word per line. Rebuilt on every frame, so it follows a resize.
-            let viewport = window.viewport_size();
-            let width = viewport.width.min(MAX_WIDTH) - px(64.);
-            let height = viewport.height.min(MAX_HEIGHT) - px(120.);
-            let app = app.clone();
-            dialog
-                .title(title.clone())
-                .w(width)
-                .max_w(width)
-                .overlay_closable(true)
-                .close_button(true)
-                // A definite box: the two panels are `size_full`, which
-                // resolves against nothing in a box sized by its content.
-                .child(div().w_full().h(height).child(sheet.clone()))
-                // Entrée belongs to the message field and the list, never to
-                // the dialog: it would shut the review on the key meant to
-                // write in it.
-                .on_ok(|_, _, _| false)
-                .on_close(move |_, _, cx| {
-                    if let Some(app) = app.upgrade() {
-                        app.update(cx, |this, _| {
-                            this.commit_sheet = false;
-                            this.review_sheet_pick = false;
-                        });
-                    }
-                })
-        });
+        self.show_sheet(SheetKind::Commit, window, cx);
         super::dialogs::focus_field(&self.commit_input, window, cx);
         cx.notify();
     }
 
-    /// The review's two columns: the Changes panel, and the diff.
-    fn render_review_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.pick_review_file(cx);
+    /// Opens the review of what a worktree's branch has written since its
+    /// base, on its first file — the editor's branch review and its diff,
+    /// in the sheet the commit has.
+    pub(super) fn open_branch_sheet(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active.as_deref() != Some(worktree) {
+            self.select_worktree(worktree.to_path_buf(), window, cx);
+        }
+        self.branch_sheet_pick = true;
+        if !self.branch_sheet {
+            self.show_sheet(SheetKind::Review, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The sheet's dialog: its size read off the window at every frame —
+    /// two columns of which one is code, and code in six hundred pixels is
+    /// read a word per line — the whole window when maximized. No title and
+    /// no cross of the dialog's: the sheet draws its own head.
+    fn show_sheet(&mut self, kind: SheetKind, window: &mut Window, cx: &mut Context<Self>) {
+        let app = cx.entity().downgrade();
+        let maximized = Rc::new(Cell::new(self.sheet_maximized));
+        let sheet = cx.new(|_| ReviewSheet {
+            app: app.clone(),
+            kind,
+            maximized: maximized.clone(),
+        });
+        match kind {
+            SheetKind::Commit => self.commit_sheet = true,
+            SheetKind::Review => self.branch_sheet = true,
+        }
+        window.open_dialog(cx, move |dialog, window, _| {
+            let viewport = window.viewport_size();
+            let (width, height, top) = if maximized.get() {
+                (
+                    viewport.width - SHEET_MARGIN * 2.,
+                    viewport.height - SHEET_MARGIN * 2.,
+                    SHEET_MARGIN,
+                )
+            } else {
+                let width = viewport.width.min(MAX_WIDTH) - px(64.);
+                let height = viewport.height.min(MAX_HEIGHT) - px(80.);
+                (
+                    width,
+                    height,
+                    ((viewport.height - height) / 2.).max(SHEET_MARGIN),
+                )
+            };
+            let app = app.clone();
+            dialog
+                .w(width)
+                .max_w(width)
+                .margin_top(top)
+                .p_0()
+                .close_button(false)
+                .overlay_closable(true)
+                // A definite box: the two panels are `size_full`, which
+                // resolves against nothing in a box sized by its content.
+                .child(div().w_full().h(height).child(sheet.clone()))
+                // Entrée belongs to the message field and the list, never to
+                // the dialog: it would shut the sheet on the key meant to
+                // write in it.
+                .on_ok(|_, _, _| false)
+                .on_close(move |_, _, cx| {
+                    if let Some(app) = app.upgrade() {
+                        app.update(cx, |this, _| match kind {
+                            SheetKind::Commit => {
+                                this.commit_sheet = false;
+                                this.review_sheet_pick = false;
+                            }
+                            SheetKind::Review => {
+                                this.branch_sheet = false;
+                                this.branch_sheet_pick = false;
+                            }
+                        });
+                    }
+                })
+        });
+    }
+
+    /// A sheet: its head, then its two columns — the list, and the diff.
+    fn render_review_sheet(
+        &mut self,
+        kind: SheetKind,
+        maximized: Rc<Cell<bool>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match kind {
+            SheetKind::Commit => self.pick_review_file(cx),
+            SheetKind::Review => self.pick_branch_file(cx),
+        }
+        let head = self.render_sheet_head(kind, maximized, cx);
+        let list = match kind {
+            SheetKind::Commit => self.render_changes(window, cx).into_any_element(),
+            SheetKind::Review => self.render_branch_review(window, cx).into_any_element(),
+        };
         let border = cx.theme().border;
-        h_flex()
+        v_flex()
             .size_full()
-            .gap_3()
+            .child(head)
             .child(
-                v_flex()
-                    .flex_none()
-                    .w(LIST_WIDTH)
-                    .h_full()
-                    .overflow_hidden()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(border)
-                    .child(self.render_changes(window, cx)),
-            )
-            .child(
-                v_flex()
+                h_flex()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_hidden()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(border)
-                    .child(self.render_diff(window, cx)),
+                    .min_h_0()
+                    .w_full()
+                    .p_3()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .w(LIST_WIDTH)
+                            .h_full()
+                            .overflow_hidden()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(border)
+                            .child(list),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(border)
+                            .child(self.render_diff(window, cx)),
+                    ),
             )
             .into_any_element()
+    }
+
+    /// A sheet's head: what it is and whose — the review saying what it
+    /// compares against — and the two buttons of a window: maximize, which
+    /// a double click on the head does too, and close.
+    fn render_sheet_head(
+        &mut self,
+        kind: SheetKind,
+        maximized: Rc<Cell<bool>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let name = match self.active.as_deref() {
+            Some(worktree) => {
+                let (repo, label) = self.project_label(worktree);
+                match repo {
+                    Some(repo) => format!("{repo} · {label}"),
+                    None => label.to_string(),
+                }
+            }
+            None => String::new(),
+        };
+        let (glyph, title) = match kind {
+            SheetKind::Commit => (
+                "git-commit-horizontal",
+                tr!("overview-commit-title", { name: name }),
+            ),
+            SheetKind::Review => ("file-diff", tr!("sheet-review-title", { name: name })),
+        };
+        let against = (kind == SheetKind::Review)
+            .then(|| self.active_review())
+            .flatten()
+            .and_then(
+                |state| match (state.since_review, state.review_point.as_ref()) {
+                    (true, Some(_)) => Some(tr!("sheet-review-since")),
+                    _ => state
+                        .base
+                        .clone()
+                        .map(|base| tr!("sheet-review-against", { base: base })),
+                },
+            );
+        let big = maximized.get();
+        let toggle = {
+            let maximized = maximized.clone();
+            move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                let next = !maximized.get();
+                maximized.set(next);
+                this.sheet_maximized = next;
+                window.refresh();
+                cx.notify();
+            }
+        };
+        let on_double = toggle.clone();
+        h_flex()
+            .id("sheet-head")
+            .flex_none()
+            .w_full()
+            .pl_4()
+            .pr_2()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .on_click(
+                cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        on_double(this, window, cx);
+                    }
+                }),
+            )
+            .child(icon(glyph).text_color(theme.muted_foreground))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(gpui_kit::relative(0.6))
+                    .truncate()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .children(against.map(|against| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(against)
+            }))
+            .child(div().flex_1())
+            .child(
+                Button::new("sheet-maximize")
+                    .ghost()
+                    .small()
+                    .icon(icon(if big { "minimize" } else { "maximize" }))
+                    .tooltip(if big {
+                        tr!("sheet-restore")
+                    } else {
+                        tr!("sheet-maximize")
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))),
+            )
+            .child(
+                Button::new("sheet-close")
+                    .ghost()
+                    .small()
+                    .icon(icon("x"))
+                    .tooltip(tr!("sheet-close"))
+                    .on_click(|_, window, cx| window.close_dialog(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The branch review's first file, once its list is there, when the
+    /// sheet was opened — the diff brought to the branch's range, whatever
+    /// the editor had left it on.
+    fn pick_branch_file(&mut self, cx: &mut Context<Self>) {
+        if !self.branch_sheet_pick {
+            return;
+        }
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.review.get(&worktree) else {
+            return;
+        };
+        let Some(range) = super::review::branch_panel_range(
+            state.base.as_deref(),
+            state.review_point.as_ref(),
+            state.since_review,
+        ) else {
+            return;
+        };
+        let Some(files) = state.files.get(&range) else {
+            return;
+        };
+        self.branch_sheet_pick = false;
+        let kept = state.range == range
+            && state
+                .selected
+                .as_deref()
+                .is_some_and(|selected| files.iter().any(|file| file.path == selected));
+        let first = files.first().map(|file| file.path.clone());
+        if let (false, Some(first)) = (kept, first) {
+            self.open_file(worktree, first, range, cx);
+        }
     }
 
     /// The first file, once the list is there, when the review was opened

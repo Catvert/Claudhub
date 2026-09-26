@@ -727,26 +727,6 @@ impl ClaudhubApp {
         at_work
     }
 
-    /// A worktree's title in a laid-out view: its name, and its branch
-    /// when the name is not already the branch — then `trailing`, right
-    /// after them.
-    pub(super) fn worktree_title(
-        &self,
-        path: &Path,
-        trailing: Option<AnyElement>,
-        cx: &App,
-    ) -> AnyElement {
-        let (_, label) = self.project_label(path);
-        let branch = self
-            .repos
-            .worktree(path)
-            .and_then(|worktree| worktree.branch.clone())
-            .filter(|branch| branch.as_str() != label.as_ref())
-            .map(SharedString::from);
-        let lit = self.active.as_deref() == Some(path);
-        column_title("git-branch", label, branch, lit, trailing, cx)
-    }
-
     /// One node in a column — or, `in_column` false, filling the columns.
     ///
     /// Each node has its height, and the column scrolls when they add up to
@@ -1759,52 +1739,6 @@ fn outline(
     path.build().ok()
 }
 
-/// A column's title, over its first node: what it is about, larger than
-/// anything in the nodes, so that the columns read as columns and not as
-/// one wall of cards — a name, and beside it, smaller, what qualifies it.
-/// The worktree on show carries the accent, as its card's border does.
-pub(super) fn column_title(
-    glyph: &'static str,
-    name: SharedString,
-    detail: Option<SharedString>,
-    lit: bool,
-    trailing: Option<AnyElement>,
-    cx: &App,
-) -> AnyElement {
-    let theme = cx.theme();
-    h_flex()
-        .w_full()
-        .min_w_0()
-        .px_1()
-        .gap_2()
-        .items_center()
-        .child(icon(glyph).text_color(if lit {
-            theme.ring
-        } else {
-            theme.muted_foreground
-        }))
-        .child(
-            div()
-                .flex_shrink_0()
-                .max_w(gpui_kit::relative(0.7))
-                .truncate()
-                .text_lg()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .when(lit, |el| el.text_color(theme.ring))
-                .child(name),
-        )
-        .children(detail.map(|detail| {
-            div()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(detail)
-        }))
-        .children(trailing.map(|trailing| div().flex_none().child(trailing)))
-        .into_any_element()
-}
-
 /// How far past a column's right edge its width grip ends: centred in the
 /// **empty** space between two columns, which is not the gap alone — the
 /// bar's gutter is empty too while nothing scrolls, and the grip used to sit
@@ -2308,7 +2242,10 @@ impl ClaudhubApp {
             });
         // Close up, the branch is a picker and the checkout's gestures sit
         // beside it — see `render_card_actions`; from afar, a line to read.
-        let branch_row = if detail {
+        // On a board the title above says it all — see `board_title`.
+        let branch_row = if self.home_mode.laid_out() {
+            div().into_any_element()
+        } else if detail {
             self.render_card_actions(path, branch, outline.and_then(|o| o.upstream), cx)
         } else {
             h_flex()
@@ -2437,34 +2374,29 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// What the title bar offers of the checkout on show, on the card of
-    /// each: the branch picker with how far the branch is from its remote,
-    /// pull and push when there is something to move, whether it is up and
-    /// the switch, its address, its recipes, and the rest of its menu.
-    ///
-    /// The home screen shows every checkout at once, so a bar speaking of
-    /// one of them spoke of whichever had last been clicked; here each
-    /// gesture sits on the card it acts on. The branch picker is the one
-    /// surface the title bar opened — it speaks of the checkout on show, so
-    /// opening it from a card makes that card's the one (`branch_popover`).
-    fn render_card_actions(
+    /// A checkout's branch as the picker's trigger: its name, how far it is
+    /// from its remote, and the chevron — the branch picker opened from it
+    /// speaking of that checkout (`branch_popover`).
+    pub(super) fn branch_picker_on(
         &self,
         path: &Path,
         branch: SharedString,
-        upstream: Option<(usize, usize)>,
+        ahead: usize,
+        behind: usize,
+        size: Size,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let (ahead, behind) = upstream.unwrap_or((0, 0));
+        let small = size == Size::XSmall;
         let trigger = Button::new("overview-branch-trigger")
             .ghost()
-            .xsmall()
+            .with_size(size)
             .child(
                 h_flex()
                     .min_w_0()
                     .gap_1()
                     .items_center()
-                    .text_xs()
+                    .map(|el| if small { el.text_xs() } else { el.text_sm() })
                     .child(
                         icon("git-branch")
                             .xsmall()
@@ -2489,12 +2421,112 @@ impl ClaudhubApp {
                             .text_color(theme.muted_foreground),
                     ),
             );
-        let picker = self.branch_popover(
+        self.branch_popover(
             "overview-branch".into(),
             trigger,
             Some(path.to_path_buf()),
             cx,
-        );
+        )
+        .into_any_element()
+    }
+
+    /// A board's title, which carries what the worktree's card and the
+    /// editor's title bar said of a checkout: its name, its branch as the
+    /// picker, pull and push when there is something to move — then
+    /// `actions`, the board's own gestures — and at the far end whether it
+    /// is up, its address, and the rest of its menu.
+    pub(super) fn board_title(
+        &self,
+        path: &Path,
+        actions: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (_, label) = self.project_label(path);
+        let lit = self.active.as_deref() == Some(path);
+        let branch = self
+            .repos
+            .worktree(path)
+            .and_then(|worktree| worktree.branch.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| tr!("overview-detached"));
+        let (ahead, behind) = self
+            .outlines
+            .get(path)
+            .and_then(|outline| outline.upstream)
+            .unwrap_or((0, 0));
+        let menu = self.main_of(path).map(|main| {
+            let (entity, worktree) = (cx.entity(), path.to_path_buf());
+            Button::new("board-worktree-actions")
+                .ghost()
+                .small()
+                .icon(icon("ellipsis"))
+                .dropdown_menu(move |menu, _window, cx| {
+                    let (main, worktree) = (main.clone(), worktree.clone());
+                    entity.update(cx, |this, cx| this.worktree_menu(menu, main, worktree, cx))
+                })
+        });
+        h_flex()
+            .id(SharedString::from(format!(
+                "board-title-{}",
+                path.display()
+            )))
+            .w_full()
+            .min_w_0()
+            .px_1()
+            .gap_1()
+            .items_center()
+            .child(icon("git-branch").text_color(if lit {
+                theme.ring
+            } else {
+                theme.muted_foreground
+            }))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .max_w(gpui_kit::relative(0.35))
+                    .pl_1()
+                    .truncate()
+                    .text_lg()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .when(lit, |el| el.text_color(theme.ring))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(self.branch_picker_on(path, branch, ahead, behind, Size::Small, cx)),
+            )
+            .children(self.sync_buttons(path, ahead, behind, Size::Small, cx))
+            .child(div().w(px(6.)))
+            .children(actions)
+            .child(div().flex_1())
+            .children(self.render_wt_state(path, Size::Small, cx))
+            .children(self.render_wt_links(path, Size::Small, cx))
+            .children(menu)
+            .into_any_element()
+    }
+
+    /// What the title bar offers of the checkout on show, on the card of
+    /// each: the branch picker with how far the branch is from its remote,
+    /// pull and push when there is something to move, whether it is up and
+    /// the switch, its address, its recipes, and the rest of its menu.
+    ///
+    /// The home screen shows every checkout at once, so a bar speaking of
+    /// one of them spoke of whichever had last been clicked; here each
+    /// gesture sits on the card it acts on. The branch picker is the one
+    /// surface the title bar opened — it speaks of the checkout on show, so
+    /// opening it from a card makes that card's the one (`branch_popover`).
+    fn render_card_actions(
+        &self,
+        path: &Path,
+        branch: SharedString,
+        upstream: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (ahead, behind) = upstream.unwrap_or((0, 0));
+        let picker = self.branch_picker_on(path, branch, ahead, behind, Size::XSmall, cx);
         let menu = self.main_of(path).map(|main| {
             let (entity, worktree) = (cx.entity(), path.to_path_buf());
             Button::new("overview-worktree-actions")

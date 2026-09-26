@@ -1224,8 +1224,8 @@ impl ClaudhubApp {
             let Some((left, right)) = span else {
                 continue;
             };
-            let open = path.to_path_buf();
-            let edit = Button::new(SharedString::from(format!("focus-edit-{}", path.display())))
+            let (open, review) = (path.to_path_buf(), path.to_path_buf());
+            let mut actions = vec![Button::new("focus-edit")
                 .ghost()
                 .small()
                 .icon(icon("pencil"))
@@ -1233,7 +1233,25 @@ impl ClaudhubApp {
                 .tooltip(tr!("overview-open-worktree"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.work_in_worktree(&open, window, cx);
-                }));
+                }))
+                .into_any_element()];
+            // The project's recipes, beside where one goes to work.
+            actions.extend(
+                self.render_just(path, gpui_kit::component::Size::Small, cx)
+                    .map(IntoElement::into_any_element),
+            );
+            actions.push(
+                Button::new("focus-review")
+                    .ghost()
+                    .small()
+                    .icon(icon("file-diff"))
+                    .label(tr!("focus-review"))
+                    .tooltip(tr!("overview-review"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_branch_sheet(&review, window, cx);
+                    }))
+                    .into_any_element(),
+            );
             cells.push(
                 h_flex()
                     .absolute()
@@ -1244,11 +1262,12 @@ impl ClaudhubApp {
                     .gap_2()
                     .items_center()
                     .overflow_hidden()
-                    .child(div().flex_1().min_w_0().child(self.worktree_title(
-                        path,
-                        Some(edit.into_any_element()),
-                        cx,
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.board_title(path, actions, cx)),
+                    )
                     .into_any_element(),
             );
         }

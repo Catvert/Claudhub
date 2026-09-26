@@ -662,8 +662,11 @@ worktree.
   ne défilent pas avec la rangée** (`render_focus_header`) : chacun est tenu
   à gauche de la part visible de son tableau (`focus::header_span`), mesurée
   dans les coordonnées de la rangée — que le défilement ne change pas — et
-  relue au défilement de la frame, sans quoi il traînait d'une image ; il
-  porte « Éditer », le double clic de sa carte. À droite, deux flèches font
+  relue au défilement de la frame, sans quoi il traînait d'une image. **Il
+  porte ce que la carte et la barre de l'éditeur disaient du checkout**
+  (`board_title`) — la branche en sélecteur, pull et push, « Éditer »,
+  « Lancer », « Revue », l'état, les liens, le `…` — et la carte, sur un
+  tableau, n'en répète rien. À droite, deux flèches font
   glisser la rangée d'une colonne (`focus::next_stop`), par le lissage de la
   molette. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
@@ -775,7 +778,14 @@ worktree.
   côte à côte dans un dialogue : mêmes fonctions, même état, même brouillon.
   Les deux parlent du worktree regardé, donc l'ouvrir sélectionne la carte,
   comme le sélecteur de branches ; le commit réussi la referme
-  (`commit_sheet`). Le bouton « Valider » d'une carte l'ouvre aussi.
+  (`commit_sheet`). Le bouton « Valider » d'une carte l'ouvre aussi. Elle
+  a une sœur, **la revue** (`SheetKind::Review`, « Revue » au titre d'un
+  tableau) : la revue de branche de l'éditeur, depuis la base, et le diff.
+  Les deux **dessinent leur tête** — ce qu'elles sont, contre quoi elles
+  comparent, agrandir (le double clic aussi, retenu d'une fois sur l'autre)
+  et fermer : le titre du dialogue n'en disait rien, et sa taille se lit
+  sur un `Rc<Cell>` que la fermeture du dialogue partage avec la feuille,
+  lire l'application de là étant une panique.
 - **Chaque nœud a les trois boutons d'une fenêtre** : replier jusqu'à l'en-tête
   (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — taille et vue
   d'avant rendues au second clic —, et une croix qui demande : un terminal
