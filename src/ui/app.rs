@@ -1097,6 +1097,9 @@ pub struct ClaudhubApp {
     pub(super) branch_sheet_pick: bool,
     /// Whether the sheets open maximized: the last one's choice.
     pub(super) sheet_maximized: bool,
+    /// The configuration each worktree's run widget shows, once chosen —
+    /// see `run::shown`.
+    pub(super) run_choice: HashMap<PathBuf, crate::ui::run::RunConfig>,
     /// The worktrees whose status the home screen asked for since their
     /// count last moved — see `changes_view::ensure_changes_read`.
     pub(super) changes_read: std::collections::HashSet<PathBuf>,
@@ -1643,6 +1646,7 @@ impl ClaudhubApp {
             branch_sheet: false,
             branch_sheet_pick: false,
             sheet_maximized: false,
+            run_choice: HashMap::new(),
             changes_read: std::collections::HashSet::new(),
             note_editors: HashMap::new(),
             canvas: HashMap::new(),

@@ -1235,11 +1235,9 @@ impl ClaudhubApp {
                     this.work_in_worktree(&open, window, cx);
                 }))
                 .into_any_element()];
-            // The project's recipes, beside where one goes to work.
-            actions.extend(
-                self.render_just(path, gpui_kit::component::Size::Small, cx)
-                    .map(IntoElement::into_any_element),
-            );
+            // What runs in it — the environment, the recipes — beside
+            // where one goes to work: see `run_view`.
+            actions.extend(self.render_run(path, gpui_kit::component::Size::Small, cx));
             actions.push(
                 Button::new("focus-review")
                     .ghost()

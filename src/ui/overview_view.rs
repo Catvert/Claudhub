@@ -2502,7 +2502,6 @@ impl ClaudhubApp {
             .child(div().w(px(6.)))
             .children(actions)
             .child(div().flex_1())
-            .children(self.render_wt_state(path, Size::Small, cx))
             .children(self.render_wt_links(path, Size::Small, cx))
             .children(menu)
             .into_any_element()
@@ -2550,9 +2549,8 @@ impl ClaudhubApp {
             .child(div().min_w_0().overflow_hidden().child(picker))
             .children(self.sync_buttons(path, ahead, behind, Size::XSmall, cx))
             .child(div().flex_1())
-            .children(self.render_wt_state(path, Size::XSmall, cx))
             .children(self.render_wt_links(path, Size::XSmall, cx))
-            .children(self.render_just(path, Size::XSmall, cx))
+            .children(self.render_run(path, Size::XSmall, cx))
             .children(menu)
             .into_any_element()
     }

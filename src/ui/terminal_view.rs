@@ -142,6 +142,13 @@ pub struct TerminalExited;
 
 impl EventEmitter<TerminalExited> for TerminalView {}
 
+/// The terminal's program has ended, however it did: what shows whether a
+/// recipe still runs — the run widget — is redrawn on it, a tab that stays
+/// open on a failure changing nothing else the application would notice.
+pub struct TerminalEnded;
+
+impl EventEmitter<TerminalEnded> for TerminalView {}
+
 impl TerminalView {
     /// Opens a pty. Separate from the view because it is the only step that can
     /// fail, and a failure in an entity constructor leaves no way out but a
@@ -231,6 +238,7 @@ impl TerminalView {
                                 // one did not ask for keeps its tab.
                                 TerminalEvent::Exited(code) => {
                                     view.terminal.mark_exited();
+                                    cx.emit(TerminalEnded);
                                     if code == Some(0) {
                                         cx.emit(TerminalExited);
                                     }
@@ -360,6 +368,12 @@ impl TerminalView {
     /// What a hand typed at the shell's prompt and is running now.
     pub fn foreground_job(&self) -> Option<(u32, Vec<String>)> {
         self.terminal.foreground_job()
+    }
+
+    /// Interrupts what runs, as `Ctrl+C` typed in it would: the run widget's
+    /// stop, which leaves the tab and what it printed.
+    pub fn interrupt(&mut self) {
+        self.terminal.write_str("\x03");
     }
 
     /// Types a line at the prompt, and enters it — a command handed back to
@@ -1852,6 +1866,9 @@ pub struct OpenTerminal {
     /// Its height in the home screen's columns — apart from the plane's, a
     /// column's width not being a card's.
     pub column_height: f32,
+    /// The `justfile` recipe it was opened to run, which the run widget
+    /// reads its state off — see `run_view`.
+    pub run: Option<String>,
 }
 
 impl OpenTerminal {}
@@ -2062,6 +2079,8 @@ impl ClaudhubApp {
         // window, which the event does not carry. Held here and not in the view
         // — closing a terminal is the application's gesture, and the same one
         // the cross goes through.
+        cx.subscribe(&view, |_, _, _: &TerminalEnded, cx| cx.notify())
+            .detach();
         cx.subscribe_in(
             &view,
             window,
@@ -2081,6 +2100,7 @@ impl ClaudhubApp {
             typed: None,
             size: crate::ui::overview::Tile::default().size(),
             column_height: crate::ui::overview::COLUMN_TILE,
+            run: None,
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);

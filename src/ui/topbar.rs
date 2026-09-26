@@ -522,9 +522,9 @@ impl ClaudhubApp {
     }
 
     /// The editor's run of the checkout on show: the trail, the two pickers,
-    /// its state, its menu, and what it owes its remote.
+    /// its menu, and what it owes its remote. Whether it is up is the run
+    /// widget's, at the right — see `run_view`.
     fn render_worktree_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.active.clone();
         h_flex()
             .items_center()
             .gap_1()
@@ -539,18 +539,6 @@ impl ClaudhubApp {
             // one goes through them: the worktree, then its branch.
             .child(self.render_worktree_picker(cx))
             .children(self.render_branch_picker(cx))
-            // Whether the checkout is running, and the switch
-            // that starts or stops it. Immediately after the
-            // two pickers, because it is the third thing said
-            // about the same subject: this worktree, its
-            // branch, and whether it is up. It was a dot at the
-            // far end of this run, its gesture buried in the
-            // `…` — see `render_wt_state`.
-            .children(
-                active
-                    .clone()
-                    .and_then(|worktree| self.render_wt_state(&worktree, Size::Small, cx)),
-            )
             // And everything else one asks of that checkout,
             // right behind the one operation that earned a
             // button of its own. The two are one gesture in two
@@ -590,7 +578,7 @@ impl ClaudhubApp {
             .children(
                 active
                     .as_deref()
-                    .and_then(|worktree| self.render_just(worktree, Size::Small, cx)),
+                    .and_then(|worktree| self.render_run(worktree, Size::Small, cx)),
             )
             // Where one goes next: the checkouts one has
             // pinned, in one segmented group — see
@@ -827,88 +815,6 @@ impl ClaudhubApp {
                     }),
                 )
             })
-    }
-
-    /// What can be done to the worktree being looked at: git on one side, the
-    /// project's `wt.toml` on the other.
-    ///
-    /// `ClaudhubApp::worktree_menu`, unchanged — it was the sidebar row's right
-    /// click. A right click needs a row to land on, and there is no list up
-    /// here: it becomes a button, which is also what makes it findable.
-    /// The run button: the default recipe on the left, all of them under the
-    /// chevron.
-    ///
-    /// Two buttons and not a menu alone. What a bare `just` runs is the recipe
-    /// the project put first, which is the one one runs twenty times a day, and
-    /// making it cost a menu would be making the common gesture pay for the
-    /// rare one. The chevron is where the rest lives.
-    ///
-    /// The recipes are read from what the worker brought back — never from the
-    /// disk here, and never a subprocess in a render.
-    pub(super) fn render_just(
-        &self,
-        worktree: &std::path::Path,
-        size: Size,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let worktree = worktree.to_path_buf();
-        // The snapshot is shared rather than copied: the recipes go into the
-        // menu's `'static` closure, and this runs on every frame of the bar.
-        let snapshot = self.just_recipes(&worktree)?;
-        let default = snapshot.default.clone()?;
-        let entity = cx.entity();
-        let run = {
-            let (worktree, default) = (worktree.clone(), default.clone());
-            let entity = entity.clone();
-            Button::new("just-run")
-                .ghost()
-                .with_size(size)
-                .icon(icon("play"))
-                .label(tr!("just-run"))
-                // What the click actually runs, written out: "Run" alone leaves
-                // one to guess which recipe, and a project's first recipe is not
-                // always the one its name suggests.
-                .tooltip(SharedString::from(format!("just {default}")))
-                .on_click(move |_, window, cx| {
-                    let (worktree, default) = (worktree.clone(), default.clone());
-                    entity.update(cx, |this, cx| this.run_just(worktree, default, window, cx));
-                })
-        };
-        // Nothing to unfold when the default recipe is the only one: a chevron
-        // opening a menu of one is a click that says nothing.
-        let more = (snapshot.recipes.len() > 1).then(|| {
-            Button::new("just-recipes")
-                .ghost()
-                .with_size(size)
-                .icon(icon("chevron-down"))
-                .tooltip(tr!("just-recipes"))
-                .dropdown_menu(move |menu, _window, _cx| {
-                    snapshot.recipes.iter().fold(menu, |menu, recipe| {
-                        let (worktree, name) = (worktree.clone(), recipe.name.clone());
-                        let entity = entity.clone();
-                        // The recipe as `just --list` writes it, its doc
-                        // comment after: the menu says what the tool says, and
-                        // what a recipe takes is part of what one reads before
-                        // clicking.
-                        let label = if recipe.doc.is_empty() {
-                            recipe.signature()
-                        } else {
-                            format!("{} — {}", recipe.signature(), recipe.doc)
-                        };
-                        menu.item(
-                            PopupMenuItem::new(SharedString::from(label))
-                                .icon(icon("terminal"))
-                                .on_click(move |_, window, cx| {
-                                    let (worktree, name) = (worktree.clone(), name.clone());
-                                    entity.update(cx, |this, cx| {
-                                        this.run_just(worktree, name, window, cx)
-                                    });
-                                }),
-                        )
-                    })
-                })
-        });
-        Some(h_flex().items_center().child(run).children(more))
     }
 
     fn render_worktree_actions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {

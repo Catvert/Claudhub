@@ -176,6 +176,11 @@ src/
     repos.rs        les dépôts ouverts et ceux qui manquent — sans gpui, testé
     inflight.rs     les écritures en vol, et ce que la barre en dit — testé
     rails.rs        les tool windows et leurs trois bandeaux — pur, testé
+    run.rs          ce que le widget d'exécution propose — l'environnement de
+                    `wt`, les recettes — et laquelle il montre — pur, testé
+    run_view.rs     le widget d'exécution, comme un IDE : la configuration,
+                    si elle tourne, ▶ / ↻ et ■ ; une recette tourne dans un
+                    onglet qui porte son nom (`OpenTerminal::run`)
     dock_layout.rs  l'aire unique : sa disposition, ses sièges, ses gestes
     diff_view.rs    la vue de diff, virtualisée
     refine.rs       les mots qui changent entre deux versions d'une ligne — pur
@@ -664,8 +669,8 @@ worktree.
   dans les coordonnées de la rangée — que le défilement ne change pas — et
   relue au défilement de la frame, sans quoi il traînait d'une image. **Il
   porte ce que la carte et la barre de l'éditeur disaient du checkout**
-  (`board_title`) — la branche en sélecteur, pull et push, « Éditer »,
-  « Lancer », « Revue », l'état, les liens, le `…` — et la carte, sur un
+  (`board_title`) — la branche en sélecteur, pull et push, « Éditer », le
+  widget d'exécution, « Revue », les liens, le `…` — et la carte, sur un
   tableau, n'en répète rien. À droite, deux flèches font
   glisser la rangée d'une colonne (`focus::next_stop`), par le lissage de la
   molette. Un clic montre un worktree seul et le rend regardé
@@ -1612,7 +1617,7 @@ un rebase** : la traduction se fait dans la couche git, une fois. Le blob se lit
 octet pour octet (`git_blob`), `git` rognant les sauts de ligne finaux.
 
 **Ce qui tient lieu de système d'extension**, du moins cher au plus cher : le
-`justfile` du dépôt, s'il en a un — ses recettes sont le bouton « Lancer » de
+`justfile` du dépôt, s'il en a un — ses recettes sont des configurations du widget d'exécution de
 la barre de titre, lues par `just --dump --dump-format json` et jamais par un
 parseur à nous ; le `wt.toml` du projet ; des commandes déclarées dans les
 réglages. Il y a eu un quatrième niveau — un panneau écrit en Rune — et il est
