@@ -957,7 +957,6 @@
   "focus-drop-new-column": "Nouvelle colonne",
   "focus-drop-stays": "Reste à sa place",
   "focus-drop-column": "Colonne %{n}",
-  "focus-drag-hint": "Glisser une carte par son en-tête pour la changer de colonne",
   "focus-column-back": "Colonne précédente",
   "focus-column-forward": "Colonne suivante",
   "focus-edit": "Éditer",

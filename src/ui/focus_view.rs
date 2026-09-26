@@ -178,12 +178,11 @@ impl ClaudhubApp {
                 // Their lists of changes, even if the pickers leave them out
                 // of what the home screen reads.
                 self.ensure_changes_read(&shown, cx);
-                let alone = shown.len() == 1;
                 // An arrow's slide goes on where the last frame left it.
                 let scroll = self.focus_scroll.clone();
                 self.motion(BOARD_BAR.into(), Axes::Both)
                     .advance(&scroll, window);
-                let header = self.render_focus_header(&shown, alone, window, cx);
+                let header = self.render_focus_header(&shown, window, cx);
                 let mut boards: Vec<AnyElement> = Vec::new();
                 for (index, path) in shown.iter().enumerate() {
                     // Between two boards, a line: side by side, one's last
@@ -1179,7 +1178,7 @@ impl ClaudhubApp {
     /// The line over the boards, which does not scroll with them: each
     /// board's title — its name, its branch, « Edit » — held at the left of
     /// the part of it in view, and at the right the arrows that slide the
-    /// row a column at a time. `alone`, it says how a card is moved.
+    /// row a column at a time.
     ///
     /// **It is drawn before the row, from what the row measured**: each
     /// board's edges in the row's own coordinates, which scrolling does not
@@ -1188,7 +1187,6 @@ impl ClaudhubApp {
     fn render_focus_header(
         &mut self,
         shown: &[PathBuf],
-        alone: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1246,16 +1244,6 @@ impl ClaudhubApp {
                         Some(edit.into_any_element()),
                         cx,
                     )))
-                    .when(alone, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .pr_2()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tr!("focus-drag-hint")),
-                        )
-                    })
                     .into_any_element(),
             );
         }
