@@ -48,6 +48,12 @@ pub struct WorktreeState {
     pub home_hidden: bool,
     /// Where its changes node stands on the home screen, and how.
     pub home_changes: NodePlace,
+    /// Its cards' columns in the home screen's focus view, as the hand left
+    /// them — see `ui::focus`.
+    pub focus_board: Vec<Vec<crate::ui::focus::Key>>,
+    /// The widths the hand gave those columns, column for column; `None`
+    /// fills.
+    pub focus_widths: Vec<Option<f32>>,
     /// The terminals that were open, in order, to open again — see
     /// `ui::revive`.
     pub terminals: Vec<SavedTerminal>,
@@ -235,8 +241,10 @@ pub struct Session {
     pub worktree: Option<PathBuf>,
     /// The home screen was up: the window comes back on it.
     pub home: bool,
-    /// The home screen shows its columns rather than its plane.
-    pub home_columns: bool,
+    /// Which of its three views the home screen shows. The key written
+    /// before, `home_columns`, is left unread: the focus view is the new
+    /// default, for everyone.
+    pub home_mode: crate::ui::overview::HomeMode,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.

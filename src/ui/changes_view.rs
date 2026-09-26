@@ -90,7 +90,7 @@ impl ClaudhubApp {
         // The list is the status's, which a worktree nobody opened has only
         // once the home screen asked for it — `ensure_changes_read`.
         let files: Option<Vec<FileStatus>> =
-            self.fresh_status(path).map(|status| status.files.clone());
+            self.listed_status(path).map(|status| status.files.clone());
         let staged = files
             .as_ref()
             .map_or(0, |files| files.iter().filter(|f| f.is_staged()).count());
@@ -205,6 +205,116 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
+    /// The changes as a section of the worktree's own card — the focus
+    /// view's, where the card and its changes are one card: a rule, a line
+    /// that names them with their count, the files, and the way into the
+    /// review. `None` with nothing to commit.
+    pub(super) fn render_changes_section(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.has_changes(path) {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let summary = self.summaries.get(path).copied().unwrap_or_default();
+        let files: Option<Vec<FileStatus>> =
+            self.listed_status(path).map(|status| status.files.clone());
+        let staged = files
+            .as_ref()
+            .map_or(0, |files| files.iter().filter(|f| f.is_staged()).count());
+        let worktree = path.to_path_buf();
+        let list = match files {
+            None => div()
+                .py_1()
+                .text_xs()
+                .text_color(muted)
+                .child(tr!("overview-changes-reading"))
+                .into_any_element(),
+            Some(files) => v_flex()
+                .id(SharedString::from(format!(
+                    "focus-changes-list-{}",
+                    path.display()
+                )))
+                .w_full()
+                // A long list scrolls inside the card rather than making the
+                // card the height of the list: the commits and the button
+                // stay in view.
+                .max_h(px(320.))
+                .overflow_y_scroll()
+                .children(
+                    files
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, file)| self.render_changes_row(&worktree, index, file, cx)),
+                )
+                .into_any_element(),
+        };
+        let open = path.to_path_buf();
+        Some(
+            v_flex()
+                .id(SharedString::from(format!(
+                    "focus-changes-{}",
+                    path.display()
+                )))
+                // Its gestures are its own: a press here neither selects the
+                // card nor, twice, leaves the screen for the editor.
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .w_full()
+                .gap_1()
+                .pt_2()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(icon("file-diff").xsmall().text_color(theme.success))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(tr!("overview-changes")),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(tr!("home-files", { count: summary.files })),
+                        )
+                        .child(super::topbar::volume_on(summary, None, cx))
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(tr!("commit-staged-count", { count: staged })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "focus-changes-review-{}",
+                                path.display()
+                            )))
+                            .primary()
+                            .xsmall()
+                            .icon(icon("git-commit-horizontal"))
+                            .label(tr!("overview-changes-review"))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.open_review_sheet(&open, None, window, cx);
+                                },
+                            )),
+                        ),
+                )
+                // The rows run to the card's edges, as a list's do: the
+                // body's padding is given back.
+                .child(div().mx(px(-8.)).child(list))
+                .into_any_element(),
+        )
+    }
+
     /// One file of the node: its tick, its code, its name and folder. The
     /// tick stages or unstages it where it is; the rest opens the review on
     /// it.
@@ -301,6 +411,21 @@ impl ClaudhubApp {
         (self.changes_read.contains(worktree) && !self.pending_status.contains(worktree))
             .then(|| self.review.get(worktree).map(|review| &review.status))
             .flatten()
+    }
+
+    /// The status the list shows: the last one read, **kept while the next
+    /// one is on its way**. The watcher asks again at every write in the
+    /// worktree, and a list that went back to « reading » for the length of
+    /// each `git status` blinked, and the card with it, a line tall one
+    /// moment and a list the next. Only a first reading shows the wait — or
+    /// a reading after an empty list, where the count says there is more.
+    fn listed_status(&self, worktree: &Path) -> Option<&crate::git::Status> {
+        let status = self
+            .review
+            .get(worktree)
+            .filter(|_| self.status_seen.contains(worktree))
+            .map(|review| &review.status)?;
+        (!status.files.is_empty() || !self.pending_status.contains(worktree)).then_some(status)
     }
 
     /// Whether a worktree has anything to commit, for its changes node.

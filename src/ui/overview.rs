@@ -352,6 +352,26 @@ pub struct Plan {
     pub bounds: Rect,
 }
 
+/// The three ways the home screen shows what is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HomeMode {
+    /// One worktree at a time, chosen in a sidebar, its nodes as cards.
+    #[default]
+    Focus,
+    /// A column per worktree, side by side.
+    Columns,
+    /// The plane, zoomed and panned, every tree at once.
+    Canvas,
+}
+
+impl HomeMode {
+    /// Placed by a layout rather than by the hand: nothing is dragged, a
+    /// node's height is its own and maximising one gives it the room.
+    pub fn laid_out(self) -> bool {
+        self != HomeMode::Canvas
+    }
+}
+
 /// A line between two projects on the plane, in the plane's units: where
 /// one repository's tree ends and the next begins.
 #[derive(Clone, Copy, Debug, PartialEq)]

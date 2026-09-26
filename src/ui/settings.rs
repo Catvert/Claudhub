@@ -266,7 +266,16 @@ pub struct TerminalSettings {
     /// nothing is written anywhere; the gesture in a worktree's actions still
     /// installs by hand.
     pub agent_hooks: bool,
+    /// The least width of a column on the home screen's focus board, in
+    /// pixels. A column is where a terminal is read: below this, a program
+    /// wraps its lines. The board scrolls sideways rather than squeeze.
+    pub column_min: f32,
 }
+
+/// The least a focus column may be set to, and what it starts at: about
+/// ninety columns of a thirteen-pixel terminal, with the card's chrome.
+pub const COLUMN_MIN_RANGE: (f32, f32) = (280., 1600.);
+pub const COLUMN_MIN_DEFAULT: f32 = 640.;
 
 impl Default for TerminalSettings {
     fn default() -> Self {
@@ -285,6 +294,7 @@ impl Default for TerminalSettings {
             default_agent: String::new(),
             placement: TerminalPlacement::default(),
             agent_hooks: true,
+            column_min: COLUMN_MIN_DEFAULT,
         }
     }
 }

@@ -920,6 +920,27 @@ fn terminal_page(
                         .default_value(10_000.0),
                     )
                     .description(tr!("settings-scrollback-help")),
+                )
+                .item(
+                    SettingItem::new(
+                        tr!("settings-column-min"),
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: crate::ui::settings::COLUMN_MIN_RANGE.0 as f64,
+                                max: crate::ui::settings::COLUMN_MIN_RANGE.1 as f64,
+                                step: 20.,
+                            },
+                            |cx: &App| Settings::global(cx).terminal.column_min as f64,
+                            |value: f64, cx: &mut App| {
+                                let (least, most) = crate::ui::settings::COLUMN_MIN_RANGE;
+                                Settings::update_global(cx, |s| {
+                                    s.terminal.column_min = (value as f32).clamp(least, most)
+                                })
+                            },
+                        )
+                        .default_value(crate::ui::settings::COLUMN_MIN_DEFAULT as f64),
+                    )
+                    .description(tr!("settings-column-min-help")),
                 ),
         )
 }

@@ -209,9 +209,13 @@ src/
                     ouvre : le panneau des changements et le diff, en dialogue
     context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
-                    zoom — pur, testé
+                    zoom, ses trois vues — pur, testé
+    focus.rs        le tableau du focus : quelle carte dans quelle colonne, ce
+                    qui arrive se place par règle, où tombe un dépôt — pur, testé
+    focus_view.rs   la vue par défaut de l'accueil : la barre latérale des
+                    worktrees, et un worktree à la fois sur son tableau
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes,
-                    et la feuille de commit
+                    et les colonnes
     revive.rs       les terminaux qui survivent à la fenêtre : quelle session
                     Claude un onglet porte, la commande qui la reprend — pur
     review.rs / terminal_view.rs
@@ -630,15 +634,44 @@ worktree.
   le plan. **Le sélecteur de branches reste une seule surface** : il parle du
   checkout regardé, donc l'ouvrir depuis une carte la sélectionne d'abord
   (`branch_popover`).
-- **Un projet à la fois** par défaut (sélecteur dans la barre de titre) : cinq
+- **Un projet à la fois** par défaut (sélecteur dans la barre de titre, qui
+  vaut aussi pour la barre latérale du focus) : cinq
   worktrees d'un code ne se lisent pas parmi ceux d'un autre — et autant qu'on
   en coche. Un second sélecteur coche les **worktrees**, par projet : un projet
   dont rien n'est coché les montre tous (`overview::shown_of`), et le nœud git
   et les notes du dépôt restent, étant à chacun. Les deux sont des **popovers
   à cases** et non des menus : un menu se ferme à chaque pression, et cocher
   trois projets demandait trois ouvertures. Jamais le dernier décoché.
-- **Deux vues, un onglet** (`set_overview_columns`, retenu dans la session) :
-  le plan, et des **colonnes** — une par worktree, sa carte, ses terminaux, ses
+- **Trois vues, un onglet** (`HomeMode`, `set_home_mode`, retenu dans la
+  session). **Par défaut le focus** (`ui::focus_view`) : une barre latérale
+  des worktrees affichés — qui travaille, combien est en cours — et au milieu
+  **un seul** worktree, le regardé (`active`, celui de toute la fenêtre), sur
+  un **tableau** (`ui::focus`) : des colonnes de cartes que la main arrange,
+  retenues par worktree. Une carte se **traîne par son en-tête** — celui que
+  chaque nœud a déjà, `grab` — vers une autre colonne, ou à droite de la
+  dernière, ce qui en crée une ; pendant le trajet la carte reste en place,
+  pâlie, une carte miniature suit le pointeur en disant où elle tombera, et
+  **un emplacement en pointillés s'ouvre là**, les cartes d'en dessous
+  s'écartant. La cible se lit sur ce que la frame d'avant a mesuré, **cet
+  emplacement retiré** (`Geometry::closed`) : lu sur les cartes qu'il a
+  poussées, il chassait le pointeur de haut en bas — et avec sa hauteur
+  **peinte**, qu'il mesure lui-même : il s'ouvre en grandissant, la carte
+  déposée se pose d'un glissement et d'un halo qui s'éteint
+  (`with_animation`, un identifiant par dépôt). Une colonne se règle par son
+  bord droit, largeur retenue avec le tableau, double-clic pour la rendre à
+  l'espace — jamais sous la largeur des réglages (`terminal.column_min`) ; le
+  tableau défile de côté plutôt que de serrer un terminal. Seul ce qui arrive se place par règle — un terminal
+  dans la colonne dont on a pressé « Terminal », sinon dans une colonne à lui.
+  Un terminal n'a pas d'identité qui survive au processus : le magasin garde
+  **qu'un terminal était là**, et ceux qui reviennent reprennent ces places
+  dans l'ordre de lecture. **La carte du worktree porte ses modifications**
+  (`render_changes_section`) : sur ce tableau, c'est une seule carte. Un
+  terminal au pied d'une colonne en prend le reste. Le plan et les colonnes
+  répondent « où en est chacun », et le paient en place ; la journée se passe
+  dans un worktree avec un œil sur les autres, ce qu'est la disposition d'un
+  éditeur. Puis le plan, et des
+  **colonnes**, chacune sous un **titre** plus grand que tout ce qu'elle
+  porte (`column_title`), qui reste quand ses nœuds défilent — une par worktree, sa carte, ses terminaux, ses
   notes ; une plus étroite par dépôt pour le nœud git. **Chaque colonne défile
   seule**, avec une barre qu'on attrape (la molette sur un terminal est au
   terminal), et chaque nœud a sa hauteur, réglée par son bord bas : celle du

@@ -23,6 +23,8 @@ mod dock_layout;
 mod explorer;
 mod file_icons;
 mod find;
+mod focus;
+mod focus_view;
 mod folds;
 mod follow;
 mod github;
