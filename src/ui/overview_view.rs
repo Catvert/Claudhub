@@ -1622,7 +1622,9 @@ fn heard(activity: &crate::agent::Activity) -> overview::Doing {
 /// A terminal's outline, over it: the theme's line at rest — the ring when
 /// it has the focus — and **the link's own dress when its agent works or
 /// waits**, so that the link and the box it leads to read as one signal:
-/// dashes and a comet going round over a glow, or a breathing line.
+/// dashes going round over a glow, or a breathing line. The link's comet
+/// stays on the link: going round a box, a white line chasing itself read
+/// as noise rather than work.
 pub(super) fn tile_outline(
     doing: overview::Doing,
     focused: bool,
@@ -1653,10 +1655,6 @@ pub(super) fn outline_rounded(
             .into_any_element();
     }
     let (work, asks) = (theme.warning, theme.danger);
-    let spark = gpui_kit::Hsla {
-        l: (work.l + 0.25).min(0.95),
-        ..work
-    };
     let width = (1.5 * zoom).clamp(1., 2.5);
     let seconds = flow_seconds();
     canvas(
@@ -1702,11 +1700,6 @@ pub(super) fn outline_rounded(
                         overview::marching_round(length, seconds * 30. * zoom, dash, gap);
                     if let Some(path) = stroke(width, Some(&overview::dash_array(&marching))) {
                         window.paint_path(path, work);
-                    }
-                    let tail = (36. * zoom).max(16.);
-                    let comet = overview::comet_round(length, seconds * 160. * zoom, tail);
-                    if let Some(path) = stroke(width * 2., Some(&overview::dash_array(&comet))) {
-                        window.paint_path(path, spark);
                     }
                 }
             }

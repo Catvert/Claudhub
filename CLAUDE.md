@@ -792,7 +792,8 @@ worktree.
   agent qui attend l'utilisateur respire**, dans la teinte d'une question, un
   signal battant au bord du terminal — rien ne voyage, rien n'avance. **Le
   cadre du terminal porte le même habit** (`tile_outline`) : le lien et la
-  boîte où il mène se lisent comme un seul signal. Ce qui
+  boîte où il mène se lisent comme un seul signal — sans la comète, qui
+  tournant autour d'une boîte se lisait comme du bruit. Ce qui
   décide est le **statut que Claude écrit pour son pid** (`busy`, `waiting`,
   `idle`), puis le mot
   des hooks, et la devinette par le processeur en dernier : taper un prompt en

@@ -932,26 +932,6 @@ pub fn marching_round(length: f32, travelled: f32, dash: f32, gap: f32) -> Vec<(
     marching(length, travelled * stretch, dash * stretch, gap * stretch)
 }
 
-/// A comet going round a closed outline, `tail` long: its stretch in one
-/// piece, or in two across the seam.
-pub fn comet_round(length: f32, travelled: f32, tail: f32) -> Vec<(f32, f32)> {
-    if length <= 0. || tail <= 0. {
-        return Vec::new();
-    }
-    let tail = tail.min(length);
-    let head = travelled.rem_euclid(length);
-    if head >= tail {
-        vec![(head - tail, head)]
-    } else {
-        let mut pieces = Vec::new();
-        if head > 0. {
-            pieces.push((0., head));
-        }
-        pieces.push((length - (tail - head), length));
-        pieces
-    }
-}
-
 /// A slow breath between 0 and 1, `period` seconds long: what a waiting
 /// link pulses by.
 pub fn breath(seconds: f32, period: f32) -> f32 {
@@ -2061,14 +2041,5 @@ mod tests {
         // Rounded corners take their quarter circles off the straight sides.
         let round = outline_length(40., 40., 5.);
         assert!((round - (160. - 40. + std::f32::consts::TAU * 5.)).abs() < 1e-3);
-    }
-
-    #[test]
-    fn a_comet_round_an_outline_crosses_the_seam_in_two_pieces() {
-        assert_eq!(comet_round(100., 50., 10.), vec![(40., 50.)]);
-        assert_eq!(comet_round(100., 104., 10.), vec![(0., 4.), (94., 100.)]);
-        assert_eq!(comet_round(100., 100., 10.), vec![(90., 100.)]);
-        // Longer than the outline, it is the outline.
-        assert_eq!(comet_round(20., 5., 50.), vec![(0., 5.), (5., 20.)]);
     }
 }
