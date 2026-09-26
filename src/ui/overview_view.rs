@@ -395,7 +395,7 @@ impl ClaudhubApp {
             };
             terminal
                 .view
-                .update(cx, |view, _| view.set_canvas(Some(canvas)));
+                .update(cx, |view, cx| view.set_canvas(Some(canvas), cx));
         }
 
         let rem = window.rem_size() * view.zoom;
@@ -679,7 +679,9 @@ impl ClaudhubApp {
             self.tick_flow(cx);
         }
         for terminal in &self.terminals {
-            terminal.view.update(cx, |view, _| view.set_canvas(None));
+            terminal
+                .view
+                .update(cx, |view, cx| view.set_canvas(None, cx));
         }
         (plan, at_work)
     }
@@ -1757,7 +1759,9 @@ impl ClaudhubApp {
         // The terminals measure their own box when laid out, and are told
         // their card's grid again on the plane's next frame.
         for terminal in &self.terminals {
-            terminal.view.update(cx, |view, _| view.set_canvas(None));
+            terminal
+                .view
+                .update(cx, |view, cx| view.set_canvas(None, cx));
         }
         self.reframe(cx);
     }
@@ -3222,8 +3226,18 @@ impl ClaudhubApp {
                         }))
                         // `v_flex` and not `div`: a `div` is a block, and the
                         // terminal's `size_full` of an undefined height is zero.
+                        //
+                        // **Cached**: the plane repaints at every frame an
+                        // agent's link flows and every time one terminal
+                        // prints, and each terminal rebuilt its grid of runs
+                        // for it. A terminal repaints when it notifies — its
+                        // output, its canvas —, when its box moves, and on a
+                        // refresh (focus, settings, theme), which ignores
+                        // the cache.
                         .when(!folded, |el| {
-                            el.child(v_flex().flex_1().min_h_0().child(view))
+                            el.child(v_flex().flex_1().min_h_0().child(
+                                view.cached(gpui_kit::StyleRefinement::default().size_full()),
+                            ))
                         }),
                 )
                 // The outline on top rather than as the box's border: a
@@ -3354,7 +3368,9 @@ impl ClaudhubApp {
         super::store::Store::update_global(cx, |store| store.session.home = false);
         self.overview_drag = None;
         for terminal in &self.terminals {
-            terminal.view.update(cx, |view, _| view.set_canvas(None));
+            terminal
+                .view
+                .update(cx, |view, cx| view.set_canvas(None, cx));
         }
         cx.notify();
     }

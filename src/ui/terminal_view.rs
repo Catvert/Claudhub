@@ -282,7 +282,10 @@ impl TerminalView {
     /// and the layout rounds: at a fifth of the size, one pixel of rounding is
     /// five of the plane, and a line would come and go at every notch, each
     /// one a `SIGWINCH` a program redraws on.
-    pub fn set_canvas(&mut self, canvas: Option<Canvas>) {
+    ///
+    /// Notifies when it changes: the view is **cached** on the home screen,
+    /// and a zoom that left the box where it was would repaint the old font.
+    pub fn set_canvas(&mut self, canvas: Option<Canvas>, cx: &mut Context<Self>) {
         if self.canvas == canvas {
             return;
         }
@@ -290,6 +293,7 @@ impl TerminalView {
         // Measured again at the next frame, against the new font.
         self.font_size = px(0.);
         self.bounds = Bounds::default();
+        cx.notify();
     }
 
     pub fn is_agent(&self) -> bool {
@@ -541,6 +545,7 @@ impl TerminalView {
             None => (bounds.size, self.cell),
         };
         let (columns, lines) = grid_size(space, cell);
+        let before = self.pending_size;
         self.request_size(
             TermSize::new(
                 columns,
@@ -550,6 +555,13 @@ impl TerminalView {
             ),
             cx,
         );
+        // The badge that says so is painted by a render, and this runs after
+        // it: the view being cached on the home screen, nothing else would
+        // ask for the frame that shows it. A notify from here is lost — it is
+        // the middle of a draw — hence the next frame's.
+        if self.pending_size != before {
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
     }
 
     /// Passes the new geometry on, once the drag has **stopped**.
