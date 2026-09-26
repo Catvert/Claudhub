@@ -2517,6 +2517,7 @@ impl ClaudhubApp {
     pub(super) fn render_wt_links(
         &self,
         worktree: &Path,
+        size: gpui_kit::component::Size,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let first = self.wt_state(worktree)?.endpoints.first()?.clone();
@@ -2525,7 +2526,7 @@ impl ClaudhubApp {
             worktree.display()
         )))
         .ghost()
-        .small()
+        .with_size(size)
         .icon(icon("external-link"))
         .label(tr!("wt-links-open"));
         let main = self.repo_of(worktree).map(|repo| repo.main.clone());
@@ -2611,6 +2612,7 @@ impl ClaudhubApp {
     pub(super) fn render_wt_state(
         &self,
         worktree: &Path,
+        size: gpui_kit::component::Size,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -2627,7 +2629,7 @@ impl ClaudhubApp {
             return Some(
                 Button::new("wt-power")
                     .ghost()
-                    .small()
+                    .with_size(size)
                     .disabled(true)
                     .icon(icon("loader-circle").text_color(cx.theme().warning))
                     .into_any_element(),
@@ -2658,7 +2660,7 @@ impl ClaudhubApp {
         Some(
             Button::new("wt-power")
                 .ghost()
-                .small()
+                .with_size(size)
                 .icon(icon(if up { "circle-stop" } else { "play" }).text_color(colour))
                 .tooltip(if up {
                     tr!("worktree-down")

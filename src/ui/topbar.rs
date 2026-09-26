@@ -16,7 +16,7 @@ use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    ActiveTheme, Disableable, Sizable, TitleBar,
+    ActiveTheme, Disableable, Sizable, Size, TitleBar,
 };
 use gpui_kit::{div, prelude::*, px, Context, Entity, MouseButton, SharedString, Window};
 
@@ -304,7 +304,6 @@ impl ClaudhubApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = self.active.clone();
         // The top bar **is** the window's title bar.
         //
         // `TitleBar::title_bar_options()` asks the platform not to draw one: on
@@ -344,40 +343,14 @@ impl ClaudhubApp {
                     .child(
                         actions()
                             .child(self.render_main_menu(cx))
-                            // The trail, before the pickers: it is the one thing here
-                            // that speaks of *where one has been* rather than of what
-                            // one is looking at, and it belongs to the title bar
-                            // because it is the only chrome that crosses the screens
-                            // the trail crosses. The editor's bar keeps its own two,
-                            // on the same trail.
-                            .child(self.render_trail_buttons(cx))
-                            // The two pickers that drive everything else, in the order
-                            // one goes through them: the worktree, then its branch.
-                            .child(self.render_worktree_picker(cx))
-                            .children(self.render_branch_picker(cx))
-                            // Whether the checkout is running, and the switch
-                            // that starts or stops it. Immediately after the
-                            // two pickers, because it is the third thing said
-                            // about the same subject: this worktree, its
-                            // branch, and whether it is up. It was a dot at the
-                            // far end of this run, its gesture buried in the
-                            // `…` — see `render_wt_state`.
-                            .children(
-                                active
-                                    .clone()
-                                    .and_then(|worktree| self.render_wt_state(&worktree, cx)),
-                            )
-                            // And everything else one asks of that checkout,
-                            // right behind the one operation that earned a
-                            // button of its own. The two are one gesture in two
-                            // sizes — start it, or open the rest — and a `…` a
-                            // window's width from the subject it acts on is a
-                            // menu one opens to find out what it is about.
-                            .children(self.render_worktree_actions(cx))
-                            // Pull and push, and only when the branch has
-                            // something to pull or to push — see
-                            // `render_sync_buttons`.
-                            .children(self.render_sync_buttons(cx)),
+                            // Which screen, first of all: everything after it in
+                            // the bar — the trail, the pickers — speaks of what
+                            // that screen shows.
+                            .child(self.render_screen_switch(cx))
+                            // What the editor's bar says of the checkout it
+                            // shows. The home screen shows them all, and each
+                            // card carries its own — see `render_card_actions`.
+                            .when(!self.overview, |el| el.child(self.render_worktree_bar(cx))),
                     )
                     // The middle is empty on purpose, and the space is not
                     // lost: it is the window's drag region. Neither `fetch`, nor
@@ -389,34 +362,17 @@ impl ClaudhubApp {
                     .child(div().flex_1())
                     .child(
                         actions()
-                            // Opening the worktree in the browser, then the run
-                            // button: the right corner is the "act on what I am
-                            // looking at" corner, and the address a project exposes
-                            // is the gesture one makes most once it runs.
-                            .children(
-                                active.and_then(|worktree| self.render_wt_links(&worktree, cx)),
-                            )
-                            // The run button, at the far right and just before the two
-                            // screens one does not work in. A `justfile` is the
-                            // project's commands, and running one is a gesture of its
-                            // own: not one of the pickers that say what the window is
-                            // talking about, and not one of the worktree's operations
-                            // either — it is the corner one reaches for, next to the
-                            // home screen, which is where what it starts ends up. It is
-                            // painted only where there is a justfile with a recipe in
-                            // it.
-                            .children(self.render_just(cx))
-                            // Where one goes next: the grid, then the checkouts
-                            // one has pinned, in one segmented group — see
-                            // `render_switches`. At the very end because their
-                            // number changes every time one pins or unpins, so
-                            // whatever stands after them moves under the hand:
-                            // here there is nothing after them but the gear,
-                            // which is the one button nobody aims at from
-                            // memory. In front of the pickers, where they
-                            // began, they moved the two things the whole bar is
-                            // read from.
-                            .child(self.render_switches(cx))
+                            // The editor's corner: what acts on the checkout on
+                            // show. The home screen's is its own toolbar — the
+                            // view, the projects, the skill — where it floated
+                            // over the plane, hiding what lay under it.
+                            .map(|el| {
+                                if self.overview {
+                                    el.child(self.render_overview_toolbar(cx))
+                                } else {
+                                    el.child(self.render_worktree_corner(cx))
+                                }
+                            })
                             // The gear, at the far right of the title bar. It
                             // needs no gloss: it is where an application's
                             // settings are on every one of them, and a word
@@ -435,33 +391,159 @@ impl ClaudhubApp {
             )
     }
 
-    /// The grid, then the pinned checkouts: **one segmented group**.
+    /// The editor's run of the checkout on show: the trail, the two pickers,
+    /// its state, its menu, and what it owes its remote.
+    fn render_worktree_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active.clone();
+        h_flex()
+            .items_center()
+            .gap_1()
+            // The trail, before the pickers: it is the one thing here
+            // that speaks of *where one has been* rather than of what
+            // one is looking at, and it belongs to the title bar
+            // because it is the only chrome that crosses the screens
+            // the trail crosses. The editor's bar keeps its own two,
+            // on the same trail.
+            .child(self.render_trail_buttons(cx))
+            // The two pickers that drive everything else, in the order
+            // one goes through them: the worktree, then its branch.
+            .child(self.render_worktree_picker(cx))
+            .children(self.render_branch_picker(cx))
+            // Whether the checkout is running, and the switch
+            // that starts or stops it. Immediately after the
+            // two pickers, because it is the third thing said
+            // about the same subject: this worktree, its
+            // branch, and whether it is up. It was a dot at the
+            // far end of this run, its gesture buried in the
+            // `…` — see `render_wt_state`.
+            .children(
+                active
+                    .clone()
+                    .and_then(|worktree| self.render_wt_state(&worktree, Size::Small, cx)),
+            )
+            // And everything else one asks of that checkout,
+            // right behind the one operation that earned a
+            // button of its own. The two are one gesture in two
+            // sizes — start it, or open the rest — and a `…` a
+            // window's width from the subject it acts on is a
+            // menu one opens to find out what it is about.
+            .children(self.render_worktree_actions(cx))
+            // Pull and push, and only when the branch has
+            // something to pull or to push — see
+            // `render_sync_buttons`.
+            .children(self.render_sync_buttons(cx))
+    }
+
+    /// The editor's right corner: the project's address, its recipes, and
+    /// the pins.
+    fn render_worktree_corner(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active.clone();
+        h_flex()
+            .items_center()
+            .gap_1()
+            // Opening the worktree in the browser, then the run
+            // button: the right corner is the "act on what I am
+            // looking at" corner, and the address a project exposes
+            // is the gesture one makes most once it runs.
+            .children(
+                active
+                    .as_deref()
+                    .and_then(|worktree| self.render_wt_links(worktree, Size::Small, cx)),
+            )
+            // The run button, at the far right, just before the
+            // pins. A `justfile` is the project's commands, and
+            // running one is a gesture of its own: not one of the
+            // pickers that say what the window is talking about,
+            // and not one of the worktree's operations either — it
+            // is the corner one reaches for. It is painted only
+            // where there is a justfile with a recipe in it.
+            .children(
+                active
+                    .as_deref()
+                    .and_then(|worktree| self.render_just(worktree, Size::Small, cx)),
+            )
+            // Where one goes next: the checkouts one has
+            // pinned, in one segmented group — see
+            // `render_switches`. At the very end because their
+            // number changes every time one pins or unpins, so
+            // whatever stands after them moves under the hand:
+            // here there is nothing after them but the gear,
+            // which is the one button nobody aims at from
+            // memory. In front of the pickers, where they
+            // began, they moved the two things the whole bar is
+            // read from.
+            .children(self.render_switches(cx))
+    }
+
+    /// The two screens, as two tabs: the home screen and the editor.
+    ///
+    /// At the left of the bar, before the trail, and not among the pins at the
+    /// right where the home screen began: the pins answer "which checkout",
+    /// this answers "which screen", and the second question comes first — the
+    /// trail and the pickers after it speak of what that screen shows. Two
+    /// named tabs rather than one toggle: a lit "Home" alone said where one
+    /// was, never where the other press would go.
+    fn render_screen_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = |id: &'static str, glyph: &'static str, label, tooltip, lit: bool| {
+            Button::new(id)
+                .icon(icon(glyph))
+                .label(label)
+                .tooltip(tooltip)
+                .map(|button| match lit {
+                    true => button.primary(),
+                    false => button.outline(),
+                })
+        };
+        ButtonGroup::new("screen-switch")
+            .compact()
+            .xsmall()
+            .child(tab(
+                "screen-home",
+                "layout-dashboard",
+                tr!("overview-short"),
+                tr!("overview-toggle"),
+                self.overview,
+            ))
+            .child(tab(
+                "screen-editor",
+                "file-code",
+                tr!("editor-short"),
+                tr!("editor-toggle"),
+                !self.overview,
+            ))
+            .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
+                // Pressing the lit tab does nothing: it names the screen one
+                // is on, and leaving it is the other tab's press.
+                let home = selected.first() == Some(&0);
+                if home != this.overview {
+                    this.toggle_overview(window, cx);
+                }
+            }))
+    }
+
+    /// The pinned checkouts: **one segmented group**.
     ///
     /// A popover is the right shape for twelve checkouts one browses; it is the
     /// wrong one for the two or three one goes back and forth between all day.
     /// A pin is what says which those are, and the row is read left to right in
     /// the order they were pinned — nothing reorders itself under the hand.
     ///
-    /// **The home screen is the first segment**, and it belongs there: the
-    /// group answers "which checkout am I looking at", and the home screen is
-    /// the answer "all of them at once". Two buttons a gap apart said that
-    /// twice, with nothing to say they were one question; joined, it reads as
-    /// the group's "all" and lights up like a pin when it is on, which is the
-    /// polarity every one of them already had.
+    /// The home screen was its first segment; it is now a tab of its own at
+    /// the left of the bar — see `render_screen_switch`. Nothing pinned,
+    /// nothing painted.
     ///
-    /// It is therefore painted even with nothing pinned — where the pins alone
-    /// were not, an empty group being width spent to say that a feature exists.
-    ///
-    /// **And it is exclusive of the pins**, since it is one answer to the same
-    /// question: while the home screen is up no pin is lit, though the window
-    /// still has a current checkout underneath — the screen shows every
-    /// project, and a pin lit beside it said one of them was being looked at
-    /// alone. A pin pressed from there goes to work in that checkout and
-    /// leaves the screen, the gesture the cards' arrow already makes.
-    fn render_switches(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// While the home screen is up no pin is lit, though the window still has
+    /// a current checkout underneath — the screen shows every project, and a
+    /// pin lit beside it said one of them was being looked at alone. A pin
+    /// pressed from there goes to work in that checkout and leaves the screen,
+    /// the gesture the cards' arrow already makes.
+    fn render_switches(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         // Shared, not copied twice: the click handler outlives the frame and
         // used to take a second list of its own.
         let pins: std::rc::Rc<[PathBuf]> = self.pinned_worktrees(cx).into();
+        if pins.is_empty() {
+            return None;
+        }
         let active = self.active_path().filter(|_| !self.overview);
         let muted = cx.theme().muted_foreground;
         // What a selected pin is painted with. A solid button's ground is the
@@ -472,23 +554,9 @@ impl ClaudhubApp {
         // own foreground, the one the theme picked to be read on it.
         let on_accent = cx.theme().primary_foreground;
         let for_click = pins.clone();
-        ButtonGroup::new("worktree-switches")
+        let group = ButtonGroup::new("worktree-switches")
             .compact()
             .xsmall()
-            // **The word beside the glyph**, alone of the group: the pins
-            // carry the name of what they go to, and this one goes to a
-            // screen. A lone picture for "leave the window you are working
-            // in" is a button one presses to find out what it does.
-            .child(
-                Button::new("overview")
-                    .icon(icon("layout-dashboard"))
-                    .label(tr!("overview-short"))
-                    .tooltip(tr!("overview-toggle"))
-                    .map(|button| match self.overview {
-                        true => button.primary(),
-                        false => button.outline(),
-                    }),
-            )
             .children(pins.iter().enumerate().map(|(index, path)| {
                 let (repo, label) = self.project_label(path);
                 let selected = active.as_deref() == Some(path.as_path());
@@ -552,12 +620,6 @@ impl ClaudhubApp {
                 let Some(index) = selected.first().copied() else {
                     return;
                 };
-                // The grid is the first segment, so the pins are counted
-                // from one — the one place this arrangement costs anything.
-                let Some(index) = index.checked_sub(1) else {
-                    this.toggle_overview(window, cx);
-                    return;
-                };
                 let Some(path) = for_click.get(index).cloned() else {
                     return;
                 };
@@ -566,7 +628,8 @@ impl ClaudhubApp {
                 } else {
                     this.select_worktree(path, window, cx);
                 }
-            }))
+            }));
+        Some(group)
     }
 
     /// The application's menu.
@@ -652,8 +715,13 @@ impl ClaudhubApp {
     ///
     /// The recipes are read from what the worker brought back — never from the
     /// disk here, and never a subprocess in a render.
-    fn render_just(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let worktree = self.active.clone()?;
+    pub(super) fn render_just(
+        &self,
+        worktree: &std::path::Path,
+        size: Size,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let worktree = worktree.to_path_buf();
         // The snapshot is shared rather than copied: the recipes go into the
         // menu's `'static` closure, and this runs on every frame of the bar.
         let snapshot = self.just_recipes(&worktree)?;
@@ -664,7 +732,7 @@ impl ClaudhubApp {
             let entity = entity.clone();
             Button::new("just-run")
                 .ghost()
-                .small()
+                .with_size(size)
                 .icon(icon("play"))
                 .label(tr!("just-run"))
                 // What the click actually runs, written out: "Run" alone leaves
@@ -681,7 +749,7 @@ impl ClaudhubApp {
         let more = (snapshot.recipes.len() > 1).then(|| {
             Button::new("just-recipes")
                 .ghost()
-                .small()
+                .with_size(size)
                 .icon(icon("chevron-down"))
                 .tooltip(tr!("just-recipes"))
                 .dropdown_menu(move |menu, _window, _cx| {

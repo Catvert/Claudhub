@@ -30,7 +30,7 @@ use gpui_kit::component::{
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     popover::Popover,
-    v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _, WindowExt as _,
+    v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _, Size, WindowExt as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Element, Focusable as _,
@@ -320,6 +320,16 @@ impl ClaudhubApp {
         // The places kept from the last session, once — the screen may come
         // up with the window, before any toggle has read them.
         self.load_overview_places(cx);
+        // Each card carries its checkout's run button, so each checkout's
+        // justfile is read — once, as the title bar reads the one on show.
+        let checkouts: Vec<PathBuf> = self
+            .overview_groups()
+            .iter()
+            .flat_map(|group| group.checkouts.iter().map(|c| c.path.to_path_buf()))
+            .collect();
+        for checkout in &checkouts {
+            self.ensure_just(checkout);
+        }
         if self.overview_columns {
             return self.render_overview_columns(window, cx);
         }
@@ -522,6 +532,20 @@ impl ClaudhubApp {
             None => self.render_scrollbars(&plan, view, size, cx),
         };
         let grid = render_grid(view, cx);
+        // Between two projects, a line — see `overview::dividers`.
+        let dividers: Vec<AnyElement> = overview::dividers(&plan)
+            .into_iter()
+            .map(|line| {
+                let (x, top) = view.point((line.x, line.top));
+                let height = (line.bottom - line.top) * view.zoom;
+                divider_line(cx)
+                    .absolute()
+                    .left(px(x) - DIVIDER_WIDTH / 2.)
+                    .top(px(top))
+                    .h(px(height))
+                    .into_any_element()
+            })
+            .collect();
 
         let empty = plan.cards.is_empty();
         div()
@@ -586,6 +610,7 @@ impl ClaudhubApp {
             }))
             .child(measure)
             .child(grid)
+            .children(dividers)
             .child(links)
             .children(nodes)
             .children(veil)
@@ -603,13 +628,6 @@ impl ClaudhubApp {
                 )
             })
             .children(bars)
-            .child(
-                div()
-                    .absolute()
-                    .top_3()
-                    .right_3()
-                    .child(self.render_overview_toolbar(cx)),
-            )
             .child(self.render_zoom_bar(view, cx))
             .into_any_element()
     }
@@ -730,30 +748,45 @@ impl ClaudhubApp {
                 .child(tr!("overview-empty"))
                 .into_any_element(),
             None => {
+                // The gap between two columns, which their width grip is
+                // centred in — a `gap_3`, spelt so that both read one value.
+                let gap = window.rem_size() * 0.75;
                 let mut columns: Vec<AnyElement> = Vec::new();
-                for (main, notes, checkouts) in &projects {
-                    let nodes: Vec<AnyElement> = std::iter::once(Node::Git(main.clone()))
+                for (index, (main, notes, checkouts)) in projects.iter().enumerate() {
+                    // Between two projects, a line: side by side, the worktrees
+                    // of one read as the next one's otherwise.
+                    if index > 0 {
+                        columns.push(divider_line(cx).h_full().mx_2().into_any_element());
+                    }
+                    let mut nodes: Vec<AnyElement> = std::iter::once(Node::Git(main.clone()))
                         .chain(notes.iter().cloned().map(Node::Note))
                         .map(|node| self.column_node(&node, true, &at_work, window, cx))
                         .collect();
+                    nodes.push(self.add_tile(Hang::Repo(main.clone()), cx));
                     let head = Node::Git(main.clone());
                     let (key, scroll) = scroll_of(head.clone());
                     // A repository's column is narrow unless told otherwise:
                     // it holds a git node and notes, not a terminal.
                     let width = self.column_width(&head, cx).or(Some(COLUMN_REPO));
                     let grip = width_grip(head, cx);
-                    columns.push(column(&key, width, &scroll, nodes, grip));
+                    columns.push(column(&key, width, gap, &scroll, nodes, grip));
                     for (path, terminals, notes) in checkouts {
-                        let nodes: Vec<AnyElement> = std::iter::once(Node::Worktree(path.clone()))
-                            .chain(terminals.iter().copied().map(Node::Terminal))
-                            .chain(notes.iter().cloned().map(Node::Note))
-                            .map(|node| self.column_node(&node, true, &at_work, window, cx))
-                            .collect();
+                        // The card, its terminals and the tile that adds one
+                        // more — see `add_tile` — then its notes.
+                        let mut nodes: Vec<AnyElement> =
+                            std::iter::once(Node::Worktree(path.clone()))
+                                .chain(terminals.iter().copied().map(Node::Terminal))
+                                .map(|node| self.column_node(&node, true, &at_work, window, cx))
+                                .collect();
+                        nodes.push(self.add_tile(Hang::Worktree(path.clone()), cx));
+                        nodes.extend(notes.iter().cloned().map(|note| {
+                            self.column_node(&Node::Note(note), true, &at_work, window, cx)
+                        }));
                         let head = Node::Worktree(path.clone());
                         let (key, scroll) = scroll_of(head.clone());
                         let width = self.column_width(&head, cx);
                         let grip = width_grip(head, cx);
-                        columns.push(column(&key, width, &scroll, nodes, grip));
+                        columns.push(column(&key, width, gap, &scroll, nodes, grip));
                     }
                 }
                 let row = h_flex()
@@ -761,7 +794,7 @@ impl ClaudhubApp {
                     .track_scroll(&self.overview_columns_scroll)
                     .size_full()
                     .p_3()
-                    .gap_3()
+                    .gap(gap)
                     .items_start()
                     .overflow_x_scroll()
                     .children(columns);
@@ -791,14 +824,6 @@ impl ClaudhubApp {
             .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
                 this.end_overview_drag(cx);
             }))
-            .child(
-                h_flex()
-                    .flex_none()
-                    .justify_end()
-                    .px_3()
-                    .pt_3()
-                    .child(self.render_overview_toolbar(cx)),
-            )
             .child(body)
             .into_any_element()
     }
@@ -1373,10 +1398,15 @@ impl ClaudhubApp {
         bars
     }
 
-    /// Which projects the plane shows, top right: one at a time by default,
-    /// so that five worktrees of one code are not read among a dozen of
-    /// another's — and as many as one ticks.
-    fn render_overview_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The home screen's toolbar, at the right of the title bar: the view,
+    /// which projects and worktrees the plane shows — one project at a time
+    /// by default, so that five worktrees of one code are not read among a
+    /// dozen of another's — what is hidden, the skill, and the reset.
+    ///
+    /// It floated over the plane's top right corner, and hid the nodes under
+    /// it; the title bar had nothing left to say on this screen once the
+    /// checkout's pickers moved onto the cards.
+    pub(super) fn render_overview_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let shown: Vec<PathBuf> = self
             .overview_repos()
             .iter()
@@ -1418,13 +1448,7 @@ impl ClaudhubApp {
         let columns = self.overview_columns;
         h_flex()
             .gap_1()
-            .p_1()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .shadow_md()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .items_center()
             // The two ways to look at the same things, as tabs: the plane,
             // and the columns.
             .child(
@@ -1456,6 +1480,19 @@ impl ClaudhubApp {
                 all,
                 rows,
             ))
+            // Opening another repository, beside the list of those open: the
+            // editor's worktree picker carried it, and it is not on this
+            // screen.
+            .child(
+                Button::new("overview-open-repo")
+                    .ghost()
+                    .small()
+                    .icon(icon("folder-plus"))
+                    .tooltip(tr!("repo-open"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.prompt_open_repository(window, cx);
+                    })),
+            )
             .children(self.render_overview_worktree_picker(cx))
             .children(self.render_hidden_menu(cx))
             .child(self.render_skill_button(cx))
@@ -2050,6 +2087,7 @@ fn column_key(head: &Node) -> String {
 fn column(
     key: &str,
     width: Option<f32>,
+    gap: Pixels,
     scroll: &gpui_kit::ScrollHandle,
     nodes: Vec<AnyElement>,
     grip: gpui_kit::Stateful<gpui_kit::Div>,
@@ -2074,12 +2112,58 @@ fn column(
             None => el.flex_1().min_w(px(COLUMN_WORKTREE_MIN) + gutter),
         })
         .child(super::scroll::vertical(id, scroll, list))
-        .child(grip)
+        .child(grip.right(-grip_offset(gap, scroll)))
         .into_any_element()
 }
 
-/// A column's right edge, taken to give it a width: a strip in the gap after
-/// it, lit under the pointer. A double click lets the column fill again —
+/// How far past a column's right edge its width grip ends: centred in the
+/// **empty** space between two columns, which is not the gap alone — the
+/// bar's gutter is empty too while nothing scrolls, and the grip used to sit
+/// in the gap only, off to the right of what reads as the space between two
+/// cards. When the column scrolls, its bar takes the gutter but its inner
+/// margin, and the grip moves over so as never to lie on the thumb.
+fn grip_offset(gap: Pixels, scroll: &gpui_kit::ScrollHandle) -> Pixels {
+    let gutter = super::theme::scroll_gutter();
+    // What the thumb leaves of the gutter at its right, when it is painted.
+    let margin = px(4.);
+    let scrolls = scroll.max_offset().y > px(0.);
+    let empty_inside = if scrolls { margin } else { gutter };
+    (gap - empty_inside) / 2. + GRIP_WIDTH / 2.
+}
+
+/// A width grip's breadth.
+const GRIP_WIDTH: Pixels = px(8.);
+
+/// The line between two projects: a thin rule that fades in and out at its
+/// ends rather than stopping dead, so that it reads as a border between two
+/// regions and not as a stroke someone drew. The caller places it and gives
+/// it its height.
+fn divider_line(cx: &App) -> gpui_kit::Div {
+    let color = cx.theme().muted_foreground.opacity(0.35);
+    let clear = color.opacity(0.);
+    let fade = |from, to| {
+        div()
+            .w_full()
+            .h(gpui_kit::relative(0.12))
+            .bg(gpui_kit::linear_gradient(
+                180.,
+                gpui_kit::linear_color_stop(from, 0.),
+                gpui_kit::linear_color_stop(to, 1.),
+            ))
+    };
+    v_flex()
+        .flex_none()
+        .w(DIVIDER_WIDTH)
+        .child(fade(clear, color))
+        .child(div().w_full().flex_1().bg(color))
+        .child(fade(color, clear))
+}
+
+/// A divider's breadth.
+const DIVIDER_WIDTH: Pixels = px(1.);
+
+/// A column's right edge, taken to give it a width: a strip in the space after
+/// it, lit under the pointer — placed by `column`, see `grip_offset`. A double click lets the column fill again —
 /// the one gesture back to where it started, and the one that asks nothing.
 fn width_grip(head: Node, cx: &Context<ClaudhubApp>) -> gpui_kit::Stateful<gpui_kit::Div> {
     let lit = cx.theme().ring.opacity(0.6);
@@ -2090,8 +2174,7 @@ fn width_grip(head: Node, cx: &Context<ClaudhubApp>) -> gpui_kit::Stateful<gpui_
         .absolute()
         .top_0()
         .bottom_0()
-        .right(px(-10.))
-        .w(px(8.))
+        .w(GRIP_WIDTH)
         .rounded_full()
         .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
         .hover(move |style| style.bg(lit))
@@ -2399,24 +2482,46 @@ impl ClaudhubApp {
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child(SharedString::from(repo.name.clone())),
             )
-            .when(detail, |el| {
+            // On the columns the `+` is a tile at the foot of the column —
+            // see `add_tile`.
+            .when(detail && !self.overview_columns, |el| {
                 el.child(self.add_menu(Hang::Repo(main.to_path_buf()), cx))
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "overview-fetch-{}",
-                            main.display()
-                        )))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("refresh-cw"))
-                        .tooltip(tr!("overview-fetch"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.git.send(crate::runtime::Cmd::Fetch {
-                                worktree: fetch.clone(),
-                            });
-                            cx.notify();
-                        })),
-                    )
+            })
+            // A worktree is added from its repository, which is what the
+            // title bar's worktree picker did on the editor's screen.
+            .when(detail, |el| {
+                let for_new = main.to_path_buf();
+                el.child(
+                    Button::new(SharedString::from(format!(
+                        "overview-new-worktree-{}",
+                        main.display()
+                    )))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("git-branch"))
+                    .tooltip(tr!("worktree-new"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.prompt_new_worktree(for_new.clone(), window, cx);
+                    })),
+                )
+            })
+            .when(detail, |el| {
+                el.child(
+                    Button::new(SharedString::from(format!(
+                        "overview-fetch-{}",
+                        main.display()
+                    )))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("refresh-cw"))
+                    .tooltip(tr!("overview-fetch"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.git.send(crate::runtime::Cmd::Fetch {
+                            worktree: fetch.clone(),
+                        });
+                        cx.notify();
+                    })),
+                )
             });
         v_flex()
             .id(SharedString::from(format!(
@@ -2584,7 +2689,9 @@ impl ClaudhubApp {
                     })),
                 )
             })
-            .when(detail, |el| {
+            // On the columns the `+` is a tile under the terminals — see
+            // `add_tile`.
+            .when(detail && !self.overview_columns, |el| {
                 // The menu's trigger has no click of its own to stop, and the
                 // card's would take the press for "select this one".
                 el.child(
@@ -2596,7 +2703,9 @@ impl ClaudhubApp {
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .child(self.add_menu(Hang::Worktree(path.to_path_buf()), cx)),
                 )
-                .child(
+            })
+            .when(detail, |el| {
+                el.child(
                     Button::new(SharedString::from(format!(
                         "overview-go-{}",
                         path.display()
@@ -2628,13 +2737,20 @@ impl ClaudhubApp {
                 }
                 (!parts.is_empty()).then(|| SharedString::from(parts.join(" ")))
             });
-        let branch_row = h_flex()
-            .gap_1()
-            .items_center()
-            .text_xs()
-            .child(icon("git-branch").text_color(muted))
-            .child(div().min_w_0().truncate().child(branch))
-            .children(upstream.map(|text| div().flex_none().text_color(muted).child(text)));
+        // Close up, the branch is a picker and the checkout's gestures sit
+        // beside it — see `render_card_actions`; from afar, a line to read.
+        let branch_row = if detail {
+            self.render_card_actions(path, branch, outline.and_then(|o| o.upstream), cx)
+        } else {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .child(icon("git-branch").text_color(muted))
+                .child(div().min_w_0().truncate().child(branch))
+                .children(upstream.map(|text| div().flex_none().text_color(muted).child(text)))
+                .into_any_element()
+        };
         let changes = match summary.filter(|summary| !summary.is_empty()) {
             Some(summary) => h_flex()
                 .gap_1()
@@ -2742,6 +2858,94 @@ impl ClaudhubApp {
                     .children(word)
                     .children(commits),
             )
+            .into_any_element()
+    }
+
+    /// What the title bar offers of the checkout on show, on the card of
+    /// each: the branch picker with how far the branch is from its remote,
+    /// pull and push when there is something to move, whether it is up and
+    /// the switch, its address, its recipes, and the rest of its menu.
+    ///
+    /// The home screen shows every checkout at once, so a bar speaking of
+    /// one of them spoke of whichever had last been clicked; here each
+    /// gesture sits on the card it acts on. The branch picker is the one
+    /// surface the title bar opened — it speaks of the checkout on show, so
+    /// opening it from a card makes that card's the one (`branch_popover`).
+    fn render_card_actions(
+        &self,
+        path: &Path,
+        branch: SharedString,
+        upstream: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (ahead, behind) = upstream.unwrap_or((0, 0));
+        let trigger = Button::new("overview-branch-trigger")
+            .ghost()
+            .xsmall()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .child(
+                        icon("git-branch")
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(div().min_w_0().truncate().child(branch))
+                    .when(behind > 0, |el| {
+                        el.child(super::theme::chip(
+                            SharedString::from(format!("↓{behind}")),
+                            theme.warning,
+                        ))
+                    })
+                    .when(ahead > 0, |el| {
+                        el.child(super::theme::chip(
+                            SharedString::from(format!("↑{ahead}")),
+                            theme.success,
+                        ))
+                    })
+                    .child(
+                        icon("chevron-down")
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    ),
+            );
+        let picker = self.branch_popover(
+            "overview-branch".into(),
+            trigger,
+            Some(path.to_path_buf()),
+            cx,
+        );
+        let menu = self.main_of(path).map(|main| {
+            let (entity, worktree) = (cx.entity(), path.to_path_buf());
+            Button::new("overview-worktree-actions")
+                .ghost()
+                .xsmall()
+                .icon(icon("ellipsis"))
+                .dropdown_menu(move |menu, _window, cx| {
+                    let (main, worktree) = (main.clone(), worktree.clone());
+                    entity.update(cx, |this, cx| this.worktree_menu(menu, main, worktree, cx))
+                })
+        });
+        h_flex()
+            // The gestures are the card's own: a press here neither selects
+            // the card nor, twice, leaves the screen for it.
+            .id("overview-card-actions")
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .w_full()
+            .min_w_0()
+            .gap_0p5()
+            .items_center()
+            .child(div().min_w_0().overflow_hidden().child(picker))
+            .children(self.sync_buttons(path, ahead, behind, Size::XSmall, cx))
+            .child(div().flex_1())
+            .children(self.render_wt_state(path, Size::XSmall, cx))
+            .children(self.render_wt_links(path, Size::XSmall, cx))
+            .children(self.render_just(path, Size::XSmall, cx))
+            .children(menu)
             .into_any_element()
     }
 
@@ -2859,73 +3063,71 @@ impl ClaudhubApp {
         .into_any_element()
     }
 
-    /// The `+` of a card or of the git node: what can be added under it — a
-    /// terminal, an agent, a note written by hand, or a note or a diagram an
-    /// agent writes from a request (`canvas_view::generate_node`).
+    /// The `+` of a card or of the git node, on the plane: what can be added
+    /// under it — a terminal, an agent, a note written by hand, or a note or
+    /// a diagram an agent writes from a request (`canvas_view::generate_node`).
     fn add_menu(&self, hang: Hang, cx: &mut Context<Self>) -> AnyElement {
         let app = cx.entity().downgrade();
-        let worktree = match &hang {
-            Hang::Repo(main) => main.clone(),
-            Hang::Worktree(worktree) => worktree.clone(),
-        };
         let id = SharedString::from(format!("overview-add-{hang:?}"));
         Button::new(id)
             .ghost()
             .xsmall()
             .icon(icon("plus"))
             .tooltip(tr!("overview-add"))
-            .dropdown_menu(move |menu, _, cx| {
-                let profiles = super::settings::Settings::global(cx)
-                    .terminal
-                    .agents
-                    .clone();
-                let shell = (app.clone(), worktree.clone());
-                let menu = menu.item(
-                    PopupMenuItem::new(tr!("terminal-new"))
-                        .icon(icon("square-terminal"))
-                        .on_click(move |_, window, cx| {
-                            open_on(&shell.0, &shell.1, Launch::shell(), window, cx);
-                        }),
-                );
-                let menu = profiles.into_iter().fold(menu, |menu, profile| {
-                    let (app, worktree) = (app.clone(), worktree.clone());
-                    let label = SharedString::from(profile.label().to_string());
-                    menu.item(PopupMenuItem::new(label).icon(icon("bot")).on_click(
-                        move |_, window, cx| {
-                            open_on(&app, &worktree, Launch::agent(&profile), window, cx);
-                        },
-                    ))
-                });
-                let item = |label: SharedString,
-                            glyph: &'static str,
-                            kind: Option<crate::canvas::Kind>| {
-                    let (app, hang) = (app.clone(), hang.clone());
-                    PopupMenuItem::new(label)
-                        .icon(icon(glyph))
-                        .on_click(move |_, window, cx| {
-                            let Some(app) = app.upgrade() else {
-                                return;
-                            };
-                            let hang = hang.clone();
-                            app.update(cx, |this, cx| match kind {
-                                None => this.add_home_note(hang, cx),
-                                Some(kind) => this.ask_generation(hang, kind, window, cx),
-                            });
-                        })
-                };
-                menu.separator()
-                    .item(item(tr!("overview-add-note"), "sticky-note", None))
-                    .item(item(
-                        tr!("overview-add-note-prompt"),
-                        "sparkles",
-                        Some(crate::canvas::Kind::Note),
-                    ))
-                    .item(item(
-                        tr!("overview-add-diagram-prompt"),
-                        "image",
-                        Some(crate::canvas::Kind::Diagram),
-                    ))
-            })
+            .dropdown_menu(move |menu, _, cx| add_items(&app, &hang, true, menu, cx))
+            .into_any_element()
+    }
+
+    /// The same, at the foot of a column's terminals: the columns read top to
+    /// bottom, and "one more" belongs after the last one, where the new
+    /// terminal lands — not in the card's head, a column's height away.
+    ///
+    /// A shell in one press, the dock's `+`: it is the gesture made ninety-nine
+    /// times in a hundred. The chevron keeps the rest — the agents and the
+    /// notes — which have no other way onto a column.
+    ///
+    /// A repository's column has no terminals of its own — they land in its
+    /// main checkout's column — so its tile is the whole menu, at its foot.
+    fn add_tile(&self, hang: Hang, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity().downgrade();
+        if let Hang::Repo(_) = hang {
+            return Button::new(SharedString::from(format!("overview-add-tile-{hang:?}")))
+                .outline()
+                .small()
+                .w_full()
+                .flex_none()
+                .icon(icon("plus"))
+                .label(tr!("overview-add"))
+                .dropdown_menu(move |menu, _, cx| add_items(&app, &hang, true, menu, cx))
+                .into_any_element();
+        }
+        let worktree = hang_path(&hang);
+        let shell = (app.clone(), worktree);
+        h_flex()
+            .flex_none()
+            .w_full()
+            .gap_1()
+            .child(
+                Button::new(SharedString::from(format!(
+                    "overview-new-terminal-{hang:?}"
+                )))
+                .outline()
+                .small()
+                .flex_1()
+                .icon(icon("plus"))
+                .label(tr!("terminal-new"))
+                .on_click(move |_, window, cx| {
+                    open_on(&shell.0, &shell.1, Launch::shell(), window, cx);
+                }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("overview-add-more-{hang:?}")))
+                    .outline()
+                    .small()
+                    .icon(icon("chevron-down"))
+                    .tooltip(tr!("overview-add"))
+                    .dropdown_menu(move |menu, _, cx| add_items(&app, &hang, false, menu, cx)),
+            )
             .into_any_element()
     }
 
@@ -3731,6 +3933,86 @@ fn ago(now: i64, at: i64) -> SharedString {
 /// the focus back to what had it before it opened, after this ran — the
 /// multiplexer's race, and `dialogs::focus_field`'s answer. The plane then
 /// sees the focus move, and brings the new terminal into view.
+/// The checkout a `Hang` opens a terminal in: a repository's is its main one.
+fn hang_path(hang: &Hang) -> PathBuf {
+    match hang {
+        Hang::Repo(main) => main.clone(),
+        Hang::Worktree(worktree) => worktree.clone(),
+    }
+}
+
+/// What can be added under a card or the git node — `shell` false when a
+/// button beside the menu already opens the shell.
+fn add_items(
+    app: &WeakEntity<ClaudhubApp>,
+    hang: &Hang,
+    shell: bool,
+    menu: gpui_kit::component::menu::PopupMenu,
+    cx: &App,
+) -> gpui_kit::component::menu::PopupMenu {
+    let profiles = super::settings::Settings::global(cx)
+        .terminal
+        .agents
+        .clone();
+    let worktree = hang_path(hang);
+    let menu = if shell {
+        let (app, worktree) = (app.clone(), worktree.clone());
+        menu.item(
+            PopupMenuItem::new(tr!("terminal-new"))
+                .icon(icon("square-terminal"))
+                .on_click(move |_, window, cx| {
+                    open_on(&app, &worktree, Launch::shell(), window, cx);
+                }),
+        )
+    } else {
+        menu
+    };
+    let agents = !profiles.is_empty();
+    let menu = profiles.into_iter().fold(menu, |menu, profile| {
+        let (app, worktree) = (app.clone(), worktree.clone());
+        let label = SharedString::from(profile.label().to_string());
+        menu.item(
+            PopupMenuItem::new(label)
+                .icon(icon("bot"))
+                .on_click(move |_, window, cx| {
+                    open_on(&app, &worktree, Launch::agent(&profile), window, cx);
+                }),
+        )
+    });
+    let item = |label: SharedString, glyph: &'static str, kind: Option<crate::canvas::Kind>| {
+        let (app, hang) = (app.clone(), hang.clone());
+        PopupMenuItem::new(label)
+            .icon(icon(glyph))
+            .on_click(move |_, window, cx| {
+                let Some(app) = app.upgrade() else {
+                    return;
+                };
+                let hang = hang.clone();
+                app.update(cx, |this, cx| match kind {
+                    None => this.add_home_note(hang, cx),
+                    Some(kind) => this.ask_generation(hang, kind, window, cx),
+                });
+            })
+    };
+    // No rule above the notes when nothing stands there.
+    let menu = if shell || agents {
+        menu.separator()
+    } else {
+        menu
+    };
+    menu.item(item(tr!("overview-add-note"), "sticky-note", None))
+        .item(item(
+            tr!("overview-add-note-prompt"),
+            "sparkles",
+            Some(crate::canvas::Kind::Note),
+        ))
+        .item(item(
+            tr!("overview-add-diagram-prompt"),
+            "image",
+            Some(crate::canvas::Kind::Diagram),
+        ))
+}
+
 fn open_on(
     app: &WeakEntity<ClaudhubApp>,
     worktree: &Path,

@@ -1438,57 +1438,75 @@ impl ClaudhubApp {
     /// count to its button without a word, and the gloss says the number for the
     /// hand that wants it.
     pub(super) fn render_sync_buttons(&self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
-        let Some((ahead, behind)) = self
-            .active_review()
-            .map(|review| (review.status.ahead, review.status.behind))
-        else {
+        let (Some(worktree), Some((ahead, behind))) = (
+            self.active.clone(),
+            self.active_review()
+                .map(|review| (review.status.ahead, review.status.behind)),
+        ) else {
             return Vec::new();
         };
+        self.sync_buttons(
+            &worktree,
+            ahead,
+            behind,
+            gpui_kit::component::Size::Small,
+            cx,
+        )
+    }
+
+    /// Pull and push for one checkout, given how far it is from its remote —
+    /// the title bar's pair, and a home screen card's.
+    pub(super) fn sync_buttons(
+        &self,
+        worktree: &std::path::Path,
+        ahead: usize,
+        behind: usize,
+        size: gpui_kit::component::Size,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui_kit::AnyElement> {
         let (pulling, pushing) = (
-            self.active_running(Action::Pull),
-            self.active_running(Action::Push),
+            self.is_running(Some(worktree), Action::Pull),
+            self.is_running(Some(worktree), Action::Push),
         );
         let (warning, success) = (cx.theme().warning, cx.theme().success);
         let mut out: Vec<gpui_kit::AnyElement> = Vec::new();
         // Behind before ahead, the list's order: what has to be integrated comes
         // before what can be sent.
         if behind > 0 {
+            let worktree = worktree.to_path_buf();
             out.push(
                 Button::new("topbar-pull")
                     .ghost()
-                    .small()
+                    .with_size(size)
                     .icon(icon("arrow-down-to-line").text_color(warning))
                     .tooltip(tr!("action-pull-behind", { count: behind }))
                     .loading(pulling)
                     .disabled(pulling)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(worktree) = this.active.clone() {
-                            let cmd = Cmd::Pull {
-                                worktree: worktree.clone(),
-                            };
-                            this.start(Some(worktree), Action::Pull, cmd, cx);
-                        }
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let cmd = Cmd::Pull {
+                            worktree: worktree.clone(),
+                        };
+                        this.start(Some(worktree.clone()), Action::Pull, cmd, cx);
                     }))
                     .into_any_element(),
             );
         }
         if ahead > 0 {
+            let worktree = worktree.to_path_buf();
             out.push(
                 Button::new("topbar-push")
                     .ghost()
-                    .small()
+                    .with_size(size)
                     .icon(icon("arrow-up-from-line").text_color(success))
                     .tooltip(tr!("action-push-ahead", { count: ahead }))
                     .loading(pushing)
                     .disabled(pushing)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(worktree) = this.active.clone() {
-                            let cmd = Cmd::Push {
-                                worktree: worktree.clone(),
-                                force_with_lease: false,
-                            };
-                            this.start(Some(worktree), Action::Push, cmd, cx);
-                        }
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let cmd = Cmd::Push {
+                            worktree: worktree.clone(),
+                            force_with_lease: false,
+                        };
+                        this.start(Some(worktree.clone()), Action::Push, cmd, cx);
                     }))
                     .into_any_element(),
             );
@@ -1518,56 +1536,78 @@ impl ClaudhubApp {
         // read in the same glance whether one is looking at the bar or at the
         // branch it names, and two spellings of one thing are two things.
         let (warning, success) = (cx.theme().warning, cx.theme().success);
+        let trigger = Button::new("branch-picker-trigger").ghost().small().child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_color(muted)
+                .child(icon("git-branch").xsmall())
+                .child(div().max_w(px(220.)).truncate().text_sm().child(label))
+                .when(behind > 0, |el| {
+                    el.child(crate::ui::theme::chip(
+                        SharedString::from(format!("↓{behind}")),
+                        warning,
+                    ))
+                })
+                .when(ahead > 0, |el| {
+                    el.child(crate::ui::theme::chip(
+                        SharedString::from(format!("↑{ahead}")),
+                        success,
+                    ))
+                })
+                .child(icon("chevron-down").xsmall()),
+        );
+        Some(self.branch_popover("branch-picker".into(), trigger, None, cx))
+    }
+
+    /// The branch picker in a popover opened by `trigger`.
+    ///
+    /// The picker speaks of the checkout on show, so a trigger that names
+    /// another — a home screen card's — passes it as `select`: opening makes
+    /// it the one on show first, and the list, its checkout and its actions
+    /// follow. One picker for every trigger, which is what keeps one surface.
+    pub(super) fn branch_popover(
+        &self,
+        id: SharedString,
+        trigger: Button,
+        select: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Popover {
         let picker = self.branch_picker.clone();
         let focus = picker.read(cx).query.read(cx).focus_handle(cx);
         let for_open = picker.clone();
-        Some(
-            Popover::new("branch-picker")
-                .track_focus(&focus)
-                .trigger(
-                    Button::new("branch-picker-trigger").ghost().small().child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .text_color(muted)
-                            .child(icon("git-branch").xsmall())
-                            .child(div().max_w(px(220.)).truncate().text_sm().child(label))
-                            .when(behind > 0, |el| {
-                                el.child(crate::ui::theme::chip(
-                                    SharedString::from(format!("↓{behind}")),
-                                    warning,
-                                ))
-                            })
-                            .when(ahead > 0, |el| {
-                                el.child(crate::ui::theme::chip(
-                                    SharedString::from(format!("↑{ahead}")),
-                                    success,
-                                ))
-                            })
-                            .child(icon("chevron-down").xsmall()),
-                    ),
-                )
-                // Opening puts the picker back at step one with an empty filter.
-                // It is a click and not a render, so touching another entity here
-                // is licit.
-                .on_open_change(move |open, window, cx| {
-                    if *open {
-                        for_open.update(cx, |this, cx| this.reset(window, cx));
-                    }
-                })
-                // The content **is** the entity, and that is what makes it able
-                // to read the application: this closure runs inside
-                // `ClaudhubApp::render`, a child view's render does not.
-                .content(move |_state, _window, cx| {
-                    let popover = cx.entity();
-                    picker.update(cx, |this, _| this.popover = Some(popover));
-                    picker.clone()
-                })
-                // The surface paints its own padding: a list's rows run edge to
-                // edge, which the popover's own `p_3` would break.
-                .appearance(true)
-                .p_0(),
-        )
+        let app = cx.entity().downgrade();
+        Popover::new(id)
+            .track_focus(&focus)
+            .trigger(trigger)
+            // Opening puts the picker back at step one with an empty filter.
+            // It is a click and not a render, so touching another entity here
+            // is licit.
+            .on_open_change(move |open, window, cx| {
+                if !*open {
+                    return;
+                }
+                if let (Some(path), Some(app)) = (select.clone(), app.upgrade()) {
+                    app.update(cx, |this, cx| {
+                        if this.active.as_deref() != Some(path.as_path()) {
+                            this.select_worktree(path, window, cx);
+                        }
+                    });
+                }
+                for_open.update(cx, |this, cx| this.reset(window, cx));
+            })
+            // The content **is** the entity, and that is what makes it able
+            // to read the application: this closure runs inside
+            // `ClaudhubApp::render`, a child view's render does not.
+            .content(move |_state, _window, cx| {
+                let popover = cx.entity();
+                picker.update(cx, |this, _| this.popover = Some(popover));
+                picker.clone()
+            })
+            // The surface paints its own padding: a list's rows run edge to
+            // edge, which the popover's own `p_3` would break.
+            .appearance(true)
+            .p_0()
     }
 }
 

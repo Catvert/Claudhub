@@ -340,6 +340,58 @@ pub struct Plan {
     pub bounds: Rect,
 }
 
+/// A line between two projects on the plane, in the plane's units: where
+/// one repository's tree ends and the next begins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Divider {
+    pub x: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// How far a divider runs past the plane's top and bottom nodes.
+const DIVIDER_OVERHANG: f32 = 24.;
+
+/// The lines between the projects on show — none with one project.
+///
+/// A project's extent is every node that hangs from its git node, followed
+/// up the parents `order` lists (parents first, so one pass). A line stands
+/// half-way across the gap between two neighbours, and runs the plane's whole
+/// height, so that every line reads as the same kind of border. Two projects
+/// the hand dragged over each other have no gap to draw in, and no line: a
+/// line across a tree would cut it, not part it.
+pub fn dividers(plan: &Plan) -> Vec<Divider> {
+    let mut roots: HashMap<&Node, &Node> = HashMap::new();
+    let mut extents: Vec<(&Node, Rect)> = Vec::new();
+    for (node, rect, parent) in &plan.order {
+        let root = parent
+            .as_ref()
+            .and_then(|parent| roots.get(parent).copied())
+            .unwrap_or(node);
+        roots.insert(node, root);
+        match extents.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, extent)) => *extent = extent.union(rect),
+            None => extents.push((root, *rect)),
+        }
+    }
+    let spans: Vec<Rect> = extents.into_iter().map(|(_, rect)| rect).collect();
+    between(&spans, plan.bounds)
+}
+
+fn between(spans: &[Rect], bounds: Rect) -> Vec<Divider> {
+    let mut spans = spans.to_vec();
+    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    spans
+        .windows(2)
+        .filter(|pair| pair[0].right() < pair[1].x)
+        .map(|pair| Divider {
+            x: (pair[0].right() + pair[1].x) / 2.,
+            top: bounds.y - DIVIDER_OVERHANG,
+            bottom: bounds.bottom() + DIVIDER_OVERHANG,
+        })
+        .collect()
+}
+
 impl Plan {
     pub fn tile(&self, id: u64) -> Option<Rect> {
         self.tiles.iter().find(|tile| tile.id == id).map(|t| t.rect)
@@ -1242,6 +1294,50 @@ mod tests {
 
     fn centre(rect: Rect) -> f32 {
         rect.x + rect.w / 2.
+    }
+
+    /// Two projects side by side: one line, half-way across the gap
+    /// between their trees, and as tall as the whole plane.
+    #[test]
+    fn a_line_parts_two_projects() {
+        let mut first = checkout("/r", "main", true, None);
+        first.terminals = vec![(7, Tile::Large.size())];
+        let second = checkout("/s", "main", true, None);
+        let plan = plan(
+            &[group("/r", vec![first]), group("/s", vec![second])],
+            &Hand::default(),
+        );
+        let lines = dividers(&plan);
+        assert_eq!(lines.len(), 1);
+        let (left, right) = (plan.tile(7).unwrap(), plan.gits[1].rect);
+        assert_eq!(lines[0].x, (left.right() + right.x) / 2.);
+        assert_eq!(lines[0].top, plan.bounds.y - DIVIDER_OVERHANG);
+        assert_eq!(lines[0].bottom, plan.bounds.bottom() + DIVIDER_OVERHANG);
+
+        let alone = plan_of_one();
+        assert!(dividers(&alone).is_empty());
+    }
+
+    fn plan_of_one() -> Plan {
+        plan(
+            &[group("/r", vec![checkout("/r", "main", true, None)])],
+            &Hand::default(),
+        )
+    }
+
+    /// Trees dragged over each other leave no gap, and get no line.
+    #[test]
+    fn overlapping_projects_get_no_line() {
+        let rect = |x: f32, w: f32| Rect {
+            x,
+            y: 0.,
+            w,
+            h: 10.,
+        };
+        let bounds = rect(0., 100.);
+        assert!(between(&[rect(0., 50.), rect(40., 50.)], bounds).is_empty());
+        let lines = between(&[rect(60., 20.), rect(0., 40.)], bounds);
+        assert_eq!(lines.iter().map(|l| l.x).collect::<Vec<_>>(), vec![50.]);
     }
 
     #[test]

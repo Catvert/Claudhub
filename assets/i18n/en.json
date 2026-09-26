@@ -938,6 +938,8 @@
   "action-cherry-pick-ok": "Cherry-pick applied.",
   "overview-short": "Home",
   "overview-toggle": "Every worktree and its terminals",
+  "editor-short": "Editor",
+  "editor-toggle": "The current worktree: diff, editor and panels",
   "overview-empty": "No repository open.",
   "overview-zoom-in": "Zoom in (Ctrl + wheel)",
   "overview-zoom-out": "Zoom out (Ctrl + wheel)",

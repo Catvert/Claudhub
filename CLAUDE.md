@@ -619,7 +619,16 @@ worktree.
   avant qu'un terminal n'y colle : sur cet écran, on colle par `Ctrl+Maj+V`.
   Ctrl+molette zoome autour du pointeur ; un terminal laisse passer ce cran
   (`set_canvas`), sinon il changerait la police de tous.
-- **Un projet à la fois** par défaut (sélecteur en haut à droite) : cinq
+- **La barre de titre change avec l'écran** : les onglets « Accueil /
+  Éditeur » à gauche, et sur l'accueil rien de ce qui parle du checkout
+  regardé — sélecteurs, état, `…`, pull/push, « Ouvrir », « Lancer », épingles.
+  Chaque carte porte les siens (`render_card_actions`), l'accueil les montrant
+  tous à la fois ; la droite de la barre prend la barre d'outils de l'écran
+  (vue, projets, worktrees, masqués, skill, réinitialiser), qui flottait sur
+  le plan. **Le sélecteur de branches reste une seule surface** : il parle du
+  checkout regardé, donc l'ouvrir depuis une carte la sélectionne d'abord
+  (`branch_popover`).
+- **Un projet à la fois** par défaut (sélecteur dans la barre de titre) : cinq
   worktrees d'un code ne se lisent pas parmi ceux d'un autre — et autant qu'on
   en coche. Un second sélecteur coche les **worktrees**, par projet : un projet
   dont rien n'est coché les montre tous (`overview::shown_of`), et le nœud git
@@ -669,7 +678,9 @@ worktree.
   terminal est un nœud où on le voit travailler, et **cède la place** au
   résultat une fois le fichier là et le tour de l'agent fini — le `status` que
   Claude écrit pour son pid. Ce terminal n'est pas retenu : rouvert, il
-  relancerait la demande.
+  relancerait la demande. **En colonnes, ce `+` quitte l'en-tête** pour une
+  tuile au pied des terminaux (`add_tile`) : un shell d'un clic, le reste
+  sous le chevron — « un de plus » se lit après le dernier.
 - **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
   sa branche fusionnée (plus aucun commit d'avance sur sa base) :
   `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de

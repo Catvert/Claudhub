@@ -938,6 +938,8 @@
   "action-cherry-pick-ok": "Cherry-pick appliqué.",
   "overview-short": "Accueil",
   "overview-toggle": "Tous les worktrees et leurs terminaux",
+  "editor-short": "Éditeur",
+  "editor-toggle": "Le worktree courant : diff, éditeur et panneaux",
   "overview-empty": "Aucun dépôt ouvert.",
   "overview-zoom-in": "Zoomer (Ctrl + molette)",
   "overview-zoom-out": "Dézoomer (Ctrl + molette)",
