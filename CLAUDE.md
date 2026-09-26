@@ -205,6 +205,8 @@ src/
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
     canvas_view.rs  les notes de l'accueil : les fichiers lus, écrits, déplacés
+    changes_view.rs le nœud « Modifications » d'une carte, et la relecture qu'il
+                    ouvre : le panneau des changements et le diff, en dialogue
     context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
                     zoom — pur, testé
@@ -701,10 +703,19 @@ worktree.
   `assets/skills/`) porte sa version dans son texte ; le bouton de l'accueil
   l'installe dans le dépôt — pour l'équipe — ou pour soi, et n'écrase ni ne
   retire jamais un fichier qui n'est pas le nôtre.
-- **Valider depuis une carte** ouvre une feuille (`CommitSheet`, une entité
-  enfant pour la raison des réglages) : les fichiers à cocher, puis la boîte de
-  commit du panneau des changements elle-même — même champ, même brouillon.
-  Le commit réussi la referme (`commit_sheet`).
+- **Un worktree qui a de quoi valider porte un nœud « Modifications »**
+  (`Node::Changes`, premier enfant de sa carte) : ses fichiers, leur code
+  git, la case d'index — qui agit sur place, même sur un worktree jamais
+  ouvert. Le relevé de fond ne fait que **compter** : la liste est le statut,
+  demandé une fois par worktree tant que le compte ne bouge pas
+  (`ensure_changes_read`), et c'est lui qui décide dès qu'il est frais
+  (`has_changes`) — le compte retarde d'un relevé sur un commit, et le nœud
+  resterait vide. **La relecture** (`ReviewSheet`, entité enfant pour la
+  raison des réglages) est le panneau des changements et le diff **eux-mêmes**,
+  côte à côte dans un dialogue : mêmes fonctions, même état, même brouillon.
+  Les deux parlent du worktree regardé, donc l'ouvrir sélectionne la carte,
+  comme le sélecteur de branches ; le commit réussi la referme
+  (`commit_sheet`). Le bouton « Valider » d'une carte l'ouvre aussi.
 - **Chaque nœud a les trois boutons d'une fenêtre** : replier jusqu'à l'en-tête
   (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — taille et vue
   d'avant rendues au second clic —, et une croix qui demande : un terminal

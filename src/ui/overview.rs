@@ -30,6 +30,8 @@ pub const CARD: (f32, f32) = (300., 244.);
 pub const GIT: (f32, f32) = (300., 150.);
 /// A note's size until the hand gives it another.
 pub const NOTE: (f32, f32) = (280., 200.);
+/// A worktree's changes: the files a commit would take.
+pub const CHANGES: (f32, f32) = (300., 220.);
 /// Between two siblings.
 const SIBLING_GAP: f32 = 40.;
 /// Between two levels.
@@ -50,6 +52,7 @@ pub const MIN_GIT: (f32, f32) = (200., 90.);
 pub const MIN_CARD: (f32, f32) = (220., 140.);
 pub const MIN_TILE: (f32, f32) = (300., 160.);
 pub const MIN_NOTE: (f32, f32) = (160., 90.);
+pub const MIN_CHANGES: (f32, f32) = (200., 90.);
 
 pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 2.;
@@ -146,6 +149,8 @@ pub enum Node {
     Terminal(u64),
     /// A note, by its file's path.
     Note(PathBuf),
+    /// A worktree's changes waiting for a commit, by the worktree's path.
+    Changes(PathBuf),
 }
 
 /// Where the hand has put nodes, as offsets from where the tree would.
@@ -218,6 +223,9 @@ pub struct Checkout<'a> {
     pub terminals: Vec<(u64, (f32, f32))>,
     /// The notes hung from it, by file, in the order they were written.
     pub notes: Vec<PathBuf>,
+    /// Whether it has anything to commit: its changes node hangs from it
+    /// only then — a node saying « nothing » is a node in the way.
+    pub changes: bool,
 }
 
 /// A repository: its git node, its worktrees, and the notes hung from it.
@@ -250,6 +258,8 @@ pub enum LinkKind {
     Terminal,
     /// From a git node or a card to a note hung from it.
     Note,
+    /// From a card to its changes.
+    Changes,
 }
 
 /// A side of a node, where a link leaves or arrives.
@@ -332,6 +342,8 @@ pub struct Plan {
     pub cards: Vec<Card>,
     pub tiles: Vec<Placed>,
     pub notes: Vec<Card>,
+    /// The changes nodes, by worktree path.
+    pub changes: Vec<Card>,
     pub links: Vec<Link>,
     /// Every node with its place and its parent, parents before their
     /// children: the order `hold` walks.
@@ -404,6 +416,11 @@ impl Plan {
             Node::Worktree(path) => self.cards.iter().find(|c| &c.path == path).map(|c| c.rect),
             Node::Terminal(id) => self.tile(*id),
             Node::Note(path) => self.notes.iter().find(|n| &n.path == path).map(|n| n.rect),
+            Node::Changes(path) => self
+                .changes
+                .iter()
+                .find(|c| &c.path == path)
+                .map(|c| c.rect),
         }
     }
 
@@ -555,6 +572,20 @@ fn tree(group: &Group, hand: &Hand) -> Vec<Branch> {
         let index = nodes.len() - 1;
         nodes[parent].children.push(index);
         placed[checkout] = Some(index);
+        // Its changes first, nearest the card: what the branch is about to
+        // say comes before what was written beside it.
+        let changes = Node::Changes(path.clone());
+        if this.changes && !hidden.contains(&changes) {
+            nodes.push(Branch {
+                size: sizes.get(&changes).copied().unwrap_or(CHANGES),
+                node: changes,
+                kind: LinkKind::Changes,
+                worktree: path.clone(),
+                children: Vec::new(),
+            });
+            let child = nodes.len() - 1;
+            nodes[index].children.push(child);
+        }
         for path in &this.notes {
             let node = Node::Note(path.clone());
             if hidden.contains(&node) {
@@ -744,6 +775,10 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
                     path: path.clone(),
                     rect,
                 }),
+                Node::Changes(path) => plan.changes.push(Card {
+                    path: path.clone(),
+                    rect,
+                }),
             }
         }
         left += widths.first().copied().unwrap_or(0.) + GROUP_GAP;
@@ -770,6 +805,7 @@ pub fn start_and_least(node: &Node) -> ((f32, f32), (f32, f32)) {
         Node::Git(_) => (GIT, MIN_GIT),
         Node::Worktree(_) => (CARD, MIN_CARD),
         Node::Note(_) => (NOTE, MIN_NOTE),
+        Node::Changes(_) => (CHANGES, MIN_CHANGES),
         Node::Terminal(_) => (Tile::default().size(), MIN_TILE),
     }
 }
@@ -1281,6 +1317,7 @@ mod tests {
             base,
             terminals: Vec::new(),
             notes: Vec::new(),
+            changes: false,
         }
     }
 
@@ -1294,6 +1331,35 @@ mod tests {
 
     fn centre(rect: Rect) -> f32 {
         rect.x + rect.w / 2.
+    }
+
+    /// A worktree with something to commit has its changes hanging first
+    /// under its card, before its notes and terminals; a clean one has none,
+    /// and a hidden one is off the plane.
+    #[test]
+    fn the_changes_hang_first_under_their_card() {
+        let mut main = checkout("/r", "main", true, None);
+        main.changes = true;
+        main.notes = vec![PathBuf::from("/r/.claudhub/notes/5.md")];
+        let clean = checkout("/r-a", "feature", false, Some("main"));
+        let groups = [group("/r", vec![main, clean])];
+        let plan = plan(&groups, &Hand::default());
+
+        let changes = plan.rect(&Node::Changes(PathBuf::from("/r"))).unwrap();
+        let note = plan.note("/r/.claudhub/notes/5.md").unwrap();
+        let card = plan.card(Path::new("/r")).unwrap();
+        assert_eq!(changes.y, card.bottom() + LEVEL_GAP);
+        assert!(changes.right() < note.x);
+        assert_eq!((changes.w, changes.h), CHANGES);
+        assert!(plan.rect(&Node::Changes(PathBuf::from("/r-a"))).is_none());
+        assert!(plan
+            .links
+            .iter()
+            .any(|link| link.kind == LinkKind::Changes && link.worktree == Path::new("/r")));
+
+        let mut hand = Hand::default();
+        hand.hidden.insert(Node::Changes(PathBuf::from("/r")));
+        assert!(super::plan(&groups, &hand).changes.is_empty());
     }
 
     /// Two projects side by side: one line, half-way across the gap

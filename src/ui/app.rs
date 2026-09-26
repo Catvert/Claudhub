@@ -1017,7 +1017,7 @@ pub struct ClaudhubApp {
     /// without this guard rail, a build touching a thousand files piles up a
     /// thousand identical `git status`es, and everything after — diffs included
     /// — waits behind them.
-    pending_status: std::collections::HashSet<PathBuf>,
+    pub(super) pending_status: std::collections::HashSet<PathBuf>,
     /// When the last automatic fetch was started.
     last_auto_fetch: Option<std::time::Instant>,
     /// The worktree a commit message is being waited for, if there is one.
@@ -1084,9 +1084,15 @@ pub struct ClaudhubApp {
     pub(super) overview_previous: Option<crate::ui::overview::Plan>,
     /// The node maximised, and what to give back — see `overview::Maximized`.
     pub(super) overview_maximized: Option<crate::ui::overview::Maximized>,
-    /// True while the commit sheet is open: a commit that lands then closes
-    /// it — see `overview_view::CommitSheet`.
+    /// True while the review of a worktree's changes is open: a commit that
+    /// lands then closes it — see `changes_view::ReviewSheet`.
     pub(super) commit_sheet: bool,
+    /// The review was opened without a file, and takes the first one once
+    /// the list is known.
+    pub(super) review_sheet_pick: bool,
+    /// The worktrees whose status the home screen asked for since their
+    /// count last moved — see `changes_view::ensure_changes_read`.
+    pub(super) changes_read: std::collections::HashSet<PathBuf>,
     /// The home screen's notes being edited, each with its field and the
     /// subscription that writes it back to the store.
     pub(super) note_editors: HashMap<PathBuf, crate::ui::canvas_view::NoteEditor>,
@@ -1591,6 +1597,8 @@ impl ClaudhubApp {
             overview_maximized: None,
             overview_previous: None,
             commit_sheet: false,
+            review_sheet_pick: false,
+            changes_read: std::collections::HashSet::new(),
             note_editors: HashMap::new(),
             canvas: HashMap::new(),
             canvas_created: None,
@@ -2356,9 +2364,7 @@ impl ClaudhubApp {
             Evt::Worktrees { main, worktrees } => {
                 self.worktrees_arrived(main, worktrees, window, cx)
             }
-            Evt::Summaries { summaries } => {
-                self.summaries.extend(summaries);
-            }
+            Evt::Summaries { summaries } => self.summaries_arrived(summaries),
             Evt::ClaudeProcesses { processes } => {
                 self.claude_processes_heard(&processes, cx);
                 self.settle_generations(&processes, window, cx);

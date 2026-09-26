@@ -30,7 +30,7 @@ use gpui_kit::component::{
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     popover::Popover,
-    v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _, Size, WindowExt as _,
+    v_flex, ActiveTheme, Selectable as _, Sizable as _, Size, WindowExt as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Element, Focusable as _,
@@ -298,6 +298,7 @@ impl ClaudhubApp {
                             .filter(|terminal| terminal.worktree == worktree.path)
                             .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.size))
                             .collect(),
+                        changes: self.has_changes(&worktree.path),
                         notes: worktree_notes(&worktree.path),
                     })
                     .collect(),
@@ -330,6 +331,8 @@ impl ClaudhubApp {
         for checkout in &checkouts {
             self.ensure_just(checkout);
         }
+        // And the list of what each has to commit, for its changes node.
+        self.ensure_changes_read(&checkouts, cx);
         if self.overview_columns {
             return self.render_overview_columns(window, cx);
         }
@@ -481,6 +484,21 @@ impl ClaudhubApp {
                 Some((Node::Terminal(id.as_u64()), element))
             })
             .collect();
+        let changes: Vec<(Node, AnyElement)> = plan
+            .changes
+            .iter()
+            .map(|node| {
+                let element = Scaled {
+                    rem,
+                    child: placed(view.screen(node.rect))
+                        .child(self.render_changes_node(&node.path, view.zoom, cx))
+                        .children(self.corner_unless_folded(Node::Changes(node.path.clone()), cx))
+                        .into_any_element(),
+                }
+                .into_any_element();
+                (Node::Changes(node.path.clone()), element)
+            })
+            .collect();
         let notes: Vec<(Node, AnyElement)> = plan
             .notes
             .iter()
@@ -502,7 +520,13 @@ impl ClaudhubApp {
         let maximized = self.overview_maximized.as_ref().map(|m| m.node.clone());
         let mut on_top = None;
         let mut nodes: Vec<AnyElement> = Vec::new();
-        for (node, element) in gits.into_iter().chain(cards).chain(notes).chain(tiles) {
+        for (node, element) in gits
+            .into_iter()
+            .chain(cards)
+            .chain(changes)
+            .chain(notes)
+            .chain(tiles)
+        {
             if maximized.as_ref() == Some(&node) {
                 on_top = Some((node, element));
             } else {
@@ -771,10 +795,14 @@ impl ClaudhubApp {
                     let grip = width_grip(head, cx);
                     columns.push(column(&key, width, gap, &scroll, nodes, grip));
                     for (path, terminals, notes) in checkouts {
-                        // The card, its terminals and the tile that adds one
-                        // more — see `add_tile` — then its notes.
+                        // The card, its changes, its terminals and the tile
+                        // that adds one more — see `add_tile` — then its
+                        // notes: the plane's order under a card.
+                        let changes = Node::Changes(path.clone());
+                        let dirty = self.has_changes(path) && !hidden.contains(&changes);
                         let mut nodes: Vec<AnyElement> =
                             std::iter::once(Node::Worktree(path.clone()))
+                                .chain(dirty.then_some(changes))
                                 .chain(terminals.iter().copied().map(Node::Terminal))
                                 .map(|node| self.column_node(&node, true, &at_work, window, cx))
                                 .collect();
@@ -840,7 +868,7 @@ impl ClaudhubApp {
                 .worktrees
                 .get(path)
                 .and_then(|worktree| worktree.home_column_width),
-            Node::Terminal(_) | Node::Note(_) => None,
+            Node::Terminal(_) | Node::Note(_) | Node::Changes(_) => None,
         }
     }
 
@@ -861,7 +889,7 @@ impl ClaudhubApp {
                     .or_default()
                     .home_column_width = width;
             }
-            Node::Terminal(_) | Node::Note(_) => {}
+            Node::Terminal(_) | Node::Note(_) | Node::Changes(_) => {}
         });
     }
 
@@ -914,6 +942,10 @@ impl ClaudhubApp {
         match node {
             Node::Git(main) => boxed(kept(overview::GIT), self.render_git_node(main, 1., cx)),
             Node::Note(path) => boxed(kept(overview::NOTE), self.render_home_note(path, 1., cx)),
+            Node::Changes(path) => boxed(
+                kept(overview::CHANGES),
+                self.render_changes_node(path, 1., cx),
+            ),
             Node::Worktree(path) => {
                 let doing = at_work
                     .cards
@@ -1009,7 +1041,7 @@ impl ClaudhubApp {
                                 overview::resized(terminal.size, delta, overview::MIN_TILE);
                         }
                     }
-                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) => {
+                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) | Node::Changes(_) => {
                         let (default, min) = overview::start_and_least(&node);
                         let size = self
                             .overview_hand
@@ -1034,7 +1066,7 @@ impl ClaudhubApp {
                                 (terminal.column_height + dy).max(overview::MIN_COLUMN_TILE);
                         }
                     }
-                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) => {
+                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) | Node::Changes(_) => {
                         // The plane's own size, height only: what one gives a
                         // note here is what it has there.
                         let (default, min) = overview::start_and_least(&node);
@@ -1128,6 +1160,14 @@ impl ClaudhubApp {
                     let place = store.home_places.entry(path.clone()).or_default();
                     (&mut place.offset, &mut place.size)
                 }
+                Node::Changes(path) => {
+                    let place = &mut store
+                        .worktrees
+                        .entry(path.clone())
+                        .or_default()
+                        .home_changes;
+                    (&mut place.offset, &mut place.size)
+                }
                 Node::Terminal(_) => return,
             };
             if offset.is_some() {
@@ -1155,6 +1195,14 @@ impl ClaudhubApp {
                     }
                     Node::Note(path) => {
                         store.home_places.entry(path.clone()).or_default().offset = offset
+                    }
+                    Node::Changes(path) => {
+                        store
+                            .worktrees
+                            .entry(path.clone())
+                            .or_default()
+                            .home_changes
+                            .offset = offset
                     }
                     Node::Terminal(_) => {}
                 }
@@ -1188,6 +1236,16 @@ impl ClaudhubApp {
                     worktree.home_size,
                     worktree.home_collapsed,
                     worktree.home_hidden,
+                )
+            }))
+            .chain(store.worktrees.iter().map(|(path, worktree)| {
+                let place = &worktree.home_changes;
+                (
+                    Node::Changes(path.clone()),
+                    place.offset,
+                    place.size,
+                    place.collapsed,
+                    place.hidden,
                 )
             }))
             .chain(store.home_places.iter().map(|(path, place)| {
@@ -1284,6 +1342,7 @@ impl ClaudhubApp {
             )
             .chain(plan.tiles.iter().map(|tile| Node::Terminal(tile.id)))
             .chain(plan.notes.iter().map(|note| Node::Note(note.path.clone())))
+            .chain(plan.changes.iter().map(|c| Node::Changes(c.path.clone())))
             .collect();
         // And what was taken off the plane comes back: a hidden worktree is
         // in no plan to be read from, so it is found among the repositories.
@@ -1331,6 +1390,11 @@ impl ClaudhubApp {
                     }
                     Node::Note(path) => {
                         store.home_places.remove(path);
+                    }
+                    Node::Changes(path) => {
+                        if let Some(worktree) = store.worktrees.get_mut(path) {
+                            worktree.home_changes = Default::default();
+                        }
                     }
                     Node::Terminal(_) => {}
                 }
@@ -1827,7 +1891,7 @@ impl ClaudhubApp {
                 let doing = match &link.child {
                     Node::Terminal(id) => at_work.terminals.get(id).copied(),
                     Node::Worktree(path) => at_work.cards.get(path).copied(),
-                    Node::Git(_) | Node::Note(_) => None,
+                    Node::Git(_) | Node::Note(_) | Node::Changes(_) => None,
                 };
                 let mut link = link.clone();
                 link.from = view.point(link.from);
@@ -1859,8 +1923,8 @@ impl ClaudhubApp {
                     // exception: it is what one looks for.
                     let width = match link.kind {
                         LinkKind::Root | LinkKind::Branch => width,
-                        LinkKind::Terminal | LinkKind::Note if flows => width,
-                        LinkKind::Terminal | LinkKind::Note => width * 0.6,
+                        LinkKind::Terminal | LinkKind::Note | LinkKind::Changes if flows => width,
+                        LinkKind::Terminal | LinkKind::Note | LinkKind::Changes => width * 0.6,
                     };
                     // An elbow: out square to the parent's side, across
                     // half way, into the child square to its own — and the
@@ -2685,7 +2749,7 @@ impl ClaudhubApp {
                     .icon(icon("git-commit-horizontal"))
                     .tooltip(tr!("overview-commit"))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_commit_sheet(&commit, window, cx);
+                        this.open_review_sheet(&commit, None, window, cx);
                     })),
                 )
             })
@@ -3400,7 +3464,7 @@ impl ClaudhubApp {
                         .xsmall()
                         .icon(icon("x"))
                         .tooltip(match close {
-                            Node::Worktree(_) => tr!("overview-hide"),
+                            Node::Worktree(_) | Node::Changes(_) => tr!("overview-hide"),
                             Node::Note(_) => tr!("overview-note-delete"),
                             _ => tr!("overview-close"),
                         })
@@ -3526,6 +3590,13 @@ impl ClaudhubApp {
     fn close_node(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
         match node {
             Node::Git(_) => {}
+            // Nothing is lost by taking it off: the files stay what they are,
+            // and the « Hidden » menu brings it back — no question to ask.
+            Node::Changes(_) => {
+                self.overview_hand.hidden.insert(node.clone());
+                self.remember_folds(node, cx);
+                cx.notify();
+            }
             Node::Note(path) => self.close_home_note(path, window, cx),
             Node::Terminal(id) => {
                 let Some(terminal) = self
@@ -3661,6 +3732,14 @@ impl ClaudhubApp {
                     };
                     hidden.push((node, SharedString::from(name)));
                 }
+                let changes = Node::Changes(worktree.path.clone());
+                if self.overview_hand.hidden.contains(&changes) {
+                    let (_, label) = self.project_label(&worktree.path);
+                    hidden.push((
+                        changes,
+                        tr!("overview-changes-of", { name: label.to_string() }),
+                    ));
+                }
                 for entry in self.canvas.get(&worktree.path).into_iter().flatten() {
                     let node = Node::Note(entry.path.clone());
                     if self.overview_hand.hidden.contains(&node)
@@ -3754,6 +3833,15 @@ impl ClaudhubApp {
                 place.collapsed = folded;
                 place.hidden = hidden;
             }
+            Node::Changes(path) => {
+                let place = &mut store
+                    .worktrees
+                    .entry(path.clone())
+                    .or_default()
+                    .home_changes;
+                place.collapsed = folded;
+                place.hidden = hidden;
+            }
             Node::Terminal(_) => {}
         });
     }
@@ -3791,124 +3879,6 @@ impl ClaudhubApp {
                 store.home_places.remove(path);
             });
         }
-    }
-}
-
-/// The commit sheet: a worktree's changes to tick, and the commit box of the
-/// Changes panel under them — the same field, the same buttons, the same
-/// draft, so that what is started here is finished there and back.
-///
-/// **An entity and not a closure**, `SettingsForm`'s reason: `open_dialog`
-/// keeps a `Fn` called back from the root's render, where reading the
-/// application is a panic, and a child's render comes after.
-pub(super) struct CommitSheet {
-    app: WeakEntity<ClaudhubApp>,
-}
-
-impl Render for CommitSheet {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div().into_any_element();
-        };
-        app.update(cx, |app, cx| {
-            app.render_commit_sheet(window, cx).into_any_element()
-        })
-    }
-}
-
-impl ClaudhubApp {
-    /// Opens the commit sheet on a worktree, which becomes the one on show:
-    /// the commit box speaks of the active worktree, and the card one pressed
-    /// is the one the sheet is about.
-    fn open_commit_sheet(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active.as_deref() != Some(worktree) {
-            self.select_worktree(worktree.to_path_buf(), window, cx);
-        }
-        let (repo, label) = self.project_label(worktree);
-        let name = match repo {
-            Some(repo) => format!("{repo} · {label}"),
-            None => label.to_string(),
-        };
-        let title = tr!("overview-commit-title", { name: name });
-        let app = cx.entity().downgrade();
-        let sheet = cx.new(|_| CommitSheet { app: app.clone() });
-        self.commit_sheet = true;
-        window.open_dialog(cx, move |dialog, _, _| {
-            let app = app.clone();
-            dialog
-                .title(title.clone())
-                .w(px(640.))
-                .child(sheet.clone())
-                .on_close(move |_, _, cx| {
-                    if let Some(app) = app.upgrade() {
-                        app.update(cx, |this, _| this.commit_sheet = false);
-                    }
-                })
-        });
-        super::dialogs::focus_field(&self.commit_input, window, cx);
-        cx.notify();
-    }
-
-    fn render_commit_sheet(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let Some(worktree) = self.active.clone() else {
-            return div().into_any_element();
-        };
-        let files: Vec<crate::git::FileStatus> = self
-            .review
-            .get(&worktree)
-            .map(|review| review.status.files.clone())
-            .unwrap_or_default();
-        let staged = files.iter().filter(|file| file.is_staged()).count();
-        let muted = cx.theme().muted_foreground;
-        let entity = cx.entity();
-        let list = v_flex()
-            .id("commit-sheet-files")
-            .max_h(px(300.))
-            .overflow_y_scroll()
-            .gap_0p5()
-            .when(files.is_empty(), |el| {
-                el.child(div().text_sm().text_color(muted).child(tr!("home-clean")))
-            })
-            .children(files.into_iter().enumerate().map(|(index, file)| {
-                // Ticked when all of it is in the index; a press puts the rest
-                // in, or takes all of it out — the Changes panel's box.
-                let ticked = file.is_staged() && !file.is_unstaged();
-                let conflicted = file.is_conflicted();
-                let (worktree, path, entity) =
-                    (worktree.clone(), file.path.clone(), entity.clone());
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .text_sm()
-                    .child(
-                        gpui_kit::component::checkbox::Checkbox::new(("commit-sheet-stage", index))
-                            .checked(ticked)
-                            .disabled(conflicted)
-                            .on_click(move |_, _, cx| {
-                                let (worktree, path) = (worktree.clone(), path.clone());
-                                entity.update(cx, |this, cx| {
-                                    this.set_staged(worktree, vec![path], !ticked, cx)
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .when(conflicted, |el| el.text_color(cx.theme().danger))
-                            .child(SharedString::from(file.path.display().to_string())),
-                    )
-            }));
-        v_flex()
-            .gap_2()
-            .child(list)
-            .child(self.render_commit_box(staged > 0, staged, cx))
-            .into_any_element()
     }
 }
 

@@ -12,6 +12,7 @@ mod blade;
 mod branch_picker;
 mod branches;
 mod canvas_view;
+mod changes_view;
 mod conflicts;
 mod context;
 mod db;

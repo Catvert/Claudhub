@@ -46,6 +46,8 @@ pub struct WorktreeState {
     pub home_collapsed: bool,
     /// Its card taken off the plane, with what hangs from it.
     pub home_hidden: bool,
+    /// Where its changes node stands on the home screen, and how.
+    pub home_changes: NodePlace,
     /// The terminals that were open, in order, to open again — see
     /// `ui::revive`.
     pub terminals: Vec<SavedTerminal>,
