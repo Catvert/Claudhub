@@ -629,10 +629,13 @@ worktree.
   (`set_canvas`), sinon il changerait la police de tous.
 - **L'accueil n'a pas de barre de titre** : c'est la place qu'il rend aux
   tableaux et au plan. Ce qu'elle portait est dans la **barre latérale**,
-  la même pour les deux vues : en tête le menu, « Accueil / Éditeur » — le
-  chemin du retour —, Focus / Plan et « Masqués », le vide de la ligne
-  déplaçant la fenêtre (`window_drag_region`) ; au pied la skill, ouvrir un
-  dépôt, « Réinitialiser » et les réglages. Les boutons de la fenêtre ne sont
+  la même pour les deux vues : en tête le menu et « Accueil / Éditeur » —
+  le chemin du retour —, la tête entière déplaçant la fenêtre
+  (`window_drag_region`, ce qu'on y presse gardant sa pression : `held`) ;
+  au pied Focus / Plan, « Masqués », la skill, ouvrir un dépôt,
+  « Réinitialiser » et les réglages. Les deux choix sont des **contrôles
+  segmentés** (`segmented`) : une piste en creux, le segment choisi en
+  relief — deux boutons côte à côte se lisaient comme deux actions. Les boutons de la fenêtre ne sont
   peints que là où c'est à nous de le faire — Windows, un Linux qui demande
   des décorations client (`draws_window_buttons`) —, dans le coin en haut à
   droite, par des `WindowControlArea` que Windows lit lui-même ; l'en-tête

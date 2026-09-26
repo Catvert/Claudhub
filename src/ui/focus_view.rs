@@ -48,7 +48,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::DropdownMenu as _,
-    v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
 use gpui_kit::{
     anchored, canvas, deferred, div, point, prelude::*, px, Animation, AnimationExt as _,
@@ -474,76 +474,71 @@ impl ClaudhubApp {
             .pb_2()
             .overflow_y_scroll()
             .children(rows);
-        // The home screen has no title bar: what it said is here. First the
-        // menu and the screens — the way back to the editor — the bare rest
-        // of the line moving the window, as the title bar's middle did.
+        // The home screen has no title bar: what it said is here — the
+        // menu, and the way back to the editor. The head is the window's
+        // drag region, as the title bar was; what can be pressed in it keeps
+        // its press (`held`).
         let screens = h_flex()
-            .flex_none()
             .w_full()
-            .h(super::theme::toolbar_height(cx))
-            .pl_1()
-            .pr_1()
-            .gap_1()
+            .px_1p5()
+            .pt_1p5()
+            .gap_1p5()
             .items_center()
-            .child(self.render_main_menu(cx))
-            .child(self.render_screen_switch(cx))
-            .child(self.window_drag_region("home-drag", cx).flex_1().h_full())
-            .child(
+            .child(held(self.render_main_menu(cx)))
+            .child(held(self.screen_segments(false, cx).w_full()).flex_1())
+            .child(held(
                 Button::new("focus-rail-fold")
                     .ghost()
                     .xsmall()
                     .icon(icon("panel-left-close"))
                     .tooltip(tr!("focus-sidebar-fold"))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
-            );
-        // Then the two ways to look at the worktrees chosen here, and what
-        // either hid.
-        let views = h_flex()
-            .flex_none()
-            .w_full()
-            .px_1()
-            .gap_1()
-            .items_center()
-            .child(self.home_mode_button(HomeMode::Focus, false, cx))
-            .child(self.home_mode_button(HomeMode::Canvas, false, cx))
-            .child(div().flex_1())
-            .children(self.render_hidden_menu(false, cx));
+            ));
         // What `Ctrl` does is said where it is done: the one gesture of the
         // list nothing on it would show.
         let hint = div()
-            .flex_none()
             .w_full()
             .px_2()
-            .pt_1()
+            .pt_1p5()
+            .pb_1p5()
             .truncate()
             .text_xs()
             .text_color(theme.muted_foreground)
             .child(tr!("focus-sidebar-hint"));
-        let head = v_flex()
+        let head = self
+            .window_drag_region("home-drag", cx)
+            .flex()
+            .flex_col()
             .flex_none()
             .w_full()
-            .pb_1()
             .border_b_1()
             .border_color(theme.border)
             .child(screens)
-            .child(views)
             .child(hint);
-        // What speaks for the whole screen and not a worktree, at the foot:
-        // the skill, another repository, putting the worktrees on show back
-        // as the rules lay them, and the settings.
-        let foot = h_flex()
+        // At the foot, how the worktrees chosen above are looked at — the two
+        // views, what either hid — then what speaks for the whole screen and
+        // not a worktree: the skill, another repository, putting the
+        // worktrees on show back as the rules lay them, and the settings.
+        let foot = v_flex()
             .flex_none()
             .w_full()
-            .p_1()
-            .gap_1()
-            .items_center()
+            .p_1p5()
+            .gap_1p5()
             .border_t_1()
             .border_color(theme.border)
-            .child(self.render_skill_button(false, cx))
-            .child(div().flex_1())
-            .child(self.open_repo_button(cx))
-            .child(self.reset_button(cx))
-            .child(settings_button(cx));
+            .child(self.view_segments(false, cx).w_full())
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .items_center()
+                    .child(self.render_skill_button(false, cx))
+                    .children(self.render_hidden_menu(true, cx))
+                    .child(div().flex_1())
+                    .child(self.open_repo_button(cx))
+                    .child(self.reset_button(cx))
+                    .child(settings_button(cx)),
+            );
         v_flex()
             .flex_none()
             .w(px(SIDEBAR_WIDTH))
@@ -575,26 +570,118 @@ impl ClaudhubApp {
             }))
     }
 
-    /// One of the home screen's two views, as a tab: lit when it is the one
-    /// shown. `compact`, its glyph alone — on the rail.
-    fn home_mode_button(&self, mode: HomeMode, compact: bool, cx: &mut Context<Self>) -> Button {
-        let (id, glyph, label) = match mode {
-            HomeMode::Focus => ("home-mode-focus", "columns-2", tr!("overview-mode-focus")),
-            HomeMode::Canvas => ("home-mode-canvas", "grid-3x3", tr!("overview-mode-canvas")),
-        };
-        Button::new(id)
-            .ghost()
-            .small()
-            .icon(icon(glyph))
-            .map(|button| {
-                if compact {
-                    button.tooltip(label)
+    /// The two screens, as a segmented choice: the home screen — lit, being
+    /// where one is — and the editor. `compact`, glyphs alone, one above the
+    /// other.
+    fn screen_segments(&self, compact: bool, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let label = |text: SharedString| (!compact).then_some(text);
+        segmented(
+            compact,
+            vec![
+                self.segment(
+                    "home-screen-home",
+                    "layout-dashboard",
+                    label(tr!("overview-short")),
+                    tr!("overview-toggle"),
+                    true,
+                    |_, _, _| {},
+                    cx,
+                ),
+                self.segment(
+                    "home-screen-editor",
+                    "file-code",
+                    label(tr!("editor-short")),
+                    tr!("editor-toggle"),
+                    false,
+                    |this, window, cx| this.toggle_overview(window, cx),
+                    cx,
+                ),
+            ],
+            cx,
+        )
+    }
+
+    /// The home screen's two views, as a segmented choice.
+    fn view_segments(&self, compact: bool, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let label = |text: SharedString| (!compact).then_some(text);
+        let mode = self.home_mode;
+        segmented(
+            compact,
+            vec![
+                self.segment(
+                    "home-mode-focus",
+                    "columns-2",
+                    label(tr!("overview-mode-focus")),
+                    tr!("overview-mode-hint"),
+                    mode == HomeMode::Focus,
+                    |this, _, cx| this.set_home_mode(HomeMode::Focus, cx),
+                    cx,
+                ),
+                self.segment(
+                    "home-mode-canvas",
+                    "grid-3x3",
+                    label(tr!("overview-mode-canvas")),
+                    tr!("overview-mode-hint"),
+                    mode == HomeMode::Canvas,
+                    |this, _, cx| this.set_home_mode(HomeMode::Canvas, cx),
+                    cx,
+                ),
+            ],
+            cx,
+        )
+    }
+
+    /// One segment of a `segmented` choice: its glyph, its word when there
+    /// is room for one. The one chosen is raised — the card's own colour, a
+    /// hairline, the full foreground and its glyph in the accent — and the
+    /// others sit quieter in the track, brightening under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn segment(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        label: Option<SharedString>,
+        tooltip: SharedString,
+        lit: bool,
+        press: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (foreground, muted, hover) =
+            (theme.foreground, theme.muted_foreground, theme.list_hover);
+        let radius = px((f32::from(theme.radius) - 2.).max(0.));
+        h_flex()
+            .id(id)
+            .flex_1()
+            .justify_center()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded(radius)
+            .border_1()
+            .text_sm()
+            .cursor_pointer()
+            .map(|el| {
+                if lit {
+                    el.bg(theme.background)
+                        .border_color(theme.border)
+                        .shadow_sm()
+                        .text_color(foreground)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                 } else {
-                    button.label(label).tooltip(tr!("overview-mode-hint"))
+                    el.border_color(gpui_kit::transparent_black())
+                        .text_color(muted)
+                        .hover(move |style| style.text_color(foreground).bg(hover))
                 }
             })
-            .selected(self.home_mode == mode)
-            .on_click(cx.listener(move |this, _, _, cx| this.set_home_mode(mode, cx)))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| press(this, window, cx)))
+            .child(icon(glyph).text_color(if lit { theme.ring } else { muted }))
+            .children(label.map(|label| div().truncate().child(label)))
+            .into_any_element()
     }
 
     /// Puts the worktrees on show back as the rules lay them — see
@@ -702,15 +789,40 @@ impl ClaudhubApp {
         let foot = v_flex()
             .flex_none()
             .w_full()
-            .py_1()
+            .py_1p5()
             .gap_1()
             .items_center()
             .border_t_1()
             .border_color(theme.border)
+            .child(self.view_segments(true, cx))
+            .children(self.render_hidden_menu(true, cx))
             .child(self.open_repo_button(cx))
             .child(self.render_skill_button(true, cx))
             .child(self.reset_button(cx))
             .child(settings_button(cx));
+        // The list's head, one above the other: the menu, the two screens,
+        // and the unfold — the head moving the window, as the list's does.
+        let head = self
+            .window_drag_region("home-drag", cx)
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .items_center()
+            .gap_1()
+            .py_1p5()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(held(self.render_main_menu(cx)))
+            .child(held(self.screen_segments(true, cx)))
+            .child(held(
+                Button::new("focus-rail-unfold")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("panel-left-open"))
+                    .tooltip(tr!("focus-sidebar-unfold"))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
+            ));
         v_flex()
             .flex_none()
             .w(px(RAIL_WIDTH))
@@ -721,42 +833,7 @@ impl ClaudhubApp {
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(
-                // The list's head, one above the other: the menu, the way to
-                // the editor, the two views, what they hid, and the unfold —
-                // the bare line above them moving the window.
-                v_flex()
-                    .flex_none()
-                    .w_full()
-                    .items_center()
-                    .gap_1()
-                    .pb_1()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(self.window_drag_region("home-drag", cx).w_full().h(px(10.)))
-                    .child(self.render_main_menu(cx))
-                    .child(
-                        Button::new("rail-editor")
-                            .ghost()
-                            .small()
-                            .icon(icon("file-code"))
-                            .tooltip(tr!("editor-toggle"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_overview(window, cx);
-                            })),
-                    )
-                    .child(self.home_mode_button(HomeMode::Focus, true, cx))
-                    .child(self.home_mode_button(HomeMode::Canvas, true, cx))
-                    .children(self.render_hidden_menu(true, cx))
-                    .child(
-                        Button::new("focus-rail-unfold")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("panel-left-open"))
-                            .tooltip(tr!("focus-sidebar-unfold"))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
-                    ),
-            )
+            .child(head)
             .child(div().flex_1().min_h_0().w_full().child(list))
             .child(foot)
             .into_any_element()
@@ -2100,4 +2177,33 @@ fn settings_button(cx: &mut Context<ClaudhubApp>) -> Button {
         .icon(icon("settings"))
         .tooltip(tr!("workspace-settings"))
         .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
+}
+
+/// A choice between a few, as one control: a track sunk a step under the
+/// card, its segments side by side — or one above the other on the rail.
+/// Two buttons beside each other read as two actions; this reads as one
+/// question and its answer.
+fn segmented(vertical: bool, segments: Vec<AnyElement>, cx: &gpui_kit::App) -> gpui_kit::Div {
+    let theme = cx.theme();
+    let track = if vertical { v_flex() } else { h_flex() };
+    track
+        .flex_none()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(theme.radius)
+        .bg(super::theme::gutter(cx))
+        .border_1()
+        .border_color(theme.border)
+        .children(segments)
+}
+
+/// What is pressed inside the home screen's head keeps its press: the head
+/// is the window's drag region, and a press left to bubble up to it would
+/// move the window instead of reaching the button — see `topbar::actions`.
+fn held(child: impl IntoElement) -> gpui_kit::Div {
+    div()
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation()
+        })
+        .child(child)
 }

@@ -613,7 +613,7 @@ impl ClaudhubApp {
     /// trail and the pickers after it speak of what that screen shows. Two
     /// named tabs rather than one toggle: a lit "Home" alone said where one
     /// was, never where the other press would go.
-    pub(super) fn render_screen_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_screen_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = |id: &'static str, glyph: &'static str, label, tooltip, lit: bool| {
             Button::new(id)
                 .icon(icon(glyph))

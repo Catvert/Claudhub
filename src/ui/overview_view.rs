@@ -3248,7 +3248,7 @@ impl ClaudhubApp {
 
     /// « Hidden (n) »: what was taken off the plane, one entry each to bring
     /// it back, and all of it at once. Absent while nothing is hidden.
-    /// `compact`, its glyph alone — on the sidebar's rail.
+    /// `compact`, its glyph and the count — at the sidebar's foot.
     pub(super) fn render_hidden_menu(
         &self,
         compact: bool,
@@ -3267,8 +3267,10 @@ impl ClaudhubApp {
                 .icon(icon("eye-off"))
                 .map(|button| {
                     let label = tr!("overview-hidden", { count: count });
+                    // Compact, the count alone: what is hidden is still
+                    // said, in a word the rail and the foot have room for.
                     if compact {
-                        button.tooltip(label)
+                        button.label(count.to_string()).tooltip(label)
                     } else {
                         button.label(label)
                     }
