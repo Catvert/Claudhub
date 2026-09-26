@@ -820,6 +820,19 @@ pub enum Doing {
     Waiting,
 }
 
+/// The loudest of several agents: one waiting on the user before one at
+/// work, before rest — the one state that cannot go on without a hand
+/// first.
+pub fn loudest(doings: impl IntoIterator<Item = Doing>) -> Doing {
+    doings
+        .into_iter()
+        .fold(Doing::Rest, |loudest, doing| match (loudest, doing) {
+            (Doing::Waiting, _) | (_, Doing::Waiting) => Doing::Waiting,
+            (Doing::Working, _) | (_, Doing::Working) => Doing::Working,
+            _ => Doing::Rest,
+        })
+}
+
 /// A node's size before the hand touched it, and the least the hand may
 /// give it.
 pub fn start_and_least(node: &Node) -> ((f32, f32), (f32, f32)) {
@@ -1325,6 +1338,15 @@ pub fn wheel_factor(pixels_up: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_is_louder_than_work_and_work_than_rest() {
+        use Doing::*;
+        assert_eq!(loudest([Rest, Working, Waiting, Rest]), Waiting);
+        assert_eq!(loudest([Rest, Working, Rest]), Working);
+        assert_eq!(loudest([Rest, Rest]), Rest);
+        assert_eq!(loudest([]), Rest);
+    }
 
     fn checkout<'a>(
         path: &'a str,

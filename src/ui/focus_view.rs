@@ -59,11 +59,13 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
 use crate::ui::focus::{self, Board, ColumnSpan, Target};
 use crate::ui::icons::icon;
-use crate::ui::overview::{self, Node};
+use crate::ui::overview::{self, Doing, Node};
 use crate::ui::overview_view::live_worktrees;
 
 /// The sidebar's width.
 const SIDEBAR_WIDTH: f32 = 260.;
+/// What each worktree's agents say, the ones at rest left out.
+type Doings = std::collections::HashMap<PathBuf, Doing>;
 /// The sidebar folded to its rail: a column of initials.
 const RAIL_WIDTH: f32 = 52.;
 /// The button right of the last column.
@@ -126,9 +128,17 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shown = self.focus_worktrees();
-        let at_work = self.prepare_laid_out(&shown, cx);
+        // What every worktree's Claudes say, loudest first: the sidebar
+        // dresses each row as the boards dress a terminal.
+        let among: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
+        let doings: Doings = among
+            .iter()
+            .map(|path| (path.clone(), self.worktree_doing(path, &among)))
+            .filter(|(_, doing)| *doing != Doing::Rest)
+            .collect();
+        let at_work = self.prepare_laid_out(&shown, &doings, cx);
         let gap = window.rem_size() * 0.75;
-        let sidebar = self.render_focus_sidebar(&shown, cx);
+        let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
         // The boards gone take what they held in the moment with them.
         self.focus_geometry.retain(|path, _| shown.contains(path));
         self.focus_column_scrolls
@@ -288,9 +298,14 @@ impl ClaudhubApp {
     /// pickers are the plane's: here, the list is the choice. A project
     /// folds to its name, keeping in sight only what of it is on show.
     /// Folded, a rail.
-    fn render_focus_sidebar(&self, shown: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
+    fn render_focus_sidebar(
+        &self,
+        shown: &[PathBuf],
+        doings: &Doings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.focus_rail {
-            return self.render_focus_rail(shown, cx);
+            return self.render_focus_rail(shown, doings, cx);
         }
         let theme = cx.theme().clone();
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -298,6 +313,16 @@ impl ClaudhubApp {
             let main = repo.main.clone();
             let folded = self.focus_folded.contains(&main);
             let worktrees = live_worktrees(repo);
+            // Folded, the project says what the loudest of its worktrees
+            // does: a question hidden under a fold is still asked.
+            let hidden_doing = folded.then(|| {
+                overview::loudest(
+                    worktrees
+                        .iter()
+                        .filter(|path| !shown.contains(path))
+                        .filter_map(|path| doings.get(path).copied()),
+                )
+            });
             let fold = main.clone();
             rows.push(
                 h_flex()
@@ -314,6 +339,7 @@ impl ClaudhubApp {
                                 "focus-project-{}",
                                 main.display()
                             )))
+                            .relative()
                             .flex_1()
                             .min_w_0()
                             .gap_1()
@@ -350,7 +376,8 @@ impl ClaudhubApp {
                                         .text_color(theme.muted_foreground)
                                         .child(SharedString::from(worktrees.len().to_string())),
                                 )
-                            }),
+                            })
+                            .children(outline_of(hidden_doing.as_ref(), &theme)),
                     )
                     .child(
                         Button::new(SharedString::from(format!(
@@ -373,7 +400,7 @@ impl ClaudhubApp {
                 if folded && !shown.contains(&path) {
                     continue;
                 }
-                rows.push(self.render_focus_row(&path, shown, cx));
+                rows.push(self.render_focus_row(&path, shown, doings, cx));
             }
         }
         let list = v_flex()
@@ -480,7 +507,12 @@ impl ClaudhubApp {
     /// projects — every worktree, a project's fold being the list's. The
     /// same clicks as the list's, and each worktree's name in its tooltip;
     /// the foot's buttons, their glyphs alone.
-    fn render_focus_rail(&self, shown: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
+    fn render_focus_rail(
+        &self,
+        shown: &[PathBuf],
+        doings: &Doings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let mut pills: Vec<AnyElement> = Vec::new();
         for (index, repo) in self.repos.iter().enumerate() {
@@ -496,7 +528,7 @@ impl ClaudhubApp {
                 );
             }
             for path in live_worktrees(repo) {
-                pills.push(self.render_focus_pill(&path, shown, cx));
+                pills.push(self.render_focus_pill(&path, shown, doings, cx));
             }
         }
         let list = v_flex()
@@ -557,6 +589,7 @@ impl ClaudhubApp {
         &self,
         path: &Path,
         shown: &[PathBuf],
+        doings: &Doings,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -608,6 +641,7 @@ impl ClaudhubApp {
                 }),
             )
             .child(SharedString::from(focus::initials(&label)))
+            .children(outline_of(doings.get(path), &theme))
             .children(agent.map(|agent| {
                 div()
                     .absolute()
@@ -626,6 +660,7 @@ impl ClaudhubApp {
         &self,
         path: &Path,
         shown: &[PathBuf],
+        doings: &Doings,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -652,6 +687,7 @@ impl ClaudhubApp {
         let open = path.to_path_buf();
         h_flex()
             .id(SharedString::from(format!("focus-row-{}", path.display())))
+            .relative()
             .w_full()
             .px_2()
             .py_1()
@@ -712,6 +748,7 @@ impl ClaudhubApp {
                 )
             })
             .children(summary.map(|summary| super::topbar::volume_on(summary, None, cx)))
+            .children(outline_of(doings.get(path), &theme))
             .into_any_element()
     }
 
@@ -1676,4 +1713,13 @@ impl ClaudhubApp {
             Node::Git(_) | Node::Changes(_) => ("file-diff", tr!("overview-changes")),
         }
     }
+}
+
+/// A sidebar entry's outline when its agents work or wait — the terminal's
+/// own dress, so that the row and the box it leads to read as one signal.
+fn outline_of(doing: Option<&Doing>, theme: &gpui_kit::component::Theme) -> Option<AnyElement> {
+    doing
+        .copied()
+        .filter(|doing| *doing != Doing::Rest)
+        .map(|doing| super::overview_view::tile_outline(doing, false, 1., theme))
 }

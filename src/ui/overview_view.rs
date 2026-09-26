@@ -674,12 +674,13 @@ impl ClaudhubApp {
     /// agent at work or waiting dresses its terminal's outline, and — with
     /// no agent terminal on show — its card's.
     ///
-    /// **Only what is on screen asks for frames**: an agent at work in a
-    /// worktree the sidebar lists but the middle does not show moved
-    /// nothing, and repainted the window thirty times a second for it.
+    /// **Only what is on screen asks for frames**: the boards shown, and
+    /// the sidebar's outlines — `listed`, what each worktree it shows says.
+    /// A worktree folded away in it moves nothing.
     pub(super) fn prepare_laid_out(
         &mut self,
         shown: &[PathBuf],
+        listed: &std::collections::HashMap<PathBuf, overview::Doing>,
         cx: &mut Context<Self>,
     ) -> overview::AtWork {
         let plan = self.overview_plan();
@@ -692,8 +693,16 @@ impl ClaudhubApp {
             .collect();
         at_work.terminals.retain(|id, _| on_screen.contains(id));
         at_work.cards.retain(|path, _| shown.contains(path));
-        self.overview_flow_frame = (!at_work.is_empty()).then(|| {
-            if at_work.flows() {
+        let moving: Vec<overview::Doing> = at_work
+            .terminals
+            .values()
+            .chain(at_work.cards.values())
+            .chain(listed.values())
+            .copied()
+            .filter(|doing| *doing != overview::Doing::Rest)
+            .collect();
+        self.overview_flow_frame = (!moving.is_empty()).then(|| {
+            if moving.contains(&overview::Doing::Working) {
                 FLOW_FRAME
             } else {
                 PULSE_FRAME
@@ -1600,18 +1609,33 @@ impl ClaudhubApp {
     /// being typed, both burn it. Then the hooks' word for the terminal's
     /// session, then — for another agent, or a Claude that writes no status —
     /// the guess.
+    /// What the Claudes of a worktree say, `among` the worktrees a process
+    /// could belong to: the loudest of them — one waiting on the user
+    /// before one at work, before rest, all idle too — and the hooks' word
+    /// or the guess only where none of them speaks.
+    pub(super) fn worktree_doing(&self, path: &Path, among: &[PathBuf]) -> overview::Doing {
+        use overview::Doing;
+        let said: Vec<Doing> = self
+            .claude_processes
+            .iter()
+            .filter(|process| {
+                crate::agent::owning_worktree(among, &process.cwd).as_deref() == Some(path)
+            })
+            .filter_map(|process| process.status.as_deref())
+            .map(claude_says)
+            .collect();
+        if said.is_empty() {
+            return self
+                .agents
+                .get(path)
+                .map(|state| heard(&state.activity))
+                .unwrap_or(Doing::Rest);
+        }
+        overview::loudest(said)
+    }
+
     fn overview_at_work(&self, plan: &Plan, cx: &App) -> overview::AtWork {
         use overview::Doing;
-        let claude_says = |status: &str| match status {
-            "busy" => Doing::Working,
-            "waiting" => Doing::Waiting,
-            _ => Doing::Rest,
-        };
-        let heard = |activity: &crate::agent::Activity| match activity {
-            crate::agent::Activity::Working => Doing::Working,
-            crate::agent::Activity::Waiting(_) => Doing::Waiting,
-            crate::agent::Activity::Idle | crate::agent::Activity::Finished => Doing::Rest,
-        };
         let status = |pid: Option<u32>, session: Option<&str>| {
             self.claude_processes
                 .iter()
@@ -1657,34 +1681,7 @@ impl ClaudhubApp {
         let worktrees: std::collections::HashMap<&Path, Doing> = plan
             .cards
             .iter()
-            .map(|card| {
-                let path = card.path.as_path();
-                // The Claudes of this worktree that say how they are: the
-                // loudest of them is the answer, all idle too — the guess
-                // only speaks where none of them does.
-                let said: Vec<Doing> = self
-                    .claude_processes
-                    .iter()
-                    .filter(|process| {
-                        crate::agent::owning_worktree(&cards, &process.cwd).as_deref() == Some(path)
-                    })
-                    .filter_map(|process| process.status.as_deref())
-                    .map(claude_says)
-                    .collect();
-                let doing = if said.is_empty() {
-                    self.agents
-                        .get(path)
-                        .map(|state| heard(&state.activity))
-                        .unwrap_or(Doing::Rest)
-                } else if said.contains(&Doing::Waiting) {
-                    Doing::Waiting
-                } else if said.contains(&Doing::Working) {
-                    Doing::Working
-                } else {
-                    Doing::Rest
-                };
-                (path, doing)
-            })
+            .map(|card| (card.path.as_path(), self.worktree_doing(&card.path, &cards)))
             .collect();
         overview::at_work(&tiles, &worktrees)
     }
@@ -1849,6 +1846,24 @@ fn flow_seconds() -> f32 {
         .as_secs_f64()
         // A jump every ten minutes, where hours of f32 would stutter.
         .rem_euclid(600.) as f32
+}
+
+/// What Claude writes for its pid, as a link shows it.
+fn claude_says(status: &str) -> overview::Doing {
+    match status {
+        "busy" => overview::Doing::Working,
+        "waiting" => overview::Doing::Waiting,
+        _ => overview::Doing::Rest,
+    }
+}
+
+/// What the hooks, or the guess, say of a worktree.
+fn heard(activity: &crate::agent::Activity) -> overview::Doing {
+    match activity {
+        crate::agent::Activity::Working => overview::Doing::Working,
+        crate::agent::Activity::Waiting(_) => overview::Doing::Waiting,
+        crate::agent::Activity::Idle | crate::agent::Activity::Finished => overview::Doing::Rest,
+    }
 }
 
 /// A terminal's outline, over it: the theme's line at rest — the ring when

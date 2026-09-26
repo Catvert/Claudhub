@@ -692,9 +692,12 @@ worktree.
   sa propre boîte (`set_canvas(None)`), et agrandir un nœud lui donne le
   milieu (`overview_zoomed`). Sans liens, c'est le cadre qui dit qu'un agent
   travaille ou attend — celui de la carte aussi, quand aucun onglet d'agent
-  n'est là — et **seuls les tableaux montrés demandent des frames**
-  (`prepare_laid_out`) : un agent au travail dans un worktree que seule la
-  barre liste repeignait la fenêtre trente fois par seconde pour rien.
+  n'est là. **Chaque ligne de la barre latérale porte le même habit**
+  (`worktree_doing`, `overview::loudest`) — le plus pressant de ses Claude :
+  celui qui attend, puis celui qui travaille —, une pastille du rail aussi,
+  et l'en-tête d'un projet replié pour ce que le repli cache. Ne demande des
+  frames que ce qui est à l'écran (`prepare_laid_out`) : les tableaux
+  montrés et ces habits.
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
   Markdown à en-tête plat par nœud, dans `.claudhub/notes/` du checkout —
   **versionné**, pour qu'une note ou une revue voyage avec sa branche et se
