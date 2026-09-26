@@ -18,11 +18,16 @@ use gpui_kit::component::{
     menu::{DropdownMenu, PopupMenuItem},
     ActiveTheme, Disableable, Sizable, Size, TitleBar,
 };
-use gpui_kit::{div, prelude::*, px, Context, Entity, MouseButton, SharedString, Window};
+use gpui_kit::{
+    div, prelude::*, px, Context, Entity, MouseButton, SharedString, Window, WindowControlArea,
+};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
+
+/// A window button's width, as the platform draws them.
+pub(super) const WINDOW_BUTTON_WIDTH: f32 = 36.;
 
 /// A row of the title bar that is **not** the window's drag region.
 ///
@@ -350,7 +355,7 @@ impl ClaudhubApp {
                             // What the editor's bar says of the checkout it
                             // shows. The home screen shows them all, and each
                             // card carries its own — see `render_card_actions`.
-                            .when(!self.overview, |el| el.child(self.render_worktree_bar(cx))),
+                            .child(self.render_worktree_bar(cx)),
                     )
                     // The middle is empty on purpose, and the space is not
                     // lost: it is the window's drag region. Neither `fetch`, nor
@@ -363,16 +368,9 @@ impl ClaudhubApp {
                     .child(
                         actions()
                             // The editor's corner: what acts on the checkout on
-                            // show. The home screen's is its own toolbar — the
-                            // view, the projects, the skill — where it floated
-                            // over the plane, hiding what lay under it.
-                            .map(|el| {
-                                if self.overview {
-                                    el.child(self.render_overview_toolbar(cx))
-                                } else {
-                                    el.child(self.render_worktree_corner(cx))
-                                }
-                            })
+                            // show. The home screen has no title bar: its
+                            // sidebar carries its own.
+                            .child(self.render_worktree_corner(cx))
                             // The gear, at the far right of the title bar. It
                             // needs no gloss: it is where an application's
                             // settings are on every one of them, and a word
@@ -389,6 +387,138 @@ impl ClaudhubApp {
                             ),
                     ),
             )
+    }
+
+    /// Whether the window's three buttons are ours to draw: under Windows,
+    /// whose frame is the application's, and under a Linux compositor that
+    /// asked the client to decorate. niri and the server-decorated sessions
+    /// draw their own, or none.
+    pub(super) fn draws_window_buttons(window: &Window) -> bool {
+        cfg!(target_os = "windows")
+            || (cfg!(target_os = "linux")
+                && matches!(
+                    window.window_decorations(),
+                    gpui_kit::Decorations::Client { .. }
+                ))
+    }
+
+    /// The window's own buttons where the home screen has no title bar to
+    /// carry them: in its top-right corner, where they always are. Under
+    /// Windows the platform reads the areas and does the rest; under Linux
+    /// a click does it.
+    pub(super) fn render_window_buttons(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if !Self::draws_window_buttons(window) {
+            return None;
+        }
+        let linux = cfg!(target_os = "linux");
+        let supported = window.window_controls();
+        let theme = cx.theme().clone();
+        let (hover, danger, on_danger) = (theme.list_hover, theme.danger, theme.danger_foreground);
+        let button = |id: &'static str, glyph: &'static str, area: WindowControlArea| {
+            let closes = area == WindowControlArea::Close;
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(WINDOW_BUTTON_WIDTH))
+                .h_full()
+                .hover(move |style| {
+                    if closes {
+                        style.bg(danger).text_color(on_danger)
+                    } else {
+                        style.bg(hover)
+                    }
+                })
+                .window_control_area(area)
+                .child(icon(glyph).xsmall())
+        };
+        let maximized = window.is_maximized();
+        Some(
+            h_flex()
+                .absolute()
+                .top_0()
+                .right_0()
+                .h(super::theme::toolbar_height(cx))
+                .overflow_hidden()
+                .rounded_bl(theme.radius)
+                .bg(theme.title_bar)
+                .text_color(theme.muted_foreground)
+                .when(supported.minimize, |el| {
+                    el.child(
+                        button("window-minimize", "window-minimize", WindowControlArea::Min)
+                            .when(linux, |el| {
+                                el.on_click(|_, window, _| window.minimize_window())
+                            }),
+                    )
+                })
+                .when(supported.maximize, |el| {
+                    el.child(
+                        button(
+                            "window-maximize",
+                            if maximized {
+                                "window-restore"
+                            } else {
+                                "window-maximize"
+                            },
+                            WindowControlArea::Max,
+                        )
+                        .when(linux, |el| el.on_click(|_, window, _| window.zoom_window())),
+                    )
+                })
+                .child(
+                    button("window-close", "window-close", WindowControlArea::Close).when(
+                        linux,
+                        |el| {
+                            // The same question as the window manager's cross.
+                            el.on_click(cx.listener(|this, _, window, cx| {
+                                if this.quit_or_ask(window, cx) {
+                                    window.remove_window();
+                                }
+                            }))
+                        },
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A bare stretch of the home screen that moves the window, as the
+    /// title bar's middle does: the platform's drag area under Windows, a
+    /// press then a move under Linux, and a double click that maximises.
+    pub(super) fn window_drag_region(
+        &self,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div()
+            .id(id)
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.home_window_drag = true),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.home_window_drag = false),
+            )
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.home_window_drag {
+                    this.home_window_drag = false;
+                    window.start_window_move();
+                }
+            }))
+            .when(cfg!(target_os = "linux"), |el| {
+                el.on_click(|event, window, _| {
+                    if event.click_count() >= 2 {
+                        window.zoom_window();
+                    }
+                })
+            })
     }
 
     /// The editor's run of the checkout on show: the trail, the two pickers,
@@ -483,7 +613,7 @@ impl ClaudhubApp {
     /// trail and the pickers after it speak of what that screen shows. Two
     /// named tabs rather than one toggle: a lit "Home" alone said where one
     /// was, never where the other press would go.
-    fn render_screen_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_screen_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = |id: &'static str, glyph: &'static str, label, tooltip, lit: bool| {
             Button::new(id)
                 .icon(icon(glyph))
@@ -637,7 +767,7 @@ impl ClaudhubApp {
     /// A single entry point for what is not about the repository being looked at
     /// — settings, layout, quit — rather than buttons scattered through a
     /// toolbar that talks about the current worktree.
-    fn render_main_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_main_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         Button::new("main-menu")
             .ghost()

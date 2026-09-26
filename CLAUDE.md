@@ -171,7 +171,8 @@ src/
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
     agents.rs   ce que disent les agents : les bulles, les hooks posés
-    topbar.rs   la barre de titre : le menu, les sélecteurs worktree et branche
+    topbar.rs   la barre de titre : le menu, les sélecteurs worktree et branche,
+                et ce qui en tient lieu sur l'accueil — boutons et glissement
     repos.rs        les dépôts ouverts et ceux qui manquent — sans gpui, testé
     inflight.rs     les écritures en vol, et ce que la barre en dit — testé
     rails.rs        les tool windows et leurs trois bandeaux — pur, testé
@@ -594,7 +595,7 @@ racine, où lire l'entité racine est une panique.
 **L'accueil est un écran** (`ui::overview_view`, disposé par `ui::overview`,
 pur et testé), et c'est ce qu'une aire de dock ne sait pas faire : surveiller
 cinq agents demande de voir cinq terminaux *en même temps*, là où un groupe
-d'onglets en montre un. Il remplace tout ce qui est sous la barre de titre par
+d'onglets en montre un. Il remplace la fenêtre entière, barre de titre comprise, par
 un **plan** qu'on déplace et qu'on zoome, où chaque dépôt est **un arbre de haut
 en bas** : le nœud git à la racine, puis le checkout principal et les notes du
 dépôt ; sous chaque worktree, ses notes, ses terminaux vivants, puis les
@@ -626,33 +627,33 @@ worktree.
   avant qu'un terminal n'y colle : sur cet écran, on colle par `Ctrl+Maj+V`.
   Ctrl+molette zoome autour du pointeur ; un terminal laisse passer ce cran
   (`set_canvas`), sinon il changerait la police de tous.
-- **La barre de titre change avec l'écran** : les onglets « Accueil /
-  Éditeur » à gauche, et sur l'accueil rien de ce qui parle du checkout
-  regardé — sélecteurs, état, `…`, pull/push, « Ouvrir », « Lancer », épingles.
-  Chaque carte porte les siens (`render_card_actions`), l'accueil les montrant
-  tous à la fois ; la droite de la barre prend la barre d'outils de l'écran
-  (vue, projets, worktrees, masqués, skill, réinitialiser), qui flottait sur
-  le plan. **Le sélecteur de branches reste une seule surface** : il parle du
-  checkout regardé, donc l'ouvrir depuis une carte la sélectionne d'abord
-  (`branch_popover`).
-- **Un projet à la fois** par défaut sur le plan (sélecteur dans la barre
-  de titre ; le focus n'en a pas, sa barre latérale listant tout) : cinq
-  worktrees d'un code ne se lisent pas parmi ceux d'un autre — et autant qu'on
-  en coche. Un second sélecteur coche les **worktrees**, par projet : un projet
-  dont rien n'est coché les montre tous (`overview::shown_of`), et le nœud git
-  et les notes du dépôt restent, étant à chacun. Les deux sont des **popovers
-  à cases** et non des menus : un menu se ferme à chaque pression, et cocher
-  trois projets demandait trois ouvertures. Jamais le dernier décoché.
-- **Deux vues, un onglet** (`HomeMode`, `set_home_mode`, retenu dans la
-  session). **Par défaut le focus** (`ui::focus_view`) : une barre latérale
-  des worktrees affichés — qui travaille, combien est en cours — et au milieu
-  **ceux qu'on y a choisis, côte à côte**, chacun sur son **tableau**
-  (`ui::focus`). La barre latérale liste **tous les projets ouverts et tous
-  leurs worktrees** — elle est le choix, les sélecteurs de la barre de titre
-  n'étant qu'au plan —, un projet s'y replie à son nom sans cacher ce qui en
-  est montré, et elle porte à son pied la skill et « Réinitialiser », qui
-  rend aussi aux tableaux montrés la disposition par règle ; les projets
-  « affichés » (`overview_repos`) y sont ceux des worktrees montrés. Le titre
+- **L'accueil n'a pas de barre de titre** : c'est la place qu'il rend aux
+  tableaux et au plan. Ce qu'elle portait est dans la **barre latérale**,
+  la même pour les deux vues : en tête le menu, « Accueil / Éditeur » — le
+  chemin du retour —, Focus / Plan et « Masqués », le vide de la ligne
+  déplaçant la fenêtre (`window_drag_region`) ; au pied la skill, ouvrir un
+  dépôt, « Réinitialiser » et les réglages. Les boutons de la fenêtre ne sont
+  peints que là où c'est à nous de le faire — Windows, un Linux qui demande
+  des décorations client (`draws_window_buttons`) —, dans le coin en haut à
+  droite, par des `WindowControlArea` que Windows lit lui-même ; le titre du
+  dernier tableau leur laisse la place. Rien de ce qui parle d'un checkout
+  n'y est : chaque carte porte les siens (`render_card_actions`). **Le
+  sélecteur de branches reste une seule surface** : il parle du checkout
+  regardé, donc l'ouvrir depuis une carte la sélectionne d'abord
+  (`branch_popover`). L'éditeur garde sa barre.
+- **Deux vues, un onglet, un seul choix** (`HomeMode`, `set_home_mode`,
+  retenu dans la session). La barre latérale liste **tous les projets
+  ouverts et tous leurs worktrees** — qui travaille, combien est en cours —
+  et ce qu'on y choisit est ce que **les deux vues** montrent : le plan
+  dessine l'arbre des worktrees choisis, le focus les pose côte à côte
+  (`overview_repos`, `overview_worktrees_of` : les projets « affichés » sont
+  ceux des worktrees choisis). Un autre choix est un autre plan à cadrer
+  (`overview_framed`). Le nom d'un projet les choisit tous, son chevron le
+  replie à son nom sans cacher ce qui en est montré. Il y a eu deux
+  sélecteurs à cases dans la barre de titre, pour le plan seul : deux façons
+  de choisir la même chose. **Par défaut le focus** (`ui::focus_view`) :
+  chaque worktree choisi sur son **tableau** (`ui::focus`). « Réinitialiser »
+  y rend aussi aux tableaux montrés la disposition par règle. Le titre
   d'un tableau porte « Éditer », le double clic de sa carte. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
   retire, jamais le dernier ; choisir un worktree ailleurs dans la fenêtre le

@@ -22,15 +22,12 @@
 //! seen from afar is read for its name, its branch and its agent's word.
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
-    popover::Popover,
-    v_flex, ActiveTheme, Selectable as _, Sizable as _, Size, WindowExt as _,
+    v_flex, ActiveTheme, Sizable as _, Size, WindowExt as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Element, Focusable as _,
@@ -185,53 +182,30 @@ pub(super) fn live_worktrees(repo: &crate::ui::repos::RepoState) -> Vec<PathBuf>
 }
 
 impl ClaudhubApp {
-    /// The repositories the home screen shows. On the plane, the ones
-    /// ticked in the corner, the active worktree's until one is, or all of
-    /// them; in the focus view, whose sidebar lists every one, those of the
-    /// worktrees chosen there.
+    /// The repositories the home screen shows: those of the worktrees
+    /// chosen in its sidebar — see `focus_worktrees`. Both views show the
+    /// same choice.
     pub(super) fn overview_repos(&self) -> Vec<&crate::ui::repos::RepoState> {
-        if self.home_mode == HomeMode::Focus {
-            let shown = self.focus_worktrees();
-            return self
-                .repos
-                .iter()
-                .filter(|repo| {
-                    repo.worktrees
-                        .iter()
-                        .any(|worktree| shown.contains(&worktree.path))
-                })
-                .collect();
-        }
-        if self.overview_all {
-            return self.repos.iter().collect();
-        }
-        let ticked: Vec<&crate::ui::repos::RepoState> = self
-            .repos
+        let shown = self.focus_worktrees();
+        self.repos
             .iter()
-            .filter(|repo| self.overview_projects.contains(&repo.main))
-            .collect();
-        if !ticked.is_empty() {
-            return ticked;
-        }
-        let followed = self
-            .active
-            .as_deref()
-            .and_then(|active| self.main_of(active));
-        match followed {
-            Some(main) => self.repos.iter().filter(|repo| repo.main == main).collect(),
-            None => self.repos.iter().take(1).collect(),
-        }
+            .filter(|repo| {
+                repo.worktrees
+                    .iter()
+                    .any(|worktree| shown.contains(&worktree.path))
+            })
+            .collect()
     }
 
-    /// The worktrees of a repository the plane shows: the ticked ones, or
-    /// all of them when none is. The focus view picks in its sidebar, and
-    /// its boards are read among all of them.
+    /// The worktrees of a repository the home screen shows: the ones chosen
+    /// in its sidebar. The git node and the repository's notes stay with
+    /// any one of them, being every worktree's.
     pub(super) fn overview_worktrees_of(&self, repo: &crate::ui::repos::RepoState) -> Vec<PathBuf> {
-        let live = live_worktrees(repo);
-        if self.home_mode == HomeMode::Focus {
-            return live;
-        }
-        overview::shown_of(&self.overview_worktrees, &live)
+        let shown = self.focus_worktrees();
+        live_worktrees(repo)
+            .into_iter()
+            .filter(|path| shown.contains(path))
+            .collect()
     }
 
     /// What the plane holds, laid out.
@@ -343,9 +317,49 @@ impl ClaudhubApp {
         // And the list of what each has to commit, for its changes node.
         self.ensure_changes_read(&checkouts, cx);
         match self.home_mode {
-            HomeMode::Focus => return self.render_overview_focus(window, cx),
-            HomeMode::Canvas => {}
+            HomeMode::Focus => self.render_overview_focus(window, cx),
+            HomeMode::Canvas => self.render_overview_canvas(window, cx),
         }
+    }
+
+    /// The plane, beside the sidebar that chose what it shows.
+    fn render_overview_canvas(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let shown = self.focus_worktrees();
+        // Another choice is another plane to frame, whether the sidebar
+        // made it or a worktree was picked elsewhere in the window.
+        if self.overview_framed != shown {
+            self.overview_framed = shown.clone();
+            self.give_back_maximized();
+            self.overview_fitted = false;
+        }
+        let doings = self.sidebar_doings();
+        let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
+        let plane = self.render_overview_plane(&doings, window, cx);
+        h_flex()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .bg(super::theme::gutter(cx))
+            .child(div().flex_none().h_full().p_3().pr_0().child(sidebar))
+            .child(plane)
+            .children(self.render_window_buttons(window, cx))
+            .into_any_element()
+    }
+
+    /// The plane itself: every node of the worktrees on show, their links,
+    /// and the gestures that move them — `doings`, what the sidebar dresses,
+    /// asking for frames too.
+    fn render_overview_plane(
+        &mut self,
+        doings: &super::focus_view::Doings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut plan = self.overview_plan();
         // A node came or went since the last frame: what was on screen stays
         // where it stood — see `overview::hold`.
@@ -430,17 +444,17 @@ impl ClaudhubApp {
         // pulses, and both need frames nobody else asks for. Under a
         // maximised node the links are under the veil: nothing to move.
         let at_work = self.overview_at_work(&plan, cx);
-        self.overview_flow_frame =
-            (self.overview_maximized.is_none() && !at_work.is_empty()).then(|| {
-                if at_work.flows() {
-                    FLOW_FRAME
-                } else {
-                    PULSE_FRAME
-                }
-            });
-        if self.overview_flow_frame.is_some() {
-            self.tick_flow(cx);
-        }
+        let moving: Vec<overview::Doing> = if self.overview_maximized.is_none() {
+            at_work
+                .terminals
+                .values()
+                .chain(at_work.cards.values())
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.ask_flow_frames(moving.into_iter().chain(doings.values().copied()), cx);
         let links = self.render_links(&plan, view, &at_work, cx);
         let gits: Vec<(Node, AnyElement)> = plan
             .gits
@@ -699,18 +713,8 @@ impl ClaudhubApp {
             .chain(at_work.cards.values())
             .chain(listed.values())
             .copied()
-            .filter(|doing| *doing != overview::Doing::Rest)
             .collect();
-        self.overview_flow_frame = (!moving.is_empty()).then(|| {
-            if moving.contains(&overview::Doing::Working) {
-                FLOW_FRAME
-            } else {
-                PULSE_FRAME
-            }
-        });
-        if self.overview_flow_frame.is_some() {
-            self.tick_flow(cx);
-        }
+        self.ask_flow_frames(moving.into_iter(), cx);
         for terminal in &self.terminals {
             terminal
                 .view
@@ -1291,284 +1295,9 @@ impl ClaudhubApp {
         bars
     }
 
-    /// The home screen's toolbar, at the right of the title bar: the view,
-    /// what is hidden and, on the plane, which projects and worktrees it
-    /// shows — one project at a time by default, so that five worktrees of
-    /// one code are not read among a dozen of another's — the skill, and
-    /// the reset. The focus view's sidebar lists every project, and carries
-    /// the skill and the reset at its foot.
-    ///
-    /// It floated over the plane's top right corner, and hid the nodes under
-    /// it; the title bar had nothing left to say on this screen once the
-    /// checkout's pickers moved onto the cards.
-    pub(super) fn render_overview_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let shown: Vec<PathBuf> = self
-            .overview_repos()
-            .iter()
-            .map(|repo| repo.main.clone())
-            .collect();
-        let label: SharedString = match (self.overview_all, self.overview_repos().as_slice()) {
-            (true, _) => tr!("overview-all-projects"),
-            (false, [one]) => SharedString::from(one.name.clone()),
-            (false, many) => tr!("overview-n-projects", { count: many.len() }),
-        };
-        let app = cx.entity().downgrade();
-        let everything = app.clone();
-        let rows: Vec<Pick> = self
-            .repos
-            .iter()
-            .map(|repo| {
-                let app = app.clone();
-                let main = repo.main.clone();
-                Pick::Item {
-                    name: SharedString::from(repo.name.clone()),
-                    ticked: shown.contains(&repo.main),
-                    press: Rc::new(move |cx: &mut App| {
-                        if let Some(app) = app.upgrade() {
-                            app.update(cx, |this, cx| this.press_project(&main, cx));
-                        }
-                    }),
-                }
-            })
-            .collect();
-        let all = Pick::Item {
-            name: tr!("overview-all-projects"),
-            ticked: self.overview_all,
-            press: Rc::new(move |cx: &mut App| {
-                if let Some(app) = everything.upgrade() {
-                    app.update(cx, |this, cx| this.press_all_projects(cx));
-                }
-            }),
-        };
-        let mode = self.home_mode;
-        let tab = |id: &'static str, glyph: &'static str, label, this: HomeMode| {
-            Button::new(id)
-                .ghost()
-                .small()
-                .icon(icon(glyph))
-                .label(label)
-                .tooltip(tr!("overview-mode-hint"))
-                .selected(mode == this)
-                .on_click(cx.listener(move |app, _, _, cx| app.set_home_mode(this, cx)))
-        };
-        h_flex()
-            .gap_1()
-            .items_center()
-            // The two ways to look at the same things, as tabs: the
-            // worktrees chosen, on their boards, and the plane.
-            .child(tab(
-                "overview-mode-focus",
-                "panel-left",
-                tr!("overview-mode-focus"),
-                HomeMode::Focus,
-            ))
-            .child(tab(
-                "overview-mode-canvas",
-                "grid-3x3",
-                tr!("overview-mode-canvas"),
-                HomeMode::Canvas,
-            ))
-            .child(div().mx_0p5().w(px(1.)).h(px(18.)).bg(cx.theme().border))
-            // The focus view's sidebar lists every project and worktree, and
-            // carries the rest at its foot: what is left here is the plane's.
-            .when(mode == HomeMode::Focus, |el| {
-                el.children(self.render_hidden_menu(cx))
-            })
-            .when(mode == HomeMode::Canvas, |el| {
-                el.children(self.render_canvas_tools(label, all, rows, cx))
-            })
-    }
-
-    /// What only the plane has at the right of the title bar: which projects
-    /// and worktrees it shows, what it hid, the skill and the reset.
-    fn render_canvas_tools(
-        &self,
-        label: SharedString,
-        all: Pick,
-        rows: Vec<Pick>,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        vec![
-            pick_list(
-                "overview-project",
-                "folder",
-                label,
-                tr!("overview-projects-hint"),
-                all,
-                rows,
-            )
-            .into_any_element(),
-            // Opening another repository, beside the list of those open: the
-            // editor's worktree picker carried it, and it is not on this
-            // screen.
-            Button::new("overview-open-repo")
-                .ghost()
-                .small()
-                .icon(icon("folder-plus"))
-                .tooltip(tr!("repo-open"))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.prompt_open_repository(window, cx);
-                }))
-                .into_any_element(),
-        ]
-        .into_iter()
-        .chain(
-            self.render_overview_worktree_picker(cx)
-                .map(IntoElement::into_any_element),
-        )
-        .chain(
-            self.render_hidden_menu(cx)
-                .map(IntoElement::into_any_element),
-        )
-        .chain([
-            self.render_skill_button(false, cx).into_any_element(),
-            Button::new("overview-reset")
-                .ghost()
-                .small()
-                .icon(icon("layout-dashboard"))
-                .label(tr!("overview-reset"))
-                .tooltip(tr!("overview-reset-hint"))
-                .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx)))
-                .into_any_element(),
-        ])
-        .collect()
-    }
-
-    /// Which worktrees of the projects on show the plane shows, beside the
-    /// project picker: all of them by default, or the ones ticked — per
-    /// project, one where nothing is ticked showing all of its own. Only
-    /// when there is a choice to make.
-    fn render_overview_worktree_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let repos = self.overview_repos();
-        let headed = repos.len() > 1;
-        let app = cx.entity().downgrade();
-        let mut rows: Vec<Pick> = Vec::new();
-        let (mut choices, mut shown_count, mut filtered) = (0, 0, false);
-        let mut only: Option<SharedString> = None;
-        for repo in &repos {
-            let shown = self.overview_worktrees_of(repo);
-            let live = repo.worktrees.iter().filter(|worktree| !worktree.prunable);
-            if headed {
-                rows.push(Pick::Heading(SharedString::from(repo.name.clone())));
-            }
-            for worktree in live {
-                let label = worktree.label();
-                let name = SharedString::from(match worktree.branch.as_deref() {
-                    Some(branch) if branch != label => format!("{label} · {branch}"),
-                    _ => label,
-                });
-                let ticked = shown.contains(&worktree.path);
-                choices += 1;
-                if ticked {
-                    shown_count += 1;
-                    only = Some(name.clone());
-                } else {
-                    filtered = true;
-                }
-                let (app, main, path) = (app.clone(), repo.main.clone(), worktree.path.clone());
-                rows.push(Pick::Item {
-                    name,
-                    ticked,
-                    press: Rc::new(move |cx: &mut App| {
-                        if let Some(app) = app.upgrade() {
-                            app.update(cx, |this, cx| this.press_worktree(&main, &path, cx));
-                        }
-                    }),
-                });
-            }
-        }
-        if choices < 2 {
-            return None;
-        }
-        let label = match (filtered, shown_count) {
-            (false, _) => tr!("overview-all-worktrees"),
-            (true, 1) => only.unwrap_or_default(),
-            (true, count) => tr!("overview-n-worktrees", { count: count }),
-        };
-        let all = Pick::Item {
-            name: tr!("overview-all-worktrees"),
-            ticked: !filtered,
-            press: Rc::new(move |cx: &mut App| {
-                if let Some(app) = app.upgrade() {
-                    app.update(cx, |this, cx| this.show_all_worktrees(cx));
-                }
-            }),
-        };
-        Some(pick_list(
-            "overview-worktree",
-            "git-branch",
-            label,
-            tr!("overview-worktree-hint"),
-            all,
-            rows,
-        ))
-    }
-
-    /// « All projects » pressed: every project, or — pressed again — back to
-    /// the active worktree's alone.
-    fn press_all_projects(&mut self, cx: &mut Context<Self>) {
-        self.overview_all = !self.overview_all;
-        self.overview_projects.clear();
-        self.reframe(cx);
-        self.ask_skill_status();
-    }
-
-    /// A project pressed: on the plane if it was not, off if it was — never
-    /// the last one. Ticking every one is « all projects ».
-    fn press_project(&mut self, main: &Path, cx: &mut Context<Self>) {
-        let shown: Vec<PathBuf> = self
-            .overview_repos()
-            .iter()
-            .map(|repo| repo.main.clone())
-            .collect();
-        let Some(ticked) = overview::toggle(&shown, main) else {
-            return;
-        };
-        self.overview_all = ticked.len() == self.repos.iter().count();
-        self.overview_projects = if self.overview_all {
-            Vec::new()
-        } else {
-            ticked
-        };
-        self.reframe(cx);
-        self.ask_skill_status();
-    }
-
-    /// A worktree pressed: on the plane if it was not, off if it was —
-    /// never its project's last one. Ticking all of a project's is the same
-    /// as ticking none, and is kept as none: a worktree created afterwards
-    /// then comes on the plane.
-    fn press_worktree(&mut self, main: &Path, path: &Path, cx: &mut Context<Self>) {
-        let Some(repo) = self.repos.iter().find(|repo| repo.main == main) else {
-            return;
-        };
-        let live: Vec<PathBuf> = repo
-            .worktrees
-            .iter()
-            .filter(|worktree| !worktree.prunable)
-            .map(|worktree| worktree.path.clone())
-            .collect();
-        let shown = overview::shown_of(&self.overview_worktrees, &live);
-        let Some(ticked) = overview::toggle(&shown, path) else {
-            return;
-        };
-        self.overview_worktrees
-            .retain(|picked| !live.contains(picked));
-        if ticked.len() < live.len() {
-            self.overview_worktrees.extend(ticked);
-        }
-        self.reframe(cx);
-    }
-
-    /// Every worktree of the projects on show.
-    fn show_all_worktrees(&mut self, cx: &mut Context<Self>) {
-        self.overview_worktrees.clear();
-        self.reframe(cx);
-    }
-
     /// Switches the home screen to another of its views, and remembers
     /// which.
-    fn set_home_mode(&mut self, mode: HomeMode, cx: &mut Context<Self>) {
+    pub(super) fn set_home_mode(&mut self, mode: HomeMode, cx: &mut Context<Self>) {
         if self.home_mode == mode {
             return;
         }
@@ -1684,6 +1413,24 @@ impl ClaudhubApp {
             .map(|card| (card.path.as_path(), self.worktree_doing(&card.path, &cards)))
             .collect();
         overview::at_work(&tiles, &worktrees)
+    }
+
+    /// The frames what moves on screen needs: thirty a second while
+    /// something flows, fifteen while it only breathes, none at rest.
+    fn ask_flow_frames(
+        &mut self,
+        moving: impl Iterator<Item = overview::Doing>,
+        cx: &mut Context<Self>,
+    ) {
+        let loudest = moving.fold(None, |frame, doing| match doing {
+            overview::Doing::Working => Some(FLOW_FRAME),
+            overview::Doing::Waiting => frame.or(Some(PULSE_FRAME)),
+            overview::Doing::Rest => frame,
+        });
+        self.overview_flow_frame = loudest;
+        if loudest.is_some() {
+            self.tick_flow(cx);
+        }
     }
 
     /// Asks for the frames a link moves by, for as long as one moves and the
@@ -2110,88 +1857,6 @@ fn height_grip(node: Node, cx: &Context<ClaudhubApp>) -> gpui_kit::Stateful<gpui
                     this.overview_drag = Some(Drag::Height(node, event.position));
                 });
             }
-        })
-}
-
-/// A row of a ticked list.
-enum Pick {
-    /// A project's name over its worktrees, when several are on show.
-    Heading(SharedString),
-    Item {
-        name: SharedString,
-        ticked: bool,
-        press: Rc<dyn Fn(&mut App)>,
-    },
-}
-
-/// A button opening a list of boxes to tick, the « all » one first.
-///
-/// A popover and not a menu: a menu closes on every press, and ticking three
-/// projects would take three openings. Its content is built again on every
-/// frame from what the application says, so a press reads back at once.
-fn pick_list(
-    id: &'static str,
-    glyph: &'static str,
-    label: SharedString,
-    hint: SharedString,
-    all: Pick,
-    rows: Vec<Pick>,
-) -> impl IntoElement {
-    let rows = Rc::new(rows);
-    let all = Rc::new(all);
-    Popover::new(id)
-        .anchor(gpui_kit::Anchor::TopRight)
-        .trigger(
-            Button::new(SharedString::from(format!("{id}-trigger")))
-                .ghost()
-                .small()
-                .icon(icon(glyph))
-                .label(label)
-                .tooltip(hint),
-        )
-        .content(move |_, _, cx| {
-            let row = |index: usize, pick: &Pick, cx: &App| match pick {
-                Pick::Heading(name) => div()
-                    .pt_1()
-                    .px_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(name.clone())
-                    .into_any_element(),
-                Pick::Item {
-                    name,
-                    ticked,
-                    press,
-                } => {
-                    let press = press.clone();
-                    div()
-                        .px_1()
-                        .py_0p5()
-                        .child(
-                            Checkbox::new(SharedString::from(format!("{id}-{index}")))
-                                .label(name.clone())
-                                .checked(*ticked)
-                                .on_click(move |_, _, cx| press(cx)),
-                        )
-                        .into_any_element()
-                }
-            };
-            v_flex()
-                .id(SharedString::from(format!("{id}-list")))
-                .min_w(px(220.))
-                .max_w(px(420.))
-                .max_h(px(420.))
-                .overflow_y_scroll()
-                .p_1()
-                .gap_0p5()
-                .text_sm()
-                .child(row(usize::MAX, &all, cx))
-                .child(div().my_0p5().h(px(1.)).bg(cx.theme().border))
-                .children(
-                    rows.iter()
-                        .enumerate()
-                        .map(|(index, pick)| row(index, pick, cx)),
-                )
         })
 }
 
@@ -3563,7 +3228,12 @@ impl ClaudhubApp {
 
     /// « Hidden (n) »: what was taken off the plane, one entry each to bring
     /// it back, and all of it at once. Absent while nothing is hidden.
-    pub(super) fn render_hidden_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// `compact`, its glyph alone — on the sidebar's rail.
+    pub(super) fn render_hidden_menu(
+        &self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let hidden = self.hidden_nodes(cx);
         if hidden.is_empty() {
             return None;
@@ -3575,7 +3245,14 @@ impl ClaudhubApp {
                 .ghost()
                 .small()
                 .icon(icon("eye-off"))
-                .label(tr!("overview-hidden", { count: count }))
+                .map(|button| {
+                    let label = tr!("overview-hidden", { count: count });
+                    if compact {
+                        button.tooltip(label)
+                    } else {
+                        button.label(label)
+                    }
+                })
                 .dropdown_menu(move |menu, _, _| {
                     let every: Vec<Node> = hidden.iter().map(|(node, _)| node.clone()).collect();
                     let all = app.clone();

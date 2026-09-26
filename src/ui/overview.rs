@@ -870,21 +870,6 @@ pub struct AtWork {
     pub cards: HashMap<PathBuf, Doing>,
 }
 
-impl AtWork {
-    pub fn is_empty(&self) -> bool {
-        self.terminals.is_empty() && self.cards.is_empty()
-    }
-
-    /// Something flows, and not only pulses: the frames it needs are
-    /// closer together.
-    pub fn flows(&self) -> bool {
-        self.terminals
-            .values()
-            .chain(self.cards.values())
-            .any(|doing| *doing == Doing::Working)
-    }
-}
-
 /// Which links move, and how, from what the agents say.
 ///
 /// A terminal's own agent decides when it speaks; the worktree's state —
@@ -925,37 +910,6 @@ pub fn at_work(tiles: &[AgentTile], worktrees: &HashMap<&Path, Doing>) -> AtWork
         .map(|(worktree, doing)| (worktree.to_path_buf(), *doing))
         .collect();
     AtWork { terminals, cards }
-}
-
-/// What a multiple choice shows, where nothing picked means everything:
-/// the `choices` picked, in their order — or all of them, when none of the
-/// picks is still among them. A pick gone from the choices, a worktree
-/// removed, does not leave a plane showing nothing.
-pub fn shown_of(picked: &[PathBuf], choices: &[PathBuf]) -> Vec<PathBuf> {
-    let shown: Vec<PathBuf> = choices
-        .iter()
-        .filter(|choice| picked.contains(choice))
-        .cloned()
-        .collect();
-    if shown.is_empty() {
-        choices.to_vec()
-    } else {
-        shown
-    }
-}
-
-/// Pressing one entry of a multiple choice, against what is `shown`: in if
-/// it was out, out if it was in — and `None` for the last one in, a plane
-/// showing nothing being no choice at all.
-pub fn toggle(shown: &[PathBuf], item: &Path) -> Option<Vec<PathBuf>> {
-    if shown.iter().any(|path| path == item) {
-        let rest: Vec<PathBuf> = shown.iter().filter(|path| *path != item).cloned().collect();
-        (!rest.is_empty()).then_some(rest)
-    } else {
-        let mut more = shown.to_vec();
-        more.push(item.to_path_buf());
-        Some(more)
-    }
 }
 
 /// The length of a rounded rectangle's outline, its corners quarter
@@ -1966,7 +1920,10 @@ mod tests {
             HashMap::from([(1, Doing::Working), (3, Doing::Waiting)])
         );
         assert!(found.cards.is_empty());
-        assert!(found.flows());
+        assert!(found
+            .terminals
+            .values()
+            .any(|doing| *doing == Doing::Working));
     }
 
     #[test]
@@ -1982,7 +1939,10 @@ mod tests {
         let found = at_work(&tiles, &worktrees);
         assert_eq!(found.terminals, HashMap::from([(1, Doing::Waiting)]));
         // Only a pulse: frames can be further apart.
-        assert!(!found.flows());
+        assert!(!found
+            .terminals
+            .values()
+            .any(|doing| *doing == Doing::Working));
         // A named terminal already accounts for the worktree: the unnamed one
         // beside it is not lit by the same state twice.
         let tiles = [
@@ -2012,7 +1972,7 @@ mod tests {
         // its link, not the card's in its place.
         let worktrees = doing(&[("/a", Doing::Working)]);
         let found = at_work(&[tile(1, "/a", true, Some(Doing::Rest))], &worktrees);
-        assert!(found.is_empty());
+        assert_eq!(found, AtWork::default());
     }
 
     #[test]
@@ -2083,34 +2043,6 @@ mod tests {
         assert!(lit[0].1 <= 0.01);
         assert_eq!(lit[1], (5., 8.));
         assert!(dash_array(&[]).is_empty());
-    }
-
-    fn paths(names: &[&str]) -> Vec<PathBuf> {
-        names.iter().map(PathBuf::from).collect()
-    }
-
-    #[test]
-    fn nothing_picked_shows_every_choice() {
-        let choices = paths(&["/a", "/b", "/c"]);
-        assert_eq!(shown_of(&[], &choices), choices);
-        // In the choices' order, not the picks'.
-        assert_eq!(
-            shown_of(&paths(&["/c", "/a"]), &choices),
-            paths(&["/a", "/c"])
-        );
-        // A pick gone from the choices is not a plane showing nothing.
-        assert_eq!(shown_of(&paths(&["/gone"]), &choices), choices);
-    }
-
-    #[test]
-    fn pressing_an_entry_turns_it_in_or_out_but_never_the_last() {
-        let shown = paths(&["/a", "/b"]);
-        assert_eq!(toggle(&shown, Path::new("/b")), Some(paths(&["/a"])));
-        assert_eq!(
-            toggle(&shown, Path::new("/c")),
-            Some(paths(&["/a", "/b", "/c"]))
-        );
-        assert_eq!(toggle(&paths(&["/a"]), Path::new("/a")), None);
     }
 
     #[test]

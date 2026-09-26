@@ -1116,14 +1116,12 @@ pub struct ClaudhubApp {
     /// True once the places remembered in the store have been read into
     /// `overview_moved`.
     pub(super) overview_loaded: bool,
-    /// Every project on the plane at once, rather than one.
-    pub(super) overview_all: bool,
-    /// The projects ticked in the corner, by main path; none follows the
-    /// active worktree's.
-    pub(super) overview_projects: Vec<PathBuf>,
-    /// The worktrees ticked beside them. A project none of whose worktrees
-    /// is ticked shows them all — see `overview::shown_of`.
-    pub(super) overview_worktrees: Vec<PathBuf>,
+    /// The worktrees the plane was last framed on: another choice is
+    /// another plane to fit in view.
+    pub(super) overview_framed: Vec<PathBuf>,
+    /// A press on the home screen's bare head, which a move turns into
+    /// moving the window — the title bar's gesture, where there is none.
+    pub(super) home_window_drag: bool,
     /// Which view the home screen shows: the worktrees chosen, or the
     /// plane — see `overview::HomeMode`.
     pub(super) home_mode: crate::ui::overview::HomeMode,
@@ -1640,9 +1638,8 @@ impl ClaudhubApp {
             terminals_revived: std::collections::HashSet::new(),
             overview_reveal: None,
             overview_loaded: false,
-            overview_all: false,
-            overview_projects: Vec::new(),
-            overview_worktrees: Vec::new(),
+            overview_framed: Vec::new(),
+            home_window_drag: false,
             home_mode: crate::ui::store::Store::global(cx).session.home_mode,
             focus_boards: HashMap::new(),
             focus_chosen: crate::ui::store::Store::global(cx)
@@ -5025,7 +5022,11 @@ impl Render for ClaudhubApp {
             // on, not the surface of a card.
             .bg(super::theme::gutter(cx))
             .text_color(cx.theme().foreground)
-            .child(self.render_topbar(window, cx))
+            // The editor's title bar; the home screen has none, its sidebar
+            // carrying what it said — see `focus_view`.
+            .when(!self.overview, |el| {
+                el.child(self.render_topbar(window, cx))
+            })
             // The same breathing room the fork puts between the cards, around
             // them: without this padding, the zones touch the window's edges, the
             // top bar and the status bar, and the cards only breathe from the
@@ -5036,9 +5037,9 @@ impl Render for ClaudhubApp {
             // and the status bar each close with a border, so four pixels there
             // read as a margin, while the same four against the bare window edge
             // read as nothing at all. Equal numbers looked equal nowhere.
-            // The grid takes the place of everything below the title bar: the
-            // rails, the docks and the status bar. The title bar stays, and it
-            // has to — the button that came here is the way back.
+            // The home screen takes the place of everything, title bar
+            // included: the rails, the docks and the status bar. The way back
+            // is at the head of its sidebar.
             .map(|el| {
                 if self.overview {
                     el.child(self.render_overview(window, cx))

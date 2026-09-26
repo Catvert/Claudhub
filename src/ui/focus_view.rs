@@ -47,7 +47,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::DropdownMenu as _,
-    v_flex, ActiveTheme, Sizable as _,
+    v_flex, ActiveTheme, Selectable as _, Sizable as _,
 };
 use gpui_kit::{
     anchored, canvas, deferred, div, point, prelude::*, px, Animation, AnimationExt as _,
@@ -59,13 +59,13 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
 use crate::ui::focus::{self, Board, ColumnSpan, Target};
 use crate::ui::icons::icon;
-use crate::ui::overview::{self, Doing, Node};
+use crate::ui::overview::{self, Doing, HomeMode, Node};
 use crate::ui::overview_view::live_worktrees;
 
 /// The sidebar's width.
 const SIDEBAR_WIDTH: f32 = 260.;
 /// What each worktree's agents say, the ones at rest left out.
-type Doings = std::collections::HashMap<PathBuf, Doing>;
+pub(super) type Doings = std::collections::HashMap<PathBuf, Doing>;
 /// The sidebar folded to its rail: a column of initials.
 const RAIL_WIDTH: f32 = 52.;
 /// The button right of the last column.
@@ -128,14 +128,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shown = self.focus_worktrees();
-        // What every worktree's Claudes say, loudest first: the sidebar
-        // dresses each row as the boards dress a terminal.
-        let among: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
-        let doings: Doings = among
-            .iter()
-            .map(|path| (path.clone(), self.worktree_doing(path, &among)))
-            .filter(|(_, doing)| *doing != Doing::Rest)
-            .collect();
+        let doings = self.sidebar_doings();
         let at_work = self.prepare_laid_out(&shown, &doings, cx);
         let gap = window.rem_size() * 0.75;
         let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
@@ -163,6 +156,10 @@ impl ClaudhubApp {
                 // of what the home screen reads.
                 self.ensure_changes_read(&shown, cx);
                 let alone = shown.len() == 1;
+                // The window's buttons sit over the top-right corner: the last
+                // board's title leaves them their width.
+                let corner = Self::draws_window_buttons(window)
+                    .then(|| px(super::topbar::WINDOW_BUTTON_WIDTH * 3.));
                 let mut boards: Vec<AnyElement> = Vec::new();
                 for (index, path) in shown.iter().enumerate() {
                     // Between two boards, a line: side by side, one's last
@@ -177,7 +174,10 @@ impl ClaudhubApp {
                                 .into_any_element(),
                         );
                     }
-                    boards.push(self.render_focus_board(path, gap, alone, &at_work, window, cx));
+                    let reserve = corner.filter(|_| index + 1 == shown.len());
+                    boards.push(
+                        self.render_focus_board(path, gap, alone, reserve, &at_work, window, cx),
+                    );
                 }
                 // The row scrolls sideways, never a board alone: each takes
                 // its share of the width, and never less than its columns'.
@@ -197,8 +197,10 @@ impl ClaudhubApp {
             }
         };
         let dragging = self.focus_drag.as_ref().is_some_and(|drag| drag.moving);
+        let buttons = self.render_window_buttons(window, cx);
         h_flex()
             .id("overview")
+            .relative()
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -222,7 +224,19 @@ impl ClaudhubApp {
             }))
             .child(sidebar)
             .child(div().flex_1().min_w_0().h_full().child(main))
+            .children(buttons)
             .into_any_element()
+    }
+
+    /// What every worktree's Claudes say, loudest first: the sidebar
+    /// dresses each row as the boards dress a terminal.
+    pub(super) fn sidebar_doings(&self) -> Doings {
+        let among: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
+        among
+            .iter()
+            .map(|path| (path.clone(), self.worktree_doing(path, &among)))
+            .filter(|(_, doing)| *doing != Doing::Rest)
+            .collect()
     }
 
     /// The worktrees the middle shows, side by side — see
@@ -298,7 +312,7 @@ impl ClaudhubApp {
     /// pickers are the plane's: here, the list is the choice. A project
     /// folds to its name, keeping in sight only what of it is on show.
     /// Folded, a rail.
-    fn render_focus_sidebar(
+    pub(super) fn render_focus_sidebar(
         &self,
         shown: &[PathBuf],
         doings: &Doings,
@@ -323,7 +337,7 @@ impl ClaudhubApp {
                         .filter_map(|path| doings.get(path).copied()),
                 )
             });
-            let fold = main.clone();
+            let (fold, pick) = (main.clone(), main.clone());
             rows.push(
                 h_flex()
                     .w_full()
@@ -333,6 +347,23 @@ impl ClaudhubApp {
                     .pb_1()
                     .gap_1()
                     .items_center()
+                    // The chevron folds; the name shows the whole project.
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "focus-project-fold-{}",
+                            main.display()
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon(if folded {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_focus_project(&fold, cx);
+                        })),
+                    )
                     .child(
                         h_flex()
                             .id(SharedString::from(format!(
@@ -342,23 +373,23 @@ impl ClaudhubApp {
                             .relative()
                             .flex_1()
                             .min_w_0()
+                            .px_1()
                             .gap_1()
                             .items_center()
                             .rounded(theme.radius)
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.list_hover))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_focus_project(&fold, cx);
-                            }))
-                            .child(
-                                icon(if folded {
-                                    "chevron-right"
-                                } else {
-                                    "chevron-down"
-                                })
-                                .xsmall()
-                                .text_color(theme.muted_foreground),
-                            )
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tr!(
+                                    "focus-project-hint"
+                                ))
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(
+                                move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                                    this.focus_project_clicked(&pick, event, window, cx);
+                                },
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -410,26 +441,20 @@ impl ClaudhubApp {
             .pb_2()
             .overflow_y_scroll()
             .children(rows);
-        // What `Ctrl` does is said where it is done, and the fold beside
-        // it: the one gesture of the list nothing on it would show.
-        let head = h_flex()
+        // The home screen has no title bar: what it said is here. First the
+        // menu and the screens — the way back to the editor — the bare rest
+        // of the line moving the window, as the title bar's middle did.
+        let screens = h_flex()
             .flex_none()
             .w_full()
-            .pl_2()
+            .h(super::theme::toolbar_height(cx))
+            .pl_1()
             .pr_1()
-            .pt_1()
             .gap_1()
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(tr!("focus-sidebar-hint")),
-            )
-            .child(self.open_repo_button(cx))
+            .child(self.render_main_menu(cx))
+            .child(self.render_screen_switch(cx))
+            .child(self.window_drag_region("home-drag", cx).flex_1().h_full())
             .child(
                 Button::new("focus-rail-fold")
                     .ghost()
@@ -438,8 +463,41 @@ impl ClaudhubApp {
                     .tooltip(tr!("focus-sidebar-fold"))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
             );
+        // Then the two ways to look at the worktrees chosen here, and what
+        // either hid.
+        let views = h_flex()
+            .flex_none()
+            .w_full()
+            .px_1()
+            .gap_1()
+            .items_center()
+            .child(self.home_mode_button(HomeMode::Focus, false, cx))
+            .child(self.home_mode_button(HomeMode::Canvas, false, cx))
+            .child(div().flex_1())
+            .children(self.render_hidden_menu(false, cx));
+        // What `Ctrl` does is said where it is done: the one gesture of the
+        // list nothing on it would show.
+        let hint = div()
+            .flex_none()
+            .w_full()
+            .px_2()
+            .pt_1()
+            .truncate()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(tr!("focus-sidebar-hint"));
+        let head = v_flex()
+            .flex_none()
+            .w_full()
+            .pb_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(screens)
+            .child(views)
+            .child(hint);
         // What speaks for the whole screen and not a worktree, at the foot:
-        // the skill, and putting the boards back as the rules lay them.
+        // the skill, another repository, putting the worktrees on show back
+        // as the rules lay them, and the settings.
         let foot = h_flex()
             .flex_none()
             .w_full()
@@ -450,15 +508,9 @@ impl ClaudhubApp {
             .border_color(theme.border)
             .child(self.render_skill_button(false, cx))
             .child(div().flex_1())
-            .child(
-                Button::new("focus-reset")
-                    .ghost()
-                    .small()
-                    .icon(icon("layout-dashboard"))
-                    .label(tr!("overview-reset"))
-                    .tooltip(tr!("focus-reset-hint"))
-                    .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx))),
-            );
+            .child(self.open_repo_button(cx))
+            .child(self.reset_button(cx))
+            .child(settings_button(cx));
         v_flex()
             .flex_none()
             .w(px(SIDEBAR_WIDTH))
@@ -490,6 +542,80 @@ impl ClaudhubApp {
             }))
     }
 
+    /// One of the home screen's two views, as a tab: lit when it is the one
+    /// shown. `compact`, its glyph alone — on the rail.
+    fn home_mode_button(&self, mode: HomeMode, compact: bool, cx: &mut Context<Self>) -> Button {
+        let (id, glyph, label) = match mode {
+            HomeMode::Focus => ("home-mode-focus", "columns-2", tr!("overview-mode-focus")),
+            HomeMode::Canvas => ("home-mode-canvas", "grid-3x3", tr!("overview-mode-canvas")),
+        };
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon(icon(glyph))
+            .map(|button| {
+                if compact {
+                    button.tooltip(label)
+                } else {
+                    button.label(label).tooltip(tr!("overview-mode-hint"))
+                }
+            })
+            .selected(self.home_mode == mode)
+            .on_click(cx.listener(move |this, _, _, cx| this.set_home_mode(mode, cx)))
+    }
+
+    /// Puts the worktrees on show back as the rules lay them — see
+    /// `reset_overview`.
+    fn reset_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("home-reset")
+            .ghost()
+            .small()
+            .icon(icon("layout-dashboard"))
+            .tooltip(match self.home_mode {
+                HomeMode::Focus => tr!("focus-reset-hint"),
+                HomeMode::Canvas => tr!("overview-reset-hint"),
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx)))
+    }
+
+    /// A project's name pressed: all its worktrees on show — with `Ctrl`,
+    /// beside the ones already there. The window's own stays if it is among
+    /// them, else the first of them becomes it.
+    fn focus_project_clicked(
+        &mut self,
+        main: &Path,
+        event: &gpui_kit::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.repos.iter().find(|repo| repo.main == main) else {
+            return;
+        };
+        let worktrees = live_worktrees(repo);
+        let mut chosen = if event.modifiers().secondary() {
+            self.focus_worktrees()
+        } else {
+            Vec::new()
+        };
+        for path in &worktrees {
+            if !chosen.contains(path) {
+                chosen.push(path.clone());
+            }
+        }
+        self.overview_zoomed = None;
+        let keeps = self
+            .active
+            .as_deref()
+            .is_some_and(|active| chosen.iter().any(|path| path == active));
+        let first = worktrees.first().cloned();
+        self.choose_focus(chosen, cx);
+        if let (false, Some(first)) = (keeps, first) {
+            self.select_worktree(first, window, cx);
+        }
+        self.ask_skill_status();
+        cx.notify();
+    }
+
     /// Folds a project of the sidebar to its name, or unfolds it.
     fn toggle_focus_project(&mut self, main: &Path, cx: &mut Context<Self>) {
         if let Some(at) = self.focus_folded.iter().position(|folded| folded == main) {
@@ -507,7 +633,7 @@ impl ClaudhubApp {
     /// projects — every worktree, a project's fold being the list's. The
     /// same clicks as the list's, and each worktree's name in its tooltip;
     /// the foot's buttons, their glyphs alone.
-    fn render_focus_rail(
+    pub(super) fn render_focus_rail(
         &self,
         shown: &[PathBuf],
         doings: &Doings,
@@ -550,14 +676,8 @@ impl ClaudhubApp {
             .border_color(theme.border)
             .child(self.open_repo_button(cx))
             .child(self.render_skill_button(true, cx))
-            .child(
-                Button::new("focus-reset")
-                    .ghost()
-                    .small()
-                    .icon(icon("layout-dashboard"))
-                    .tooltip(tr!("focus-reset-hint"))
-                    .on_click(cx.listener(|this, _, _, cx| this.reset_overview(cx))),
-            );
+            .child(self.reset_button(cx))
+            .child(settings_button(cx));
         v_flex()
             .flex_none()
             .w(px(RAIL_WIDTH))
@@ -569,14 +689,40 @@ impl ClaudhubApp {
             .border_color(theme.border)
             .bg(theme.background)
             .child(
-                div().flex_none().pt_1().child(
-                    Button::new("focus-rail-unfold")
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("panel-left-open"))
-                        .tooltip(tr!("focus-sidebar-unfold"))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
-                ),
+                // The list's head, one above the other: the menu, the way to
+                // the editor, the two views, what they hid, and the unfold —
+                // the bare line above them moving the window.
+                v_flex()
+                    .flex_none()
+                    .w_full()
+                    .items_center()
+                    .gap_1()
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(self.window_drag_region("home-drag", cx).w_full().h(px(10.)))
+                    .child(self.render_main_menu(cx))
+                    .child(
+                        Button::new("rail-editor")
+                            .ghost()
+                            .small()
+                            .icon(icon("file-code"))
+                            .tooltip(tr!("editor-toggle"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_overview(window, cx);
+                            })),
+                    )
+                    .child(self.home_mode_button(HomeMode::Focus, true, cx))
+                    .child(self.home_mode_button(HomeMode::Canvas, true, cx))
+                    .children(self.render_hidden_menu(true, cx))
+                    .child(
+                        Button::new("focus-rail-unfold")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("panel-left-open"))
+                            .tooltip(tr!("focus-sidebar-unfold"))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_focus_rail(cx))),
+                    ),
             )
             .child(div().flex_1().min_h_0().w_full().child(list))
             .child(foot)
@@ -860,11 +1006,13 @@ impl ClaudhubApp {
     /// — each at the width the hand gave it or the least the settings give,
     /// the gaps and the button after the last: the row of boards scrolls,
     /// never a board alone.
+    #[allow(clippy::too_many_arguments)]
     fn render_focus_board(
         &mut self,
         path: &Path,
         gap: Pixels,
         alone: bool,
+        reserve: Option<Pixels>,
         at_work: &overview::AtWork,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -982,6 +1130,7 @@ impl ClaudhubApp {
                     .flex_none()
                     .items_center()
                     .gap_2()
+                    .when_some(reserve, |el, width| el.pr(width))
                     .child(
                         div()
                             .flex_1()
@@ -1722,4 +1871,15 @@ fn outline_of(doing: Option<&Doing>, theme: &gpui_kit::component::Theme) -> Opti
         .copied()
         .filter(|doing| *doing != Doing::Rest)
         .map(|doing| super::overview_view::tile_outline(doing, false, 1., theme))
+}
+
+/// The settings, at the foot of the home screen's sidebar: the gear the
+/// editor's title bar carries at its far right.
+fn settings_button(cx: &mut Context<ClaudhubApp>) -> Button {
+    Button::new("home-settings")
+        .ghost()
+        .small()
+        .icon(icon("settings"))
+        .tooltip(tr!("workspace-settings"))
+        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
 }
