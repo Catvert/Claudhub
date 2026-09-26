@@ -958,6 +958,8 @@
   "focus-drop-stays": "Stays where it is",
   "focus-drop-column": "Column %{n}",
   "focus-drag-hint": "Drag a card by its head to move it to another column",
+  "focus-column-back": "Previous column",
+  "focus-column-forward": "Next column",
   "focus-edit": "Edit",
   "focus-reset-hint": "Put the cards of the boards on show back in place, and every node at its size",
   "focus-project-hint": "Show all its worktrees — Ctrl+click: beside",

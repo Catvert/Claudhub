@@ -1158,6 +1158,9 @@ pub struct ClaudhubApp {
     pub(super) focus_landed: Option<(crate::ui::overview::Node, usize)>,
     /// The boards' row scroll, sideways, and each board's columns'.
     pub(super) focus_scroll: gpui_kit::ScrollHandle,
+    /// Where the boards stood at the last paint, for the header over them.
+    pub(super) focus_laid_out:
+        std::rc::Rc<std::cell::RefCell<crate::ui::focus_view::BoardsLaidOut>>,
     pub(super) focus_column_scrolls: HashMap<PathBuf, Vec<gpui_kit::ScrollHandle>>,
     /// The focus view's sidebar scroll.
     pub(super) focus_sidebar_scroll: gpui_kit::ScrollHandle,
@@ -1659,6 +1662,7 @@ impl ClaudhubApp {
             focus_resize: None,
             focus_landed: None,
             focus_scroll: gpui_kit::ScrollHandle::new(),
+            focus_laid_out: Default::default(),
             focus_column_scrolls: HashMap::new(),
             focus_sidebar_scroll: gpui_kit::ScrollHandle::new(),
             overview_zoomed: None,

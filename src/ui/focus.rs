@@ -476,9 +476,79 @@ pub fn initials(label: &str) -> String {
     letters.to_uppercase()
 }
 
+/// Where the arrows over the boards take the row: the left edge of the
+/// next column past the one at the view's edge, or of the one before it —
+/// `lefts` in the row's own coordinates, `at` how far it is scrolled, `max`
+/// how far it can be. Past the last column's start, the end; before the
+/// first, the start.
+pub fn next_stop(lefts: &[f32], at: f32, max: f32, forward: bool) -> f32 {
+    // A pixel either way is the same place: a column the view already
+    // starts at is not the next one.
+    let target = if forward {
+        lefts
+            .iter()
+            .copied()
+            .filter(|left| *left > at + 1.)
+            .fold(None, |nearest: Option<f32>, left| {
+                Some(nearest.map_or(left, |nearest| nearest.min(left)))
+            })
+            .unwrap_or(max)
+    } else {
+        lefts
+            .iter()
+            .copied()
+            .filter(|left| *left < at - 1.)
+            .fold(None, |nearest: Option<f32>, left| {
+                Some(nearest.map_or(left, |nearest| nearest.max(left)))
+            })
+            .unwrap_or(0.)
+    };
+    target.clamp(0., max.max(0.))
+}
+
+/// Where a board's title stands in the header over the row: the part of
+/// the board in view, `board` its edges in the row, `at` how far the row is
+/// scrolled, `room` how much of the header titles may take. `None` when too
+/// little of it shows to say anything — a title stays in view as long as
+/// its board does, and gives way to the next one's.
+pub fn header_span(board: (f32, f32), at: f32, room: f32) -> Option<(f32, f32)> {
+    const LEAST: f32 = 48.;
+    let left = (board.0 - at).max(0.);
+    let right = (board.1 - at).min(room);
+    (right - left >= LEAST).then_some((left, right))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_arrows_go_from_column_to_column() {
+        let lefts = [0., 300., 600., 900.];
+        // Forward from the start: the second column; from within one, the
+        // next one's start.
+        assert_eq!(next_stop(&lefts, 0., 1000., true), 300.);
+        assert_eq!(next_stop(&lefts, 450., 1000., true), 600.);
+        // Back from within one: its own start; from a start, the one before.
+        assert_eq!(next_stop(&lefts, 450., 1000., false), 300.);
+        assert_eq!(next_stop(&lefts, 600., 1000., false), 300.);
+        // Past the last one, the end; never beyond what scrolls.
+        assert_eq!(next_stop(&lefts, 900., 1000., true), 1000.);
+        assert_eq!(next_stop(&lefts, 600., 700., true), 700.);
+        assert_eq!(next_stop(&lefts, 0., 1000., false), 0.);
+    }
+
+    #[test]
+    fn a_title_stays_in_view_as_long_as_its_board() {
+        // In view, where the board is.
+        assert_eq!(header_span((0., 800.), 0., 1200.), Some((0., 800.)));
+        // Scrolled past its start, held at the left edge.
+        assert_eq!(header_span((0., 800.), 300., 1200.), Some((0., 500.)));
+        // Cut at the room the arrows leave.
+        assert_eq!(header_span((900., 2000.), 0., 1200.), Some((900., 1200.)));
+        // Almost gone: it gives way.
+        assert_eq!(header_span((0., 800.), 780., 1200.), None);
+    }
 
     fn card() -> Node {
         Node::Worktree(PathBuf::from("/r"))

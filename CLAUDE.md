@@ -635,8 +635,8 @@ worktree.
   dépôt, « Réinitialiser » et les réglages. Les boutons de la fenêtre ne sont
   peints que là où c'est à nous de le faire — Windows, un Linux qui demande
   des décorations client (`draws_window_buttons`) —, dans le coin en haut à
-  droite, par des `WindowControlArea` que Windows lit lui-même ; le titre du
-  dernier tableau leur laisse la place. Rien de ce qui parle d'un checkout
+  droite, par des `WindowControlArea` que Windows lit lui-même ; l'en-tête
+  des tableaux leur laisse la place. Rien de ce qui parle d'un checkout
   n'y est : chaque carte porte les siens (`render_card_actions`). **Le
   sélecteur de branches reste une seule surface** : il parle du checkout
   regardé, donc l'ouvrir depuis une carte la sélectionne d'abord
@@ -653,8 +653,14 @@ worktree.
   sélecteurs à cases dans la barre de titre, pour le plan seul : deux façons
   de choisir la même chose. **Par défaut le focus** (`ui::focus_view`) :
   chaque worktree choisi sur son **tableau** (`ui::focus`). « Réinitialiser »
-  y rend aussi aux tableaux montrés la disposition par règle. Le titre
-  d'un tableau porte « Éditer », le double clic de sa carte. Un clic montre un worktree seul et le rend regardé
+  y rend aussi aux tableaux montrés la disposition par règle. **Les titres
+  ne défilent pas avec la rangée** (`render_focus_header`) : chacun est tenu
+  à gauche de la part visible de son tableau (`focus::header_span`), mesurée
+  dans les coordonnées de la rangée — que le défilement ne change pas — et
+  relue au défilement de la frame, sans quoi il traînait d'une image ; il
+  porte « Éditer », le double clic de sa carte. À droite, deux flèches font
+  glisser la rangée d'une colonne (`focus::next_stop`), par le lissage de la
+  molette. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
   retire, jamais le dernier ; choisir un worktree ailleurs dans la fenêtre le
   montre seul (`focus::shown_worktrees`). La sélection et la barre repliée en

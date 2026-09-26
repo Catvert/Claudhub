@@ -958,6 +958,8 @@
   "focus-drop-stays": "Reste à sa place",
   "focus-drop-column": "Colonne %{n}",
   "focus-drag-hint": "Glisser une carte par son en-tête pour la changer de colonne",
+  "focus-column-back": "Colonne précédente",
+  "focus-column-forward": "Colonne suivante",
   "focus-edit": "Éditer",
   "focus-reset-hint": "Remettre les cartes des tableaux affichés à leur place, et chaque nœud à sa taille",
   "focus-project-hint": "Montrer tous ses worktrees — Ctrl+clic : à côté",

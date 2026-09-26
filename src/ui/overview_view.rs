@@ -1629,12 +1629,25 @@ pub(super) fn tile_outline(
     zoom: f32,
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
-    let radius = f32::from(theme.radius_lg);
+    outline_rounded(doing, focused, zoom, theme.radius_lg, theme)
+}
+
+/// The same outline, round a box of another radius — a row of the
+/// sidebar, a pill of its rail.
+pub(super) fn outline_rounded(
+    doing: overview::Doing,
+    focused: bool,
+    zoom: f32,
+    radius: Pixels,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let rounded = radius;
+    let radius = f32::from(radius);
     if doing == overview::Doing::Rest {
         return div()
             .absolute()
             .inset_0()
-            .rounded(theme.radius_lg)
+            .rounded(rounded)
             .border_1()
             .border_color(if focused { theme.ring } else { theme.border })
             .into_any_element();
@@ -1766,7 +1779,6 @@ pub(super) fn column_title(
         .w_full()
         .min_w_0()
         .px_1()
-        .pb_2()
         .gap_2()
         .items_center()
         .child(icon(glyph).text_color(if lit {
