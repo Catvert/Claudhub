@@ -570,9 +570,45 @@ pub fn edge_run(height: f32, seconds: f32) -> Option<(f32, f32)> {
     (bottom > top).then_some((top, bottom))
 }
 
+/// How hard a card dragged near an edge of the boards' row pushes it to
+/// scroll: nothing in the middle, and in the fifth of the width at either
+/// edge a push that grows as the pointer nears the edge — negative to the
+/// left, positive to the right, `±1` at and past the edge. Squared, so that
+/// entering the band starts slowly and a column just at hand is not flown
+/// past.
+pub fn edge_push(x: f32, left: f32, width: f32) -> f32 {
+    if width <= 0. {
+        return 0.;
+    }
+    let band = (width * 0.2).clamp(32., 240.);
+    let right = left + width;
+    let depth = if x < left + band {
+        -((left + band - x) / band).min(1.)
+    } else if x > right - band {
+        ((x - (right - band)) / band).min(1.)
+    } else {
+        0.
+    };
+    depth * depth.abs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_card_near_an_edge_pushes_the_row_that_way() {
+        // A row 1000 wide from 100: bands of 200 at either end.
+        assert_eq!(edge_push(600., 100., 1000.), 0.);
+        assert_eq!(edge_push(300., 100., 1000.), 0.);
+        // Halfway into the left band: a quarter of the push, leftwards.
+        assert_eq!(edge_push(200., 100., 1000.), -0.25);
+        assert_eq!(edge_push(100., 100., 1000.), -1.);
+        // Past the right edge, the whole push.
+        assert_eq!(edge_push(1000., 100., 1000.), 0.25);
+        assert_eq!(edge_push(1200., 100., 1000.), 1.);
+        assert_eq!(edge_push(5., 0., 0.), 0.);
+    }
 
     #[test]
     fn the_run_goes_down_the_edge_and_leaves_it() {

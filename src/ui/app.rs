@@ -1158,6 +1158,8 @@ pub struct ClaudhubApp {
     pub(super) focus_landed: Option<(crate::ui::overview::Node, usize)>,
     /// The boards' row scroll, sideways, and each board's columns'.
     pub(super) focus_scroll: gpui_kit::ScrollHandle,
+    /// When the row last scrolled under a card held at its edge.
+    pub(super) focus_edge_scroll: Option<std::time::Instant>,
     /// Where the boards stood at the last paint, for the header over them.
     pub(super) focus_laid_out:
         std::rc::Rc<std::cell::RefCell<crate::ui::focus_view::BoardsLaidOut>>,
@@ -1662,6 +1664,7 @@ impl ClaudhubApp {
             focus_resize: None,
             focus_landed: None,
             focus_scroll: gpui_kit::ScrollHandle::new(),
+            focus_edge_scroll: None,
             focus_laid_out: Default::default(),
             focus_column_scrolls: HashMap::new(),
             focus_sidebar_scroll: gpui_kit::ScrollHandle::new(),

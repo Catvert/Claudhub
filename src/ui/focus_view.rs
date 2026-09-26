@@ -64,6 +64,10 @@ use crate::ui::motion::Axes;
 use crate::ui::overview::{self, Doing, HomeMode, Node};
 use crate::ui::overview_view::live_worktrees;
 
+/// How fast a card held at the very edge of the row scrolls it, in pixels
+/// a second: a board's width in well under a second.
+const EDGE_SCROLL_SPEED: f32 = 1400.;
+
 /// The boards' row's bar, and the key of its arrows' slide.
 const BOARD_BAR: &str = "focus-board-bar";
 
@@ -182,6 +186,7 @@ impl ClaudhubApp {
                 let scroll = self.focus_scroll.clone();
                 self.motion(BOARD_BAR.into(), Axes::Both)
                     .advance(&scroll, window);
+                self.scroll_under_drag(window);
                 let header = self.render_focus_header(&shown, window, cx);
                 let mut boards: Vec<AnyElement> = Vec::new();
                 for (index, path) in shown.iter().enumerate() {
@@ -1374,7 +1379,7 @@ impl ClaudhubApp {
         let count = shown.len();
         let list_gap = f32::from(window.rem_size() * 0.5);
         let (aim, room_height) = match &drag {
-            Some(drag) => self.focus_aim(drag, &shown, &geometry),
+            Some(drag) => self.focus_aim(drag, &shown, &geometry, self.board_span(path)),
             None => (None, 0.),
         };
         // The room's height is what it is painted at — it grows as it opens,
@@ -1500,10 +1505,13 @@ impl ClaudhubApp {
         drag: &FocusDrag,
         shown: &[(usize, Vec<(usize, Node)>)],
         geometry: &std::rc::Rc<std::cell::RefCell<focus::Geometry>>,
+        span: Option<(f32, f32)>,
     ) -> (Option<Target>, f32) {
         let geometry = geometry.borrow();
         let closed = geometry.closed();
-        let target = focus::drop_target(&closed, (f32::from(drag.at.x), f32::from(drag.at.y)));
+        let x = f32::from(drag.at.x);
+        let target =
+            focus::drop_target(&closed, (x, f32::from(drag.at.y))).filter(|_| on_span(span, x));
         let from = shown.iter().enumerate().find_map(|(column, (_, cards))| {
             cards
                 .iter()
@@ -1926,6 +1934,59 @@ impl ClaudhubApp {
         });
     }
 
+    /// A board's left and right edges in the window, as it stands at this
+    /// frame's scroll — see `BoardsLaidOut`.
+    fn board_span(&self, path: &Path) -> Option<(f32, f32)> {
+        let laid = self.focus_laid_out.borrow();
+        let edges = laid.boards.get(path)?;
+        let at = f32::from(self.focus_scroll.offset().x);
+        Some((laid.strip.0 + edges.0 + at, laid.strip.0 + edges.1 + at))
+    }
+
+    /// A card held near an edge of the boards' row scrolls the row that way
+    /// (`focus::edge_push`), frame after frame while it stays there: a
+    /// column out of view is reached by holding the card against the edge,
+    /// not by letting go and scrolling. The pointer does not move, the row
+    /// does — and the target, read on what each frame measured, with it.
+    fn scroll_under_drag(&mut self, window: &mut Window) {
+        let push = self
+            .focus_drag
+            .as_ref()
+            .filter(|drag| drag.moving)
+            .map(|drag| {
+                let (left, width) = self.focus_laid_out.borrow().strip;
+                let push = focus::edge_push(f32::from(drag.at.x), left, width);
+                // A card taken up near an edge does not set the row going:
+                // only going further towards the edge than where it was
+                // taken does.
+                let taken = focus::edge_push(f32::from(drag.from.x), left, width);
+                let further = push.signum() != taken.signum() || push.abs() > taken.abs();
+                if further {
+                    push
+                } else {
+                    0.
+                }
+            })
+            .unwrap_or(0.);
+        if push == 0. {
+            self.focus_edge_scroll = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        // The first frame in the band only starts the clock; a frame that
+        // came late does not throw the row across the screen.
+        let dt = self
+            .focus_edge_scroll
+            .map_or(0., |then| now.duration_since(then).as_secs_f32())
+            .min(0.05);
+        self.focus_edge_scroll = Some(now);
+        let offset = self.focus_scroll.offset();
+        let max = f32::from(self.focus_scroll.max_offset().x).max(0.);
+        let x = (f32::from(offset.x) - push * EDGE_SCROLL_SPEED * dt).clamp(-max, 0.);
+        self.focus_scroll.set_offset(point(px(x), offset.y));
+        window.request_animation_frame();
+    }
+
     fn focus_dragged(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         // A column's edge, held: its width follows the pointer, never under
         // the least the settings give.
@@ -1966,10 +2027,16 @@ impl ClaudhubApp {
             return;
         }
         let path = drag.board.clone();
-        let target = self.focus_geometry.get(&path).and_then(|geometry| {
-            let closed = geometry.borrow().closed();
-            focus::drop_target(&closed, (f32::from(drag.at.x), f32::from(drag.at.y)))
-        });
+        let x = f32::from(drag.at.x);
+        let span = self.board_span(&path);
+        let target = self
+            .focus_geometry
+            .get(&path)
+            .and_then(|geometry| {
+                let closed = geometry.borrow().closed();
+                focus::drop_target(&closed, (x, f32::from(drag.at.y)))
+            })
+            .filter(|_| on_span(span, x));
         if let (Some(target), Some(board)) = (target, self.focus_boards.get_mut(&path)) {
             let target = board.resolve(target);
             board.move_card(&drag.node, target);
@@ -2290,4 +2357,13 @@ fn held(child: impl IntoElement) -> gpui_kit::Div {
             cx.stop_propagation()
         })
         .child(child)
+}
+
+/// Whether a pointer this far across is on a board — `span` its edges, and
+/// none yet measured counting as on it. A card carried over the next board
+/// stays where it was: right of the last column used to mean « a new
+/// column », so passing over a neighbour opened one at the end of its own
+/// board, which widened it and moved everything under the hand.
+fn on_span(span: Option<(f32, f32)>, x: f32) -> bool {
+    span.is_none_or(|(left, right)| left <= x && x <= right)
 }

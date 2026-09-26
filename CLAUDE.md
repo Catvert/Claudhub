@@ -689,7 +689,12 @@ worktree.
   poussées, il chassait le pointeur de haut en bas — et avec sa hauteur
   **peinte**, qu'il mesure lui-même : il s'ouvre en grandissant, la carte
   déposée se pose d'un glissement et d'un halo qui s'éteint
-  (`with_animation`, un identifiant par dépôt). Une colonne se règle par son
+  (`with_animation`, un identifiant par dépôt). **Tenue contre un bord de
+  la rangée, la carte la fait défiler** (`focus::edge_push`, le cinquième
+  de la largeur de chaque côté, plus vite près du bord, et seulement plus
+  loin que là où on l'a prise) ; **hors de son tableau, elle reste où elle
+  était** — « à droite de la dernière colonne » voulait dire « nouvelle
+  colonne », et survoler le tableau voisin en ouvrait une. Une colonne se règle par son
   bord droit, largeur retenue avec le tableau, double-clic pour la rendre à
   l'espace — jamais sous la largeur des réglages (`terminal.column_min`).
   Seul ce qui arrive se place par règle — un terminal
