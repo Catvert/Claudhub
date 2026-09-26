@@ -5596,7 +5596,7 @@ impl ClaudhubApp {
         self.panel_visible(view) && self.active.as_deref() == Some(worktree)
     }
 
-    /// Shows one of the two terminal views, and opens its first shell.
+    /// Shows one of the terminal views, and opens its first shell.
     pub(super) fn show_terminal_panel(
         &mut self,
         view: &'static str,
@@ -5604,7 +5604,14 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.show_panel(view, cx);
-        if let Some(worktree) = self.active.clone() {
+        // The runs' view holds what the run widget started, and nothing
+        // else: a shell opened in it for want of a run would be one more tab
+        // to close.
+        if let Some(worktree) = self
+            .active
+            .clone()
+            .filter(|_| view != super::panels::TerminalPanel::RUN)
+        {
             self.ensure_terminal(&worktree, view, window, cx);
         }
         // One already open, unfolded by the line above: in front of the graph

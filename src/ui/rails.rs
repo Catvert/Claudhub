@@ -431,6 +431,18 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Right, Half::End),
         conditional: false,
     },
+    // What the run widget started, at the left with the notes: a recipe
+    // that serves or watches is watched, not typed in, and among the shells
+    // it was one more tab to find. **Situational**, as the conflicts are:
+    // its button is there while a recipe has a tab — the left rail is full
+    // without it, and an empty view of runs has nothing to show.
+    Tool {
+        panel: "ClaudhubRun",
+        title: Label("panel-run"),
+        icon: "monitor-play",
+        home: Anchor::new(Side::Left, Half::End),
+        conditional: true,
+    },
 ];
 
 /// The glyph a panel's tab wears — its own button's, on the rail.

@@ -221,6 +221,9 @@ pub enum TerminalPlacement {
     #[default]
     Bottom,
     Right,
+    /// The run widget's recipes, in their own tool window at the left —
+    /// never offered by the settings, which place the shells.
+    Run,
 }
 
 impl TerminalPlacement {
@@ -229,6 +232,7 @@ impl TerminalPlacement {
         match self {
             Self::Bottom => "bottom",
             Self::Right => "right",
+            Self::Run => "run",
         }
     }
 

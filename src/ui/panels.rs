@@ -1703,12 +1703,17 @@ impl TerminalPanel {
     /// And those beside it. A second view rather than a second seat of the
     /// first: the two fold apart, so they are two names.
     pub const RIGHT: &'static str = "ClaudhubTerminalRight";
+    /// And the recipes the run widget starts: a third view, at the left
+    /// with the notes, so that what runs is not one more shell among the
+    /// shells — see `run_view`.
+    pub const RUN: &'static str = "ClaudhubRun";
 
     /// The view a placement belongs to.
     pub fn name_of(placement: crate::ui::settings::TerminalPlacement) -> &'static str {
         match placement {
             crate::ui::settings::TerminalPlacement::Bottom => Self::NAME,
             crate::ui::settings::TerminalPlacement::Right => Self::RIGHT,
+            crate::ui::settings::TerminalPlacement::Run => Self::RUN,
         }
     }
 
@@ -1716,13 +1721,14 @@ impl TerminalPanel {
     pub fn placement_of(name: &str) -> crate::ui::settings::TerminalPlacement {
         match name {
             Self::RIGHT => crate::ui::settings::TerminalPlacement::Right,
+            Self::RUN => crate::ui::settings::TerminalPlacement::Run,
             _ => crate::ui::settings::TerminalPlacement::Bottom,
         }
     }
 
-    /// Is this name one of the two terminal views.
+    /// Is this name one of the terminal views.
     pub fn is_terminal(name: &str) -> bool {
-        name == Self::NAME || name == Self::RIGHT
+        name == Self::NAME || name == Self::RIGHT || name == Self::RUN
     }
 
     /// `visible` is **given** and not read off the application.

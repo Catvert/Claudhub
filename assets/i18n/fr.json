@@ -400,6 +400,7 @@
   "panel-stashes": "Stashes",
   "panel-tags": "Tags",
   "panel-terminal": "Terminaux",
+  "panel-run": "Exécution",
   "panel-terminal-right": "Terminal (droite)",
   "panel-test-run": "Exécution",
   "panel-tests": "Tests",

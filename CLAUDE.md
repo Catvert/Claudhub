@@ -180,7 +180,9 @@ src/
                     `wt`, les recettes — et laquelle il montre — pur, testé
     run_view.rs     le widget d'exécution, comme un IDE : la configuration,
                     si elle tourne, ▶ / ↻ et ■ ; une recette tourne dans un
-                    onglet qui porte son nom (`OpenTerminal::run`)
+                    onglet qui porte son nom (`OpenTerminal::run`), dans la
+                    troisième vue de terminaux, « Exécution », à gauche avec
+                    les notes (`TerminalPanel::RUN`, situationnelle)
     dock_layout.rs  l'aire unique : sa disposition, ses sièges, ses gestes
     diff_view.rs    la vue de diff, virtualisée
     refine.rs       les mots qui changent entre deux versions d'une ligne — pur

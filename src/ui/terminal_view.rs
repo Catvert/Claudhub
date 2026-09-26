@@ -2149,6 +2149,8 @@ impl ClaudhubApp {
         let view_name = crate::ui::panels::TerminalPanel::name_of(wanted);
         let (placement, size) = match wanted {
             crate::ui::settings::TerminalPlacement::Right => (DockPlacement::Right, TERMINAL_WIDTH),
+            // With the notes, at the left — see `TerminalPanel::RUN`.
+            crate::ui::settings::TerminalPlacement::Run => (DockPlacement::Left, TERMINAL_WIDTH),
             crate::ui::settings::TerminalPlacement::Bottom => {
                 (DockPlacement::Bottom, TERMINAL_HEIGHT)
             }

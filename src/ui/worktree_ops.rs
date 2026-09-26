@@ -1909,7 +1909,7 @@ impl ClaudhubApp {
                 env: HashMap::new(),
                 label: SharedString::from(format!("just {recipe}")),
                 agent: false,
-                placement: None,
+                placement: Some(crate::ui::settings::TerminalPlacement::Run),
             },
             window,
             cx,
