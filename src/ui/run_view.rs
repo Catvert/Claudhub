@@ -9,9 +9,10 @@
 //!
 //! **A recipe runs in a terminal tab** tagged with its name
 //! (`OpenTerminal::run`), and that tab is what « running » is read off.
-//! Stopping interrupts it, as `Ctrl+C` would, and leaves what it printed —
-//! an IDE's console stays after a stop; starting again closes the tabs the
-//! recipe left, running or not, so that its runs do not pile up.
+//! Stopping interrupts it, as `Ctrl+C` would, and closes its tab once it
+//! has ended — a second press closes it at once; a recipe that fails on its
+//! own keeps its tab, where its error is read. Starting again closes the
+//! tabs the recipe left, running or not, so that its runs do not pile up.
 
 use std::path::Path;
 
@@ -104,8 +105,9 @@ impl ClaudhubApp {
         }
     }
 
-    /// Stops a configuration: `wt down`, or the recipe interrupted in the
-    /// tab that keeps its output.
+    /// Stops a configuration: `wt down`, or the recipe interrupted, its tab
+    /// closing once it has ended — at once, on a second press, for a recipe
+    /// that does not end on `Ctrl+C`.
     fn stop_config(
         &mut self,
         worktree: &Path,
@@ -120,12 +122,23 @@ impl ClaudhubApp {
                 }
             }
             RunConfig::Recipe(name) => {
-                let views: Vec<_> = self
+                let tabs: Vec<_> = self
                     .recipe_tabs(worktree, name)
-                    .map(|terminal| terminal.view.clone())
+                    .map(|terminal| (terminal.view.clone(), terminal.stopping))
                     .collect();
-                for view in views {
+                for (view, stopping) in tabs {
+                    if stopping || view.read(cx).has_exited() {
+                        self.close_terminal(view.entity_id(), window, cx);
+                        continue;
+                    }
                     view.update(cx, |view, _| view.interrupt());
+                    if let Some(terminal) = self
+                        .terminals
+                        .iter_mut()
+                        .find(|terminal| terminal.view.entity_id() == view.entity_id())
+                    {
+                        terminal.stopping = true;
+                    }
                 }
             }
         }

@@ -1869,6 +1869,10 @@ pub struct OpenTerminal {
     /// The `justfile` recipe it was opened to run, which the run widget
     /// reads its state off — see `run_view`.
     pub run: Option<String>,
+    /// Stopped from the run widget: the tab closes once what runs in it has
+    /// ended. A recipe that fails on its own keeps its tab, which is where
+    /// its error is read; one stopped by hand has nothing left to say.
+    pub stopping: bool,
 }
 
 impl OpenTerminal {}
@@ -2079,8 +2083,20 @@ impl ClaudhubApp {
         // window, which the event does not carry. Held here and not in the view
         // — closing a terminal is the application's gesture, and the same one
         // the cross goes through.
-        cx.subscribe(&view, |_, _, _: &TerminalEnded, cx| cx.notify())
-            .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, view, _: &TerminalEnded, window, cx| {
+                let stopped = this.terminals.iter().any(|terminal| {
+                    terminal.view.entity_id() == view.entity_id() && terminal.stopping
+                });
+                if stopped {
+                    this.close_terminal(view.entity_id(), window, cx);
+                }
+                cx.notify();
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &view,
             window,
@@ -2101,6 +2117,7 @@ impl ClaudhubApp {
             size: crate::ui::overview::Tile::default().size(),
             column_height: crate::ui::overview::COLUMN_TILE,
             run: None,
+            stopping: false,
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);
