@@ -1161,8 +1161,8 @@ impl ClaudhubApp {
         )
     }
 
-    /// The review: its size, its heaviest files with a bar each, when it was
-    /// last read and what remarks are still open.
+    /// The review: its size, its files by their place in the project, when
+    /// it was last read and what remarks are still open.
     fn home_review(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -1210,90 +1210,146 @@ impl ClaudhubApp {
                         )
                         .into_any_element(),
                 );
-                // Every file, the heaviest first, in a list that scrolls: a
-                // press opens its review. **Virtual**: a branch can carry
-                // well over a thousand files, and every one of them laid out
-                // on every frame slowed the whole window.
-                let listed = std::rc::Rc::new(focus::heaviest(files, files.len()));
+                // Every file, as a tree: what the card says of a branch is
+                // where its work went. A press on a file opens its review, on
+                // a folder folds it. **Virtual**: a branch can carry well over
+                // a thousand files, and every one of them laid out on every
+                // frame slowed the whole window.
+                let empty = std::collections::HashSet::new();
+                let toggled = self.home_review_toggled.get(path).unwrap_or(&empty);
+                let listed = std::rc::Rc::new(focus::review_rows(files, toggled));
                 let count = listed.len();
                 let row = super::theme::row_height(cx);
+                let guide = super::theme::indent_guide(cx);
                 let (entity, board) = (cx.entity(), path.to_path_buf());
-                let (hover, bar, fill, radius) = (
-                    theme.list_hover,
-                    theme.secondary,
-                    theme.info.opacity(0.7),
-                    theme.radius,
-                );
+                let (hover, radius) = (theme.list_hover, theme.radius);
                 let (added_fg, removed_fg) = (diff.added_fg, diff.removed_fg);
+                let counts = move |added: usize, removed: usize| {
+                    [
+                        div()
+                            .flex_none()
+                            .text_color(added_fg)
+                            .child(format!("+{added}")),
+                        div()
+                            .flex_none()
+                            .text_color(removed_fg)
+                            .child(format!("−{removed}")),
+                    ]
+                };
                 rows.push(
-                    gpui_kit::uniform_list("focus-home-review-files", count, move |range, _, _| {
-                        range
-                            .map(|index| {
-                                let (file, added, removed, share) = &listed[index];
-                                let name = file
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                let (app, board, pressed) =
-                                    (entity.clone(), board.clone(), file.clone());
-                                h_flex()
-                                    .id(("focus-home-review-file", index))
-                                    .h(row)
-                                    .gap_2()
-                                    .items_center()
-                                    .text_xs()
-                                    .rounded(radius)
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(hover))
-                                    .on_click(move |_, window, cx| {
-                                        app.update(cx, |this, cx| {
-                                            this.open_from_home(
-                                                &board,
-                                                pressed.clone(),
-                                                GitFace::Review,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .w(px(64.))
-                                            .h(px(6.))
-                                            .rounded_full()
-                                            .bg(bar)
+                    gpui_kit::uniform_list(
+                        "focus-home-review-files",
+                        count,
+                        move |range, _, cx| {
+                            range
+                                .map(|index| {
+                                    let (app, board) = (entity.clone(), board.clone());
+                                    let line = h_flex()
+                                        .id(("focus-home-review-row", index))
+                                        .h(row)
+                                        .gap_1()
+                                        .items_center()
+                                        .text_xs()
+                                        .rounded(radius)
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(hover));
+                                    match &listed[index] {
+                                        focus::ReviewRow::Dir {
+                                            path,
+                                            label,
+                                            depth,
+                                            collapsed,
+                                            files,
+                                            added,
+                                            removed,
+                                        } => {
+                                            let folder = path.clone();
+                                            line.on_click(move |_, _, cx| {
+                                                app.update(cx, |this, cx| {
+                                                    let toggled = this
+                                                        .home_review_toggled
+                                                        .entry(board.clone())
+                                                        .or_default();
+                                                    if !toggled.remove(&folder) {
+                                                        toggled.insert(folder.clone());
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .children(super::theme::indent_guides(*depth, guide))
+                                            .child(
+                                                icon(if *collapsed {
+                                                    "chevron-right"
+                                                } else {
+                                                    "chevron-down"
+                                                })
+                                                .xsmall()
+                                                .text_color(muted),
+                                            )
+                                            .child(
+                                                super::icons::glyph(if *collapsed {
+                                                    "folder"
+                                                } else {
+                                                    "folder-open"
+                                                })
+                                                .text_color(muted),
+                                            )
                                             .child(
                                                 div()
-                                                    .h_full()
-                                                    .rounded_full()
-                                                    .bg(fill)
-                                                    .w(px(64. * share.max(0.04))),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(SharedString::from(name)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(added_fg)
-                                            .child(format!("+{added}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(removed_fg)
-                                            .child(format!("−{removed}")),
-                                    )
-                                    .into_any_element()
-                            })
-                            .collect()
-                    })
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(SharedString::from(label.clone())),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .text_color(muted)
+                                                    .child(SharedString::from(files.to_string())),
+                                            )
+                                            .children(counts(*added, *removed))
+                                            .into_any_element()
+                                        }
+                                        focus::ReviewRow::File {
+                                            path,
+                                            depth,
+                                            added,
+                                            removed,
+                                        } => {
+                                            let name = path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default();
+                                            let pressed = path.clone();
+                                            line.on_click(move |_, window, cx| {
+                                                app.update(cx, |this, cx| {
+                                                    this.open_from_home(
+                                                        &board,
+                                                        pressed.clone(),
+                                                        GitFace::Review,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            })
+                                            .children(super::theme::indent_guides(*depth, guide))
+                                            .child(super::theme::chevron_space())
+                                            .child(super::file_icons::file_icon(path, cx))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(SharedString::from(name)),
+                                            )
+                                            .children(counts(*added, *removed))
+                                            .into_any_element()
+                                        }
+                                    }
+                                })
+                                .collect()
+                        },
+                    )
                     // A virtual list measures nothing: its height is said.
                     .h(px(HOME_REVIEW_HEIGHT).min(row * count as f32))
                     .into_any_element(),

@@ -1133,6 +1133,9 @@ pub struct ClaudhubApp {
     /// The note each board's notes view shows, when a press chose another
     /// than the principal one; not kept.
     pub(super) focus_note_shown: HashMap<PathBuf, PathBuf>,
+    /// The folders of each board's review card the hand folded or unfolded
+    /// — see `focus::review_rows`; not kept.
+    pub(super) home_review_toggled: HashMap<PathBuf, std::collections::HashSet<PathBuf>>,
     /// The terminal each board's home shows under its sub-tabs, once one
     /// was pressed — see `focus::shown_terminal`; not kept.
     pub(super) home_terminal: HashMap<PathBuf, u64>,
@@ -1646,6 +1649,7 @@ impl ClaudhubApp {
             home_window_drag: false,
             home_mode: crate::ui::store::Store::global(cx).session.home_mode,
             focus_note_shown: HashMap::new(),
+            home_review_toggled: HashMap::new(),
             home_terminal: HashMap::new(),
             git_face: HashMap::new(),
             notes_face: HashMap::new(),

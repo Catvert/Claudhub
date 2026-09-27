@@ -9,7 +9,10 @@
 //!
 //! Pure: the view hands in what it knows, this says what shows.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use super::tree;
 
 /// What the right of a board shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -121,26 +124,71 @@ pub fn principal_note(
         .map(|(path, _)| path.clone())
 }
 
-/// The files of a review that weigh most — `(path, added, removed)` —, the
-/// heaviest first, at most `count`, each with its share of the heaviest's
-/// weight: what a bar beside its name is drawn at.
-pub fn heaviest(
+/// A branch carrying up to this many files opens its review card wide open;
+/// past it, shut on its top folders. What a card says of a large branch is
+/// **where** the work went — a thousand names in a row say nothing of it.
+pub const REVIEW_OPEN_UP_TO: usize = 40;
+
+/// A row of the review card's tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewRow {
+    Dir {
+        /// The fold key: see [`tree::Entry::Dir`].
+        path: PathBuf,
+        label: String,
+        depth: usize,
+        collapsed: bool,
+        /// Its whole subtree, folded part included.
+        files: usize,
+        added: usize,
+        removed: usize,
+    },
+    File {
+        path: PathBuf,
+        depth: usize,
+        added: usize,
+        removed: usize,
+    },
+}
+
+/// The review card's rows: the branch's files — `(path, added, removed)` —
+/// as a tree, by their place in the project. `toggled` holds the folders the
+/// hand folded or unfolded, read against how the card opens
+/// ([`REVIEW_OPEN_UP_TO`]).
+pub fn review_rows(
     files: &[(PathBuf, usize, usize)],
-    count: usize,
-) -> Vec<(PathBuf, usize, usize, f32)> {
-    let mut files: Vec<&(PathBuf, usize, usize)> = files.iter().collect();
-    files.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)).then_with(|| a.0.cmp(&b.0)));
-    let top = files.first().map_or(0, |file| file.1 + file.2).max(1) as f32;
-    files
+    toggled: &HashSet<PathBuf>,
+) -> Vec<ReviewRow> {
+    let folds = if files.len() <= REVIEW_OPEN_UP_TO {
+        tree::Folds::OpenBut(toggled)
+    } else {
+        tree::Folds::ShutBut(toggled)
+    };
+    let paths: Vec<PathBuf> = files.iter().map(|file| file.0.clone()).collect();
+    tree::build(&paths, folds)
         .into_iter()
-        .take(count)
-        .map(|(path, added, removed)| {
-            (
-                path.clone(),
-                *added,
-                *removed,
-                (added + removed) as f32 / top,
-            )
+        .map(|entry| match entry {
+            tree::Entry::Dir {
+                path,
+                label,
+                depth,
+                collapsed,
+                leaves,
+            } => ReviewRow::Dir {
+                path,
+                label,
+                depth,
+                collapsed,
+                files: leaves.len(),
+                added: leaves.iter().map(|index| files[*index].1).sum(),
+                removed: leaves.iter().map(|index| files[*index].2).sum(),
+            },
+            tree::Entry::Leaf { index, depth } => ReviewRow::File {
+                path: files[index].0.clone(),
+                depth,
+                added: files[index].1,
+                removed: files[index].2,
+            },
         })
         .collect()
 }
@@ -378,19 +426,47 @@ mod tests {
         assert!(!View::ALL.contains(&View::Pr) && !View::ALL.contains(&View::Todo));
     }
 
-    /// The heaviest first, each against the heaviest.
+    /// A small branch reads wide open, a large one on its top folders; a
+    /// folder counts its whole subtree, and the hand's fold is the exception.
     #[test]
-    fn the_heaviest_files_come_first() {
-        let files = vec![
-            (PathBuf::from("a"), 1, 1),
-            (PathBuf::from("b"), 30, 10),
-            (PathBuf::from("c"), 10, 10),
+    fn the_review_card_is_a_tree_open_while_small() {
+        let file = |path: &str, added| (PathBuf::from(path), added, 1);
+        let small = vec![
+            file("app/Http/A.php", 3),
+            file("app/Http/B.php", 4),
+            file("lang/fr.json", 5),
         ];
-        let top = heaviest(&files, 2);
-        assert_eq!(top.len(), 2);
-        assert_eq!((top[0].0.as_path(), top[0].3), (Path::new("b"), 1.));
-        assert_eq!((top[1].0.as_path(), top[1].3), (Path::new("c"), 0.5));
-        assert!(heaviest(&[], 3).is_empty());
+        let none = HashSet::new();
+        let rows = review_rows(&small, &none);
+        assert_eq!(
+            rows[0],
+            ReviewRow::Dir {
+                path: PathBuf::from("app/Http"),
+                label: "app/Http".into(),
+                depth: 0,
+                collapsed: false,
+                files: 2,
+                added: 7,
+                removed: 2,
+            }
+        );
+        assert_eq!(rows.len(), 5);
+
+        let folded = HashSet::from([PathBuf::from("app/Http")]);
+        assert_eq!(review_rows(&small, &folded).len(), 3);
+
+        let large: Vec<_> = (0..=REVIEW_OPEN_UP_TO)
+            .map(|n| file(&format!("src/f{n}.rs"), 1))
+            .chain([file("README.md", 1)])
+            .collect();
+        let rows = review_rows(&large, &none);
+        assert!(matches!(
+            &rows[0],
+            ReviewRow::Dir { collapsed: true, files, .. } if *files == REVIEW_OPEN_UP_TO + 1
+        ));
+        assert_eq!(rows.len(), 2);
+        let opened = HashSet::from([PathBuf::from("src")]);
+        assert_eq!(review_rows(&large, &opened).len(), large.len() + 1);
     }
 
     /// The one chosen while it lives; else the one asking; else the last.
