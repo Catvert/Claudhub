@@ -2767,7 +2767,7 @@ fn render_header(
         .into_any_element()
 }
 
-fn line_colors(
+pub(super) fn line_colors(
     kind: DiffLineKind,
     colors: &DiffColors,
 ) -> (Option<gpui_kit::Hsla>, Option<gpui_kit::Hsla>) {
