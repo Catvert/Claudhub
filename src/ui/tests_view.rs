@@ -95,6 +95,37 @@ pub struct PestState {
     /// `HashMap` on every frame is what this avoids.
     pub statuses: Rc<Vec<Option<Status>>>,
     pub labels: Rc<Vec<SharedString>>,
+    /// Where each (class, method) sits in the report's tests, built with the
+    /// report: a live step rewrites its own row instead of the whole cache,
+    /// which on a run of two thousand tests was two thousand passes over two
+    /// thousand tests.
+    index: HashMap<(String, String), Vec<usize>>,
+    /// The rows the campaign under way covers and has not settled yet,
+    /// aligned with the report's tests, and the campaign and report they
+    /// were read for — see [`ClaudhubApp::pest_running`].
+    running: Rc<Vec<bool>>,
+    running_of: Option<RunSig>,
+    /// Bumped by everything that shapes the tree's rows and is not in
+    /// [`TreeKey`] by value: the report, the marks, the folds, `running`.
+    generation: u64,
+    /// The tree's rows, and what they were read from. Every panel repaints
+    /// on every notification of the application, and the rows are a pass
+    /// over every test.
+    tree: Option<(TreeKey, Rc<Vec<Row>>)>,
+}
+
+/// What `running` was read for: the report (by address), the campaign's ids
+/// and whether it still runs.
+type RunSig = (usize, u64, u64, bool);
+
+/// What the tree's rows were read from, beyond [`PestState::generation`].
+#[derive(PartialEq)]
+struct TreeKey {
+    generation: u64,
+    query: String,
+    only_failed: bool,
+    /// A stamp of the files the branch touched, when that filter is on.
+    changed: Option<u64>,
 }
 
 /// One test's last known fate, as the rows read it.
@@ -108,28 +139,87 @@ pub struct Mark {
 }
 
 impl PestState {
+    /// A new listing: its index, then the caches read through it.
+    fn set_report(&mut self, report: Report) {
+        self.index = HashMap::new();
+        if let Report::Tests(tests) = &report {
+            for (at, test) in tests.iter().enumerate() {
+                self.index
+                    .entry((test.class.clone(), test.method.clone()))
+                    .or_default()
+                    .push(at);
+            }
+        }
+        self.report = Some(Rc::new(report));
+        self.refresh_cache();
+    }
+
     /// Rebuilds the per-row caches. Called when the report or the marks
-    /// change — never per frame.
+    /// change — never per frame, nor per live step: see [`Self::refresh_one`].
     fn refresh_cache(&mut self) {
+        self.generation += 1;
         let Some(Report::Tests(tests)) = self.report.as_deref() else {
             self.statuses = Rc::new(Vec::new());
             self.labels = Rc::new(Vec::new());
             return;
         };
-        let mut statuses = Vec::with_capacity(tests.len());
-        let mut labels = Vec::with_capacity(tests.len());
-        for test in tests {
-            let mark = self.marks.get(&(test.class.clone(), test.method.clone()));
-            statuses.push(mark.map(|mark| mark.status));
-            labels.push(SharedString::from(match mark {
-                // The account's description is the real one; the listing's is
-                // a mangled reading.
-                Some(mark) if !mark.name.is_empty() => mark.name.clone(),
-                _ => test.name.clone(),
-            }));
+        let mut statuses = vec![None; tests.len()];
+        let mut labels: Vec<SharedString> = tests
+            .iter()
+            .map(|test| SharedString::from(test.name.clone()))
+            .collect();
+        for (key, mark) in &self.marks {
+            for &at in self.index.get(key).into_iter().flatten() {
+                statuses[at] = Some(mark.status);
+                // The account's description is the real one; the listing's
+                // is a mangled reading.
+                if !mark.name.is_empty() {
+                    labels[at] = SharedString::from(mark.name.clone());
+                }
+            }
         }
         self.statuses = Rc::new(statuses);
         self.labels = Rc::new(labels);
+    }
+
+    /// Rewrites the cached rows of one (class, method) from its mark — what
+    /// [`Self::refresh_cache`] would have written there.
+    fn refresh_one(&mut self, key: &(String, String)) {
+        let Some(Report::Tests(tests)) = self.report.as_deref() else {
+            return;
+        };
+        let Some(ats) = self.index.get(key) else {
+            return;
+        };
+        self.generation += 1;
+        let mark = self.marks.get(key);
+        let statuses = Rc::make_mut(&mut self.statuses);
+        let labels = Rc::make_mut(&mut self.labels);
+        for &at in ats {
+            if let Some(status) = statuses.get_mut(at) {
+                *status = mark.map(|mark| mark.status);
+            }
+            if let Some(label) = labels.get_mut(at) {
+                *label = SharedString::from(match mark {
+                    Some(mark) if !mark.name.is_empty() => mark.name.clone(),
+                    _ => tests[at].name.clone(),
+                });
+            }
+        }
+    }
+
+    /// A covered test has settled: its row stops spinning.
+    fn settle(&mut self, key: &(String, String)) {
+        let Some(ats) = self.index.get(key) else {
+            return;
+        };
+        self.generation += 1;
+        let running = Rc::make_mut(&mut self.running);
+        for &at in ats {
+            if let Some(slot) = running.get_mut(at) {
+                *slot = false;
+            }
+        }
     }
 }
 
@@ -369,7 +459,8 @@ pub fn rows_among(
 
     // First pass: how many kept tests under each folder, how many red, how
     // many carry a verdict at all, and whether one is being run right now.
-    let mut counts: HashMap<String, (u32, u32, u32, bool)> = HashMap::new();
+    // Borrowed prefixes throughout: this is a pass over every test.
+    let mut counts: HashMap<&str, (u32, u32, u32, bool)> = HashMap::new();
     for (at, test) in tests.iter().enumerate() {
         if !kept(at, test) {
             continue;
@@ -377,7 +468,9 @@ pub fn rows_among(
         let status = statuses.get(at).copied().flatten();
         let segments = crate::suite::segments(&test.class).len();
         for depth in 0..segments {
-            let entry = counts.entry(dir_prefix(&test.class, depth)).or_default();
+            let entry = counts
+                .entry(crate::suite::group_prefix(&test.class, depth))
+                .or_default();
             entry.0 += 1;
             entry.1 += u32::from(status == Some(Status::Failed));
             entry.2 += u32::from(status.is_some());
@@ -388,22 +481,22 @@ pub fn rows_among(
     // Second pass: emit, folding. `chain` is the dir prefixes above the
     // current test, each with whether its content shows.
     let mut rows = Vec::new();
-    let mut chain: Vec<(String, bool)> = Vec::new();
+    let mut chain: Vec<(&str, bool)> = Vec::new();
+    let mut prefixes: Vec<&str> = Vec::new();
     for (at, test) in tests.iter().enumerate() {
         if !kept(at, test) {
             continue;
         }
-        let segments = crate::suite::segments(&test.class);
-        let prefixes: Vec<String> = (0..segments.len())
-            .map(|depth| dir_prefix(&test.class, depth))
-            .collect();
+        let depths = crate::suite::segments(&test.class).len();
+        prefixes.clear();
+        prefixes.extend((0..depths).map(|depth| crate::suite::group_prefix(&test.class, depth)));
         let common = chain
             .iter()
             .zip(&prefixes)
             .take_while(|((held, _), wanted)| held == *wanted)
             .count();
         chain.truncate(common);
-        for (depth, prefix) in prefixes.iter().enumerate().skip(common) {
+        for (depth, &prefix) in prefixes.iter().enumerate().skip(common) {
             let above_open = chain.iter().all(|(_, open)| *open);
             let open = filtering || expanded.contains(prefix);
             if above_open {
@@ -426,12 +519,12 @@ pub fn rows_among(
                     running,
                 });
             }
-            chain.push((prefix.clone(), open));
+            chain.push((prefix, open));
         }
         if chain.iter().all(|(_, open)| *open) {
             rows.push(Row::Test {
                 test: at,
-                depth: segments.len(),
+                depth: depths,
             });
         }
     }
@@ -808,9 +901,8 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let state = self.pest.entry(worktree.clone()).or_default();
-        state.report = Some(Rc::new(report));
+        state.set_report(report);
         state.pending = false;
-        state.refresh_cache();
         if state.stale {
             state.stale = false;
             state.pending = true;
@@ -1164,13 +1256,11 @@ impl ClaudhubApp {
                 return SharedString::from(mark.name.clone());
             }
         }
-        if let Some(Report::Tests(tests)) = state.report.as_deref() {
-            if let Some(test) = tests
-                .iter()
-                .find(|test| test.class == key.0 && test.method == key.1)
-            {
-                return SharedString::from(test.name.clone());
-            }
+        if let (Some(Report::Tests(tests)), Some(&at)) = (
+            state.report.as_deref(),
+            state.index.get(key).and_then(|ats| ats.first()),
+        ) {
+            return SharedString::from(tests[at].name.clone());
         }
         SharedString::from(key.1.clone())
     }
@@ -1181,7 +1271,7 @@ impl ClaudhubApp {
     /// runner finishes a whole file. See [`RunState::live`].
     ///
     /// The name is left empty on purpose — a live event only carries the
-    /// mangled method, and [`PestState::refresh_cache`] falls back to the
+    /// mangled method, and [`PestState::refresh_one`] falls back to the
     /// listing's reading of it. The run's account, at the end, is what brings
     /// the real description.
     pub(super) fn pest_step(
@@ -1222,6 +1312,9 @@ impl ClaudhubApp {
         let Some(state) = self.pest.get_mut(&worktree) else {
             return;
         };
+        if first {
+            state.settle(&key);
+        }
         let previous = state.marks.get(&key);
         // A row that collapses dataset cases lands here once per case: within
         // one run, red stays red. The account, at the end, says the same —
@@ -1233,14 +1326,14 @@ impl ClaudhubApp {
         // method, and a description already learned beats reading it back.
         let name = previous.map_or(String::new(), |mark| mark.name.clone());
         state.marks.insert(
-            key,
+            key.clone(),
             Mark {
                 status,
                 at: now(),
                 name,
             },
         );
-        state.refresh_cache();
+        state.refresh_one(&key);
         cx.notify();
     }
 
@@ -1400,6 +1493,7 @@ impl ClaudhubApp {
         if !state.expanded.remove(&prefix) {
             state.expanded.insert(prefix);
         }
+        state.generation += 1;
         cx.notify();
     }
 
@@ -1466,7 +1560,12 @@ impl ClaudhubApp {
 
     /// The files the branch touched, relative to the worktree: since its
     /// base — asked for when unknown — and in the changes in progress.
-    fn branch_touched(&mut self, worktree: &Path, cx: &mut Context<Self>) -> HashSet<String> {
+    ///
+    /// Borrowed, and with a stamp of them: the panel repaints on every
+    /// notification of the application, and the set it filters by is only
+    /// built when the stamp moves.
+    fn branch_touched(&mut self, worktree: &Path, cx: &mut Context<Self>) -> (u64, Vec<&Path>) {
+        use std::hash::{Hash, Hasher};
         let range = self.review.get(worktree).and_then(|state| {
             super::review::branch_panel_range(
                 state.base.as_deref(),
@@ -1478,16 +1577,61 @@ impl ClaudhubApp {
             self.ensure_files(range, cx);
         }
         let Some(state) = self.review.get(worktree) else {
-            return HashSet::new();
+            return (0, Vec::new());
         };
-        let text = |path: &Path| path.to_string_lossy().into_owned();
-        range
+        let paths: Vec<&Path> = range
             .and_then(|range| state.files.get(&range))
             .into_iter()
             .flatten()
-            .map(|file| text(&file.path))
-            .chain(state.status.files.iter().map(|file| text(&file.path)))
-            .collect()
+            .map(|file| file.path.as_path())
+            .chain(state.status.files.iter().map(|file| file.path.as_path()))
+            .collect();
+        let mut stamp = std::collections::hash_map::DefaultHasher::new();
+        paths.hash(&mut stamp);
+        (stamp.finish(), paths)
+    }
+
+    /// Which rows the campaign under way covers and has not settled yet —
+    /// they show as loading: the left panel says what runs, not only the run
+    /// panel. Read once per campaign and listing; a live step then clears
+    /// its own row ([`PestState::settle`]).
+    fn pest_running(&mut self, worktree: &Path) -> Rc<Vec<bool>> {
+        let run = self.pest_runs.get(worktree);
+        let Some(state) = self.pest.get_mut(worktree) else {
+            return Rc::default();
+        };
+        let Some(report) = state.report.clone() else {
+            return Rc::default();
+        };
+        let Report::Tests(tests) = &*report else {
+            return Rc::default();
+        };
+        let sig = (
+            Rc::as_ptr(&report) as usize,
+            run.map_or(0, |run| run.since),
+            run.map_or(0, |run| run.id),
+            run.is_some_and(|run| run.running),
+        );
+        if state.running_of != Some(sig) || state.running.len() != tests.len() {
+            let mut running = vec![false; tests.len()];
+            if let Some(run) = run.filter(|run| run.running) {
+                for (slot, test) in running.iter_mut().zip(tests) {
+                    *slot = run
+                        .targets
+                        .iter()
+                        .any(|target| crate::suite::covers(target, test));
+                }
+                for key in &run.settled {
+                    for &at in state.index.get(key).into_iter().flatten() {
+                        running[at] = false;
+                    }
+                }
+            }
+            state.running = Rc::new(running);
+            state.running_of = Some(sig);
+            state.generation += 1;
+        }
+        state.running.clone()
     }
 
     /// The tests' tree; `board` for a board's Tests tab, where the tests the
@@ -1513,15 +1657,19 @@ impl ClaudhubApp {
             .get(&active)
             .and_then(|state| state.only_changed)
             .unwrap_or(board);
-        let changed = only_changed.then(|| self.branch_touched(&active, cx));
+        let touched = only_changed.then(|| self.branch_touched(&active, cx));
+        let changed_stamp = touched.as_ref().map(|(stamp, _)| *stamp);
         let state = self.pest.get(&active);
         let pending = state.is_some_and(|state| state.pending);
         let only_failed = state.is_some_and(|state| state.only_failed);
         let filters = (only_failed, only_changed);
-        let report = state.and_then(|state| state.report.clone());
-        let tests: Rc<Vec<Test>> = match report.as_deref() {
-            Some(Report::Tests(tests)) => Rc::new(tests.clone()),
-            Some(Report::Failed(message)) => {
+        let report = match state.and_then(|state| state.report.clone()) {
+            Some(report) => report,
+            None => Rc::new(Report::Tests(Vec::new())),
+        };
+        let tests: &[Test] = match &*report {
+            Report::Tests(tests) => tests,
+            Report::Failed(message) => {
                 let message = SharedString::from(message.clone());
                 return v_flex()
                     .size_full()
@@ -1529,14 +1677,13 @@ impl ClaudhubApp {
                     .child(failed_pest(message, cx))
                     .into_any_element();
             }
-            Some(Report::Missing) => {
+            Report::Missing => {
                 return v_flex()
                     .size_full()
                     .child(self.render_pest_bar(0, pending, filters, None, cx))
                     .child(missing_pest(pending, cx))
                     .into_any_element();
             }
-            None => Rc::new(Vec::new()),
         };
 
         let query = self.query(Pane::Tests, cx);
@@ -1548,37 +1695,51 @@ impl ClaudhubApp {
             .any(|test| test.runner == Runner::Pest)
             .then(|| self.pest_modes());
         let bar = self.render_pest_bar(tests.len(), pending, filters, modes, cx);
-        // What the campaign under way covers: those rows show as loading —
-        // the left panel says what runs, not only the run panel.
-        let running: Rc<Vec<bool>> = Rc::new(match self.pest_runs.get(&active) {
-            Some(run) if run.running => tests
-                .iter()
-                .map(|test| {
-                    run.targets
-                        .iter()
-                        .any(|target| crate::suite::covers(target, test))
-                        && !run
-                            .settled
-                            .contains(&(test.class.clone(), test.method.clone()))
-                })
-                .collect(),
-            _ => vec![false; tests.len()],
-        });
+        let running = self.pest_running(&active);
+        let key = TreeKey {
+            generation: self.pest.get(&active).map_or(0, |state| state.generation),
+            query: query.clone(),
+            only_failed,
+            changed: changed_stamp,
+        };
+        let held = self
+            .pest
+            .get(&active)
+            .and_then(|state| state.tree.as_ref())
+            .filter(|(held, _)| *held == key)
+            .map(|(_, rows)| rows.clone());
+        let rows = match held {
+            Some(rows) => rows,
+            None => {
+                // Read again: the stamp only says whether the set moved.
+                let changed: Option<HashSet<String>> = only_changed.then(|| {
+                    self.branch_touched(&active, cx)
+                        .1
+                        .into_iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect()
+                });
+                let empty_folds = HashSet::new();
+                let state = self.pest.get(&active);
+                let rows = Rc::new(rows_among(
+                    tests,
+                    state.map_or(&[][..], |state| &state.labels),
+                    state.map_or(&[][..], |state| &state.statuses),
+                    &running,
+                    &query,
+                    state.map_or(&empty_folds, |state| &state.expanded),
+                    only_failed,
+                    changed.as_ref(),
+                ));
+                if let Some(state) = self.pest.get_mut(&active) {
+                    state.tree = Some((key, rows.clone()));
+                }
+                rows
+            }
+        };
         let state = self.pest.get(&active);
         let statuses = state.map(|s| s.statuses.clone()).unwrap_or_default();
         let labels = state.map(|s| s.labels.clone()).unwrap_or_default();
-        let empty_folds = HashSet::new();
-        let expanded = state.map(|s| &s.expanded).unwrap_or(&empty_folds);
-        let rows: Rc<Vec<Row>> = Rc::new(rows_among(
-            &tests,
-            &labels,
-            &statuses,
-            &running,
-            &query,
-            expanded,
-            only_failed,
-            changed.as_ref(),
-        ));
         if rows.is_empty() {
             return v_flex()
                 .size_full()
@@ -1607,10 +1768,10 @@ impl ClaudhubApp {
                             visible
                                 .map(|index| match rows.get(index).copied() {
                                     Some(row @ Row::Dir { .. }) => {
-                                        render_dir(index, &tests, row, &look, &entity)
+                                        render_dir(index, &report, row, &look, &entity)
                                     }
                                     Some(row @ Row::Test { .. }) => render_test(
-                                        index, &tests, &labels, &statuses, &running, row, &look,
+                                        index, &report, &labels, &statuses, &running, row, &look,
                                         &entity,
                                     ),
                                     None => div().into_any_element(),
@@ -1887,9 +2048,17 @@ impl Look {
 
 /// A folder: the chevron, the segment, what is under it, and the button that
 /// runs all of it.
+/// The listed tests of a report; none for any other answer.
+fn tests_of(report: &Report) -> &[Test] {
+    match report {
+        Report::Tests(tests) => tests,
+        _ => &[],
+    }
+}
+
 fn render_dir(
     index: usize,
-    tests: &Rc<Vec<Test>>,
+    report: &Rc<Report>,
     row: Row,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
@@ -1906,7 +2075,7 @@ fn render_dir(
     else {
         return div().into_any_element();
     };
-    let Some(first) = tests.get(test) else {
+    let Some(first) = tests_of(report).get(test) else {
         return div().into_any_element();
     };
     let prefix = dir_prefix(&first.class, depth);
@@ -1925,7 +2094,7 @@ fn render_dir(
     };
     let toggle = entity.clone();
     let run = entity.clone();
-    let for_run = tests.clone();
+    let for_run = report.clone();
     h_flex()
         .id(("pest-dir", index))
         .h(look.row)
@@ -1991,7 +2160,7 @@ fn render_dir(
                 .icon(icon("play"))
                 .tooltip(tr!("tests-run-class"))
                 .on_click(move |_, window, cx| {
-                    let Some(first) = for_run.get(test) else {
+                    let Some(first) = tests_of(&for_run).get(test) else {
                         return;
                     };
                     // Named by the first test under it: a folder mixing two
@@ -2018,7 +2187,7 @@ fn render_dir(
 #[allow(clippy::too_many_arguments)]
 fn render_test(
     index: usize,
-    tests: &Rc<Vec<Test>>,
+    report: &Rc<Report>,
     labels: &Rc<Vec<SharedString>>,
     statuses: &Rc<Vec<Option<Status>>>,
     running: &Rc<Vec<bool>>,
@@ -2029,7 +2198,7 @@ fn render_test(
     let Row::Test { test: at, depth } = row else {
         return div().into_any_element();
     };
-    let Some(test) = tests.get(at) else {
+    let Some(test) = tests_of(report).get(at) else {
         return div().into_any_element();
     };
     let label = labels
@@ -2047,7 +2216,7 @@ fn render_test(
     let spinning = running.get(at).copied().unwrap_or(false);
     let run = entity.clone();
     let menu = entity.clone();
-    let (for_click, for_menu) = (tests.clone(), tests.clone());
+    let (for_click, for_menu) = (report.clone(), report.clone());
     let menu_label = label.clone();
     h_flex()
         .id(("pest-row", index))
@@ -2062,7 +2231,7 @@ fn render_test(
         .on_click({
             let label = label.clone();
             move |_, window, cx| {
-                let Some(test) = for_click.get(at) else {
+                let Some(test) = tests_of(&for_click).get(at) else {
                     return;
                 };
                 let run_label = SharedString::from(format!("{} {label}", test.runner.label()));
@@ -2091,16 +2260,18 @@ fn render_test(
                     .child(SharedString::from(format!("×{}", test.datasets))),
             )
         })
-        .context_menu(move |popup, _window, _cx| match for_menu.get(at) {
-            Some(test) => row_menu(
-                popup,
-                &menu,
-                test,
-                &menu_label,
-                status == Some(Status::Failed),
-            ),
-            None => popup,
-        })
+        .context_menu(
+            move |popup, _window, _cx| match tests_of(&for_menu).get(at) {
+                Some(test) => row_menu(
+                    popup,
+                    &menu,
+                    test,
+                    &menu_label,
+                    status == Some(Status::Failed),
+                ),
+                None => popup,
+            },
+        )
         .into_any_element()
 }
 
@@ -2784,6 +2955,36 @@ mod tests {
                 .collect(),
             vec![None; tests.len()],
         )
+    }
+
+    /// A live step rewrites its own row, and leaves the caches as a full
+    /// rebuild would have.
+    #[test]
+    fn a_step_rewrites_its_row_as_a_rebuild_would() {
+        let tests = suite();
+        let key = (tests[2].class.clone(), tests[2].method.clone());
+        let mut state = PestState::default();
+        state.set_report(Report::Tests(tests));
+        state.running = Rc::new(vec![true; 4]);
+        let before = state.generation;
+        state.marks.insert(
+            key.clone(),
+            Mark {
+                status: Status::Failed,
+                at: 0,
+                name: "it bills, really".into(),
+            },
+        );
+        state.refresh_one(&key);
+        state.settle(&key);
+        assert!(state.generation > before);
+        assert_eq!(state.running.as_slice(), &[true, true, false, true]);
+        let (statuses, labels) = (state.statuses.clone(), state.labels.clone());
+        state.refresh_cache();
+        assert_eq!(statuses, state.statuses);
+        assert_eq!(labels, state.labels);
+        assert_eq!(statuses[2], Some(Status::Failed));
+        assert_eq!(labels[2].as_ref(), "it bills, really");
     }
 
     /// The tree opens closed: top folders only, each saying what it holds.
