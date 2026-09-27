@@ -473,34 +473,41 @@ impl ClaudhubApp {
         };
         self.ask_flow_frames(moving.into_iter().chain(doings.values().copied()), cx);
         let links = self.render_links(&plan, view, &at_work, cx);
+        // A node of the plane that is not a terminal: its box where the plan
+        // puts it, under the plane's `rem`, and its corner to size it by.
+        let place =
+            |this: &Self, node: Node, rect: Rect, element: AnyElement, cx: &mut Context<Self>| {
+                let corner = this.corner_unless_folded(node.clone(), cx);
+                let element = Scaled {
+                    rem,
+                    child: placed(view.screen(rect))
+                        .child(element)
+                        .children(corner)
+                        .into_any_element(),
+                }
+                .into_any_element();
+                (node, element)
+            };
         let gits: Vec<(Node, AnyElement)> = plan
             .gits
             .iter()
             .map(|git| {
-                let element = Scaled {
-                    rem,
-                    child: placed(view.screen(git.rect))
-                        .child(self.render_git_node(&git.path, view.zoom, cx))
-                        .children(self.corner_unless_folded(Node::Git(git.path.clone()), cx))
-                        .into_any_element(),
-                }
-                .into_any_element();
-                (Node::Git(git.path.clone()), element)
+                let element = self.render_git_node(&git.path, view.zoom, cx);
+                place(self, Node::Git(git.path.clone()), git.rect, element, cx)
             })
             .collect();
         let cards: Vec<(Node, AnyElement)> = plan
             .cards
             .iter()
             .map(|card| {
-                let element = Scaled {
-                    rem,
-                    child: placed(view.screen(card.rect))
-                        .child(self.render_worktree_card(&card.path, view.zoom, cx))
-                        .children(self.corner_unless_folded(Node::Worktree(card.path.clone()), cx))
-                        .into_any_element(),
-                }
-                .into_any_element();
-                (Node::Worktree(card.path.clone()), element)
+                let element = self.render_worktree_card(&card.path, view.zoom, cx);
+                place(
+                    self,
+                    Node::Worktree(card.path.clone()),
+                    card.rect,
+                    element,
+                    cx,
+                )
             })
             .collect();
         let tiles: Vec<(Node, AnyElement)> = self
@@ -529,30 +536,22 @@ impl ClaudhubApp {
             .changes
             .iter()
             .map(|node| {
-                let element = Scaled {
-                    rem,
-                    child: placed(view.screen(node.rect))
-                        .child(self.render_changes_node(&node.path, view.zoom, cx))
-                        .children(self.corner_unless_folded(Node::Changes(node.path.clone()), cx))
-                        .into_any_element(),
-                }
-                .into_any_element();
-                (Node::Changes(node.path.clone()), element)
+                let element = self.render_changes_node(&node.path, view.zoom, cx);
+                place(
+                    self,
+                    Node::Changes(node.path.clone()),
+                    node.rect,
+                    element,
+                    cx,
+                )
             })
             .collect();
         let notes: Vec<(Node, AnyElement)> = plan
             .notes
             .iter()
             .map(|note| {
-                let element = Scaled {
-                    rem,
-                    child: placed(view.screen(note.rect))
-                        .child(self.render_home_note(&note.path, view.zoom, cx))
-                        .children(self.corner_unless_folded(Node::Note(note.path.clone()), cx))
-                        .into_any_element(),
-                }
-                .into_any_element();
-                (Node::Note(note.path.clone()), element)
+                let element = self.render_home_note(&note.path, view.zoom, cx);
+                place(self, Node::Note(note.path.clone()), note.rect, element, cx)
             })
             .collect();
         // The maximised node is painted last, over a veil across the rest of
