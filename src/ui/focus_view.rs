@@ -63,6 +63,8 @@ const GIT_COMMITS: usize = 5;
 /// The git view's left column — the branch and the Changes panel —, the
 /// diff taking the rest.
 const GIT_LIST_WIDTH: f32 = 380.;
+/// The tests view's tree, left of the run it follows.
+const TESTS_LIST_WIDTH: f32 = 420.;
 /// The notes view's list, left of the note it shows.
 const NOTES_LIST_WIDTH: f32 = 240.;
 
@@ -1096,6 +1098,7 @@ impl ClaudhubApp {
             View::Notes => NOTES_LIST_WIDTH + 8. + column_min,
             View::Review => super::changes_view::REVIEW_LIST_WIDTH + column_min,
             View::Todo | View::Terminals | View::Pr => column_min,
+            View::Tests => TESTS_LIST_WIDTH + 8. + column_min,
         };
         let open = path.to_path_buf();
         let actions = vec![Button::new("focus-edit")
@@ -1157,6 +1160,7 @@ impl ClaudhubApp {
             View::Git => self.render_git_view(path, window, cx),
             View::Review => self.render_review_card(path, true, false, window, cx),
             View::Pr => self.render_pr_view(path, window, cx),
+            View::Tests => self.render_tests_view(path, window, cx),
             View::Notes => self.render_notes_view(path, cx),
             View::Todo => self.render_todo_view(path, cx),
             View::Terminals => self.render_terminals_view(path, at_work, window, cx),
@@ -1208,7 +1212,7 @@ impl ClaudhubApp {
                         .child(tr!("todo-progress", { done: todo.done(), total: todo.tasks.len() }))
                         .into_any_element()
                 }),
-            View::Home | View::Notes | View::Terminals | View::Pr => None,
+            View::Home | View::Notes | View::Terminals | View::Pr | View::Tests => None,
         }
     }
 
@@ -1497,6 +1501,37 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
+    /// The tests view — the editor's two panels side by side: the tree of
+    /// the suites, filtered by default to the tests the branch touched, and
+    /// the run being followed. The worktree on show's, as those panels are.
+    fn render_tests_view(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.active.as_deref() != Some(path) {
+            return self.follow_the_active(path, cx);
+        }
+        let theme = cx.theme().clone();
+        let tree = self.render_pest_in(true, window, cx);
+        let run = self.render_test_run(window, cx).into_any_element();
+        let boxed = |el: gpui_kit::Div| {
+            el.h_full()
+                .overflow_hidden()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+        };
+        h_flex()
+            .size_full()
+            .gap_2()
+            .child(boxed(v_flex().flex_none().w(px(TESTS_LIST_WIDTH))).child(tree))
+            .child(boxed(v_flex().flex_1().min_w_0()).child(run))
+            .into_any_element()
+    }
+
     /// The to-do view: the notes panel's list — ticked, edited, added to in
     /// place. It speaks of the worktree on show, as that panel does.
     fn render_todo_view(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
@@ -1672,6 +1707,7 @@ pub(super) fn view_name(view: View) -> (&'static str, SharedString) {
         View::Git => ("git-branch", tr!("focus-view-git")),
         View::Review => ("file-diff", tr!("focus-review")),
         View::Pr => ("git-pull-request", tr!("focus-view-pr")),
+        View::Tests => ("circle-check", tr!("focus-view-tests")),
         View::Notes => ("sticky-note", tr!("focus-view-notes")),
         View::Todo => ("check-check", tr!("todo-title")),
         View::Terminals => ("square-terminal", tr!("focus-view-terminals")),

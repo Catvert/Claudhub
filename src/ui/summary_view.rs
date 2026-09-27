@@ -92,6 +92,18 @@ impl ClaudhubApp {
                         })
                         .map(|_| crate::github::unresolved(&self.github.view_threads).len())
                         .filter(|open| *open > 0),
+                    // The tests in red, as the last run left them.
+                    View::Tests => self
+                        .pest
+                        .get(path)
+                        .map(|state| {
+                            state
+                                .statuses
+                                .iter()
+                                .filter(|status| **status == Some(crate::suite::Status::Failed))
+                                .count()
+                        })
+                        .filter(|failed| *failed > 0),
                     View::Home | View::Review | View::Notes => None,
                 };
                 // The agents' tab wears the loudest of them.

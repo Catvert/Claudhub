@@ -67,6 +67,10 @@ pub struct PestState {
     pub expanded: HashSet<String>,
     /// Show only the tests whose last fate was a failure.
     pub only_failed: bool,
+    /// Show only the tests written in a file the branch touched — since its
+    /// base, or in the changes in progress. `None` until the hand says: on by
+    /// default in a board's Tests tab, off in the editor's panel.
+    pub only_changed: Option<bool>,
     /// Watch the browser a Pest run drives, streamed into the run panel.
     /// Exclusive with `parallel`: each parallel worker gets a browser of its
     /// own, and they would all be handed the same debugging port.
@@ -310,6 +314,7 @@ pub fn dir_prefix(class: &str, depth: usize) -> String {
 /// the filter narrows the list, the folds are ignored — what one asked for
 /// must not hide behind a closed folder. A folder left with nothing under it
 /// disappears, header included.
+#[cfg(test)]
 pub fn rows(
     tests: &[Test],
     labels: &[SharedString],
@@ -319,9 +324,38 @@ pub fn rows(
     expanded: &HashSet<String>,
     only_failed: bool,
 ) -> Vec<Row> {
-    let filtering = !query.trim().is_empty() || only_failed;
+    rows_among(
+        tests,
+        labels,
+        statuses,
+        running,
+        query,
+        expanded,
+        only_failed,
+        None,
+    )
+}
+
+/// [`rows`], and — `changed` given — only the tests written in one of those
+/// files, relative to the worktree: the ones a branch touched. A test whose
+/// file cannot be told is not among them.
+#[allow(clippy::too_many_arguments)]
+pub fn rows_among(
+    tests: &[Test],
+    labels: &[SharedString],
+    statuses: &[Option<Status>],
+    running: &[bool],
+    query: &str,
+    expanded: &HashSet<String>,
+    only_failed: bool,
+    changed: Option<&HashSet<String>>,
+) -> Vec<Row> {
+    let filtering = !query.trim().is_empty() || only_failed || changed.is_some();
     let kept = |at: usize, test: &Test| -> bool {
         if only_failed && statuses.get(at).copied().flatten() != Some(Status::Failed) {
+            return false;
+        }
+        if changed.is_some_and(|changed| !changed.contains(&test.file)) {
             return false;
         }
         let label: &str = labels.get(at).map(|l| l.as_ref()).unwrap_or(&test.name);
@@ -1369,6 +1403,43 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        self.render_pest_in(false, window, cx)
+    }
+
+    /// The files the branch touched, relative to the worktree: since its
+    /// base — asked for when unknown — and in the changes in progress.
+    fn branch_touched(&mut self, worktree: &Path, cx: &mut Context<Self>) -> HashSet<String> {
+        let range = self.review.get(worktree).and_then(|state| {
+            super::review::branch_panel_range(
+                state.base.as_deref(),
+                state.review_point.as_ref(),
+                state.since_review,
+            )
+        });
+        if let Some(range) = range.clone() {
+            self.ensure_files(range, cx);
+        }
+        let Some(state) = self.review.get(worktree) else {
+            return HashSet::new();
+        };
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+        range
+            .and_then(|range| state.files.get(&range))
+            .into_iter()
+            .flatten()
+            .map(|file| text(&file.path))
+            .chain(state.status.files.iter().map(|file| text(&file.path)))
+            .collect()
+    }
+
+    /// The tests' tree; `board` for a board's Tests tab, where the tests the
+    /// branch touched are the default filter.
+    pub(super) fn render_pest_in(
+        &mut self,
+        board: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let Some(active) = self.active.clone() else {
             return v_flex()
                 .size_full()
@@ -1379,9 +1450,16 @@ impl ClaudhubApp {
                 .into_any_element();
         };
         self.ensure_pest(&active, cx);
+        let only_changed = self
+            .pest
+            .get(&active)
+            .and_then(|state| state.only_changed)
+            .unwrap_or(board);
+        let changed = only_changed.then(|| self.branch_touched(&active, cx));
         let state = self.pest.get(&active);
         let pending = state.is_some_and(|state| state.pending);
         let only_failed = state.is_some_and(|state| state.only_failed);
+        let filters = (only_failed, only_changed);
         let report = state.and_then(|state| state.report.clone());
         let tests: Rc<Vec<Test>> = match report.as_deref() {
             Some(Report::Tests(tests)) => Rc::new(tests.clone()),
@@ -1389,14 +1467,14 @@ impl ClaudhubApp {
                 let message = SharedString::from(message.clone());
                 return v_flex()
                     .size_full()
-                    .child(self.render_pest_bar(0, pending, only_failed, None, cx))
+                    .child(self.render_pest_bar(0, pending, filters, None, cx))
                     .child(failed_pest(message, cx))
                     .into_any_element();
             }
             Some(Report::Missing) => {
                 return v_flex()
                     .size_full()
-                    .child(self.render_pest_bar(0, pending, only_failed, None, cx))
+                    .child(self.render_pest_bar(0, pending, filters, None, cx))
                     .child(missing_pest(pending, cx))
                     .into_any_element();
             }
@@ -1411,7 +1489,7 @@ impl ClaudhubApp {
             .iter()
             .any(|test| test.runner == Runner::Pest)
             .then(|| self.pest_modes());
-        let bar = self.render_pest_bar(tests.len(), pending, only_failed, modes, cx);
+        let bar = self.render_pest_bar(tests.len(), pending, filters, modes, cx);
         // What the campaign under way covers: those rows show as loading —
         // the left panel says what runs, not only the run panel.
         let running: Rc<Vec<bool>> = Rc::new(match self.pest_runs.get(&active) {
@@ -1433,7 +1511,7 @@ impl ClaudhubApp {
         let labels = state.map(|s| s.labels.clone()).unwrap_or_default();
         let empty_folds = HashSet::new();
         let expanded = state.map(|s| &s.expanded).unwrap_or(&empty_folds);
-        let rows: Rc<Vec<Row>> = Rc::new(rows(
+        let rows: Rc<Vec<Row>> = Rc::new(rows_among(
             &tests,
             &labels,
             &statuses,
@@ -1441,13 +1519,14 @@ impl ClaudhubApp {
             &query,
             expanded,
             only_failed,
+            changed.as_ref(),
         ));
         if rows.is_empty() {
             return v_flex()
                 .size_full()
                 .child(bar)
                 .children(find)
-                .child(empty_pest(&query, pending, only_failed, cx))
+                .child(empty_pest(&query, pending, filters, cx))
                 .into_any_element();
         }
 
@@ -1493,7 +1572,7 @@ impl ClaudhubApp {
         &mut self,
         count: usize,
         pending: bool,
-        only_failed: bool,
+        (only_failed, only_changed): (bool, bool),
         modes: Option<(bool, bool, bool, bool)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1558,6 +1637,20 @@ impl ClaudhubApp {
             .child(icon("circle-check").xsmall())
             .child(summary)
             .child(self.find_button(Pane::Tests, cx))
+            .child(
+                Button::new("pest-only-changed")
+                    .ghost()
+                    .small()
+                    .icon(icon("git-branch"))
+                    .tooltip(tr!("tests-only-changed"))
+                    .selected(only_changed)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if let Some(active) = this.active.clone() {
+                            this.pest.entry(active).or_default().only_changed = Some(!only_changed);
+                        }
+                        cx.notify();
+                    })),
+            )
             .child(
                 Button::new("pest-only-failed")
                     .ghost()
@@ -2146,11 +2239,18 @@ fn missing_pest(pending: bool, cx: &App) -> gpui_kit::AnyElement {
 /// Nothing to show: a listing under way, a search or the failures filter
 /// that found nothing, or a suite with no test at all — different things,
 /// and saying the wrong one is how a panel reads as broken.
-fn empty_pest(query: &str, pending: bool, only_failed: bool, cx: &App) -> gpui_kit::AnyElement {
+fn empty_pest(
+    query: &str,
+    pending: bool,
+    (only_failed, only_changed): (bool, bool),
+    cx: &App,
+) -> gpui_kit::AnyElement {
     let message = if pending {
         tr!("tests-loading")
     } else if only_failed {
         tr!("tests-none-failing")
+    } else if only_changed && query.trim().is_empty() {
+        tr!("tests-none-changed")
     } else if query.trim().is_empty() {
         tr!("tests-empty")
     } else {
@@ -2783,6 +2883,35 @@ mod tests {
     }
 
     /// The failures filter keeps the red rows and counts them on the way up.
+    /// Only the tests of the files the branch touched, folders open.
+    #[test]
+    fn the_changed_filter_keeps_the_branchs_tests() {
+        let mut tests = suite();
+        for (at, test) in tests.iter_mut().enumerate() {
+            test.file = format!("tests/{at}.php");
+        }
+        let (labels, statuses) = plain(&tests);
+        let changed: HashSet<String> = [String::from("tests/0.php")].into();
+        let shown = rows_among(
+            &tests,
+            &labels,
+            &statuses,
+            &vec![false; tests.len()],
+            "",
+            &HashSet::new(),
+            false,
+            Some(&changed),
+        );
+        let kept: Vec<usize> = shown
+            .iter()
+            .filter_map(|row| match row {
+                Row::Test { test, .. } => Some(*test),
+                Row::Dir { .. } => None,
+            })
+            .collect();
+        assert_eq!(kept, vec![0]);
+    }
+
     #[test]
     fn the_failures_filter_keeps_the_red() {
         let tests = suite();

@@ -403,7 +403,7 @@ bord. **Le titre d'un tableau est à lui et défile avec lui** (`board_title`) :
 placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
 
 - **Des onglets et une seule vue** (`focus::View`, retenue par worktree) :
-  Accueil, Git, Revue, PR, note principale, TODO, Terminaux. Des vues de types
+  Accueil, Git, Revue, PR, Tests, note principale, TODO, Terminaux. Des vues de types
   différents côte à côte ont été essayées et refusées.
 - **L'Accueil** (`ui::summary_view`) : à gauche l'état en cartes (branche, PR
   et CI, ce qui attend un commit, revue, tâches, note principale, ce qui
@@ -411,7 +411,7 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
   (`focus::shown_terminal`). Le titre d'une carte ouvre son onglet ; un geste
   simple se fait sur la carte (une tâche cochée sur n'importe quel worktree :
   `toggle_task_in`).
-- **Git, Revue et TODO sont les panneaux de l'éditeur eux-mêmes**, un
+- **Git, Revue, Tests et TODO sont les panneaux de l'éditeur eux-mêmes**, un
   exemplaire de chaque : vivants sur le worktree regardé seulement, et tant
   qu'aucune feuille ne peint les mêmes panneaux — une liste virtuelle peinte
   deux fois partagerait son défilement. La PR et la CI ne sont lues que pour le
@@ -421,6 +421,9 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
   vérifications, ses fils de revue — répondus et résolus d'ici par GraphQL,
   le corps en variable et jamais dans la requête — et prête / brouillon /
   fusionner. Chaque geste relit tout (`GithubState::pr_action_call`).
+- **L'onglet Tests** montre par défaut les seuls tests écrits dans un fichier
+  que la branche a touché — depuis sa base ou en cours (`branch_touched`,
+  `tests_view::rows_among`) ; le même filtre existe, éteint, dans l'éditeur.
 - **La note principale** est celle qu'on épingle (`pinned_note`), à défaut la
   plus récente (`focus::principal_note`).
 - **Ce qu'un agent fait se lit pour tous les terminaux des worktrees vivants**
