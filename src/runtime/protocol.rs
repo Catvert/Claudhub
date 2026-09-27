@@ -124,6 +124,10 @@ pub enum Cmd {
         original: Option<PathBuf>,
         context: usize,
         untracked: bool,
+        /// Under `Since`, the disk's tree the list was read against
+        /// (`Evt::DiffFiles`): the file diffs against it rather than building
+        /// its own. `None` builds one — no list yet, or one being re-read.
+        tree: Option<String>,
     },
     LoadBranches {
         main: PathBuf,
@@ -1149,6 +1153,9 @@ pub enum Evt {
         worktree: WorktreeId,
         range: DiffRange,
         files: Vec<DiffFile>,
+        /// Under `Since`, the tree of the disk this list compares — see
+        /// `DiffRange::disk_tree`. Handed back with each file opened from it.
+        tree: Option<String>,
     },
     /// A file's diff, with the range it was read in: the same path is asked
     /// for in two ranges — "Changes" and the branch review list it both —

@@ -290,6 +290,11 @@ pub struct ReviewState {
     /// panel that asks, and it asks at render time: without this guard, every
     /// frame would restart the command.
     pub pending_files: std::collections::HashSet<DiffRange>,
+    /// The disk's tree the `Since` list on screen was read against, with its
+    /// range: a file opened from that list diffs against it rather than
+    /// building its own. Dropped whenever the list is asked again — the disk
+    /// has moved, and until the new list arrives a file builds a fresh tree.
+    pub disk_tree: Option<(DiffRange, String)>,
     pub selected: Option<PathBuf>,
     /// The displayed diff, with everything derived from it. An `Rc` because the
     /// render has to capture it in the virtualised list's closure, and copying
@@ -500,6 +505,7 @@ impl Default for ReviewState {
             status: Status::default(),
             files: HashMap::new(),
             pending_files: std::collections::HashSet::new(),
+            disk_tree: None,
             selected: None,
             diff: None,
             unstaged: None,
@@ -2451,7 +2457,8 @@ impl ClaudhubApp {
                 worktree,
                 range,
                 files,
-            } => self.diff_files_arrived(worktree, range, files, cx),
+                tree,
+            } => self.diff_files_arrived(worktree, range, files, tree, cx),
             Evt::FileDiff {
                 worktree,
                 range,
@@ -2941,6 +2948,9 @@ impl ClaudhubApp {
         let stale: Vec<DiffRange> = state.files.keys().cloned().collect();
         for range in stale {
             if state.pending_files.insert(range.clone()) {
+                if state.disk_tree.as_ref().is_some_and(|(of, _)| *of == range) {
+                    state.disk_tree = None;
+                }
                 self.git.send(Cmd::LoadDiffFiles {
                     worktree: worktree.clone(),
                     range,
@@ -2970,12 +2980,16 @@ impl ClaudhubApp {
         worktree: PathBuf,
         range: DiffRange,
         files: Vec<DiffFile>,
+        tree: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
         state.pending_files.remove(&range);
+        if let Some(tree) = tree {
+            state.disk_tree = Some((range.clone(), tree));
+        }
         // Did the displayed file come from this range, and is it still there? If
         // it has gone — staged, discarded, committed — leaving its diff on
         // screen would mean reviewing a state that no longer exists.
@@ -4001,6 +4015,12 @@ impl ClaudhubApp {
                     .then(|| state.status.file(&path).and_then(|f| f.original.clone()))
                     .flatten()
             });
+        // The tree the list was read against, when it is this range's.
+        let tree = state
+            .disk_tree
+            .as_ref()
+            .filter(|(of, _)| *of == range)
+            .map(|(_, tree)| tree.clone());
         // Opening a file is leaving the merge: the centre shows one or the
         // other, and what one has just clicked is what one wants to see. After
         // the state above and not before, so that one lookup serves for all of
@@ -4013,6 +4033,7 @@ impl ClaudhubApp {
             original,
             context: Settings::global(cx).context_lines(),
             untracked,
+            tree,
         });
         // The remainder: only a partially staged file has an "other part",
         // and only the working range commits.
@@ -4080,6 +4101,9 @@ impl ClaudhubApp {
         };
         if state.files.contains_key(&range) || !state.pending_files.insert(range.clone()) {
             return;
+        }
+        if state.disk_tree.as_ref().is_some_and(|(of, _)| *of == range) {
+            state.disk_tree = None;
         }
         self.git.send(Cmd::LoadDiffFiles { worktree, range });
         cx.notify();
