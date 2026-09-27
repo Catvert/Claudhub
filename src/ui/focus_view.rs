@@ -1381,7 +1381,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match view {
-            View::Home => self.render_home_view(path, at_work, cx),
+            View::Home => self.render_home_view(path, at_work, window, cx),
             View::Git => self.render_git_view(path, window, cx),
             View::Review => self.render_review_card(path, true, false, window, cx),
             View::Notes => self.render_notes_view(path, cx),

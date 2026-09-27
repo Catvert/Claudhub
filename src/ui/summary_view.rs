@@ -5,9 +5,10 @@
 //! conflict, a failed CI run, commits to pull, files to commit, remarks,
 //! commits to push —, each with the button that deals with it, and no strip
 //! at all when all is quiet (`focus::attention`). Under it two columns: on
-//! the left what moves — the agents, each with its last lines, the to-do
-//! list, the principal note —; on the right what stands — the branch, its
-//! pull request and CI, what waits for a commit, the review, what runs.
+//! the left the state of things — what waits for a commit, the review, the
+//! to-do list, the principal note, what runs —; on the right the branch,
+//! its pull request and CI, and under them **the terminals themselves**, a
+//! sub-tab each: an agent is worked with, not read about.
 //!
 //! A card's title opens its tab, the whole of it; what is done in one
 //! gesture is done on the card — a task ticked or added, a recipe started,
@@ -23,9 +24,7 @@ use gpui_kit::component::{
     menu::DropdownMenu as _,
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
-use gpui_kit::{
-    div, prelude::*, px, AnyElement, Context, Entity, Hsla, SharedString, Subscription, Window,
-};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, Hsla, SharedString, Window};
 
 use crate::runtime::{Action, Cmd};
 use crate::tr;
@@ -35,7 +34,6 @@ use crate::ui::focus::{self, Attention, View};
 use crate::ui::focus_view::view_name;
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
-use crate::ui::terminal_view::TerminalView;
 
 /// The open tasks the home lists; the tab has the rest.
 const HOME_TASKS: usize = 12;
@@ -47,51 +45,8 @@ const HOME_COMMITS: usize = 5;
 const HOME_FILES: usize = 8;
 /// The review's heaviest files the home draws a bar for.
 const HOME_HEAVIEST: usize = 6;
-/// The lines of a terminal its preview shows.
-const PREVIEW_LINES: usize = 5;
-
-/// A terminal's last lines, as the home previews them: an entity of its
-/// own that the terminal's view notifies. The terminal repaints itself on
-/// output, not the application, and a preview read in the application's
-/// render would stay as the last frame of the application left it.
-pub(super) struct TerminalPreview {
-    view: Entity<TerminalView>,
-    _observed: Subscription,
-}
-
-impl TerminalPreview {
-    fn new(view: Entity<TerminalView>, cx: &mut Context<Self>) -> Self {
-        let observed = cx.observe(&view, |_, _, cx| cx.notify());
-        Self {
-            view,
-            _observed: observed,
-        }
-    }
-}
-
-impl Render for TerminalPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lines = self.view.read(cx).tail(PREVIEW_LINES);
-        let theme = cx.theme();
-        v_flex()
-            .w_full()
-            .px_2()
-            .py_1p5()
-            .rounded(theme.radius)
-            .bg(theme.secondary)
-            .font_family(theme.mono_font_family.clone())
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .when(lines.is_empty(), |el| el.child("…"))
-            .children(lines.into_iter().map(|line| {
-                div()
-                    .w_full()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(SharedString::from(line))
-            }))
-    }
-}
+/// The least height of the home's terminal: under it, the columns scroll.
+const HOME_TERMINAL_MIN: f32 = 320.;
 
 impl ClaudhubApp {
     /// A board's tabs — the home first —, each saying what waits in it,
@@ -252,6 +207,7 @@ impl ClaudhubApp {
         &mut self,
         path: &Path,
         at_work: &overview::AtWork,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // The worktree on show has the editor's readings — its pull request
@@ -268,38 +224,44 @@ impl ClaudhubApp {
                 self.ensure_files(range, cx);
             }
         }
-        let alive: Vec<gpui_kit::EntityId> =
-            self.terminals.iter().map(|t| t.view.entity_id()).collect();
-        self.terminal_previews.retain(|id, _| alive.contains(id));
-
         let strip = self.render_attention(path, at_work, cx);
         let left = v_flex()
-            .flex_grow(3.)
-            .flex_basis(px(0.))
-            .min_w(px(320.))
-            .gap_3()
-            .child(self.home_agents(path, at_work, cx))
-            .child(self.home_tasks(path, cx))
-            .child(self.home_note(path, cx));
-        let right = v_flex()
+            .id("focus-home-left")
             .flex_grow(2.)
             .flex_basis(px(0.))
             .min_w(px(300.))
+            .h_full()
             .gap_3()
-            .child(self.home_branch(path, cx))
+            .overflow_y_scroll()
             .child(self.home_to_commit(path, cx))
             .child(self.home_review(path, cx))
+            .child(self.home_tasks(path, cx))
+            .child(self.home_note(path, cx))
             .children(self.home_run(path, cx));
+        let right = v_flex()
+            .flex_grow(3.)
+            .flex_basis(px(0.))
+            .min_w(px(360.))
+            .h_full()
+            .gap_3()
+            .child(div().flex_none().w_full().child(self.home_branch(path, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(HOME_TERMINAL_MIN))
+                    .w_full()
+                    .child(self.home_terminals(path, at_work, window, cx)),
+            );
         v_flex()
             .id(SharedString::from(format!("focus-home-{}", path.display())))
             .size_full()
             .gap_3()
-            .overflow_y_scroll()
             .children(strip)
             .child(
                 h_flex()
+                    .flex_1()
+                    .min_h_0()
                     .w_full()
-                    .items_start()
                     .gap_3()
                     .child(left)
                     .child(right),
@@ -551,10 +513,11 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// Goes to a terminal to answer it: the board's agents, and the keys in
-    /// that terminal.
+    /// Goes to a terminal to answer it: the home, that terminal under its
+    /// sub-tabs, and the keys in it.
     fn reply_to(&mut self, path: &Path, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_board_view(path, View::Terminals, cx);
+        self.home_terminal.insert(path.to_path_buf(), id);
+        self.show_board_view(path, View::Home, cx);
         if let Some(view) = self
             .terminals
             .iter()
@@ -565,145 +528,181 @@ impl ClaudhubApp {
         }
     }
 
-    /// A terminal's preview, made the first time it is asked for.
-    fn terminal_preview(
-        &mut self,
-        view: &Entity<TerminalView>,
-        cx: &mut Context<Self>,
-    ) -> Entity<TerminalPreview> {
-        let id = view.entity_id();
-        if let Some(preview) = self.terminal_previews.get(&id) {
-            return preview.clone();
-        }
-        let preview = cx.new(|cx| TerminalPreview::new(view.clone(), cx));
-        self.terminal_previews.insert(id, preview.clone());
-        preview
-    }
-
-    /// The agents: each terminal, what its agent is doing and its last
-    /// lines — a press goes into it —, and what opens another.
-    fn home_agents(
+    /// The terminals, live: a sub-tab each — what its agent is doing, by
+    /// the dot and the word — and the one chosen under them, to type in.
+    /// At the right of the sub-tabs, what opens another, and the way to
+    /// them all side by side.
+    fn home_terminals(
         &mut self,
         path: &Path,
         at_work: &overview::AtWork,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let terminals: Vec<(u64, Entity<TerminalView>, Option<String>)> = self
+        let terminals: Vec<(u64, Option<String>)> = self
             .terminals
             .iter()
             .filter(|terminal| terminal.worktree == path)
-            .map(|terminal| {
-                (
-                    terminal.view.entity_id().as_u64(),
-                    terminal.view.clone(),
-                    terminal.session.clone(),
-                )
-            })
+            .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.session.clone()))
             .collect();
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for (id, view, session) in terminals {
-            let (_, name) = self.card_name(&Node::Terminal(id), cx);
-            let doing = at_work.terminals.get(&id).copied().unwrap_or(Doing::Rest);
+        let waiting: Vec<(u64, bool)> = terminals
+            .iter()
+            .map(|(id, _)| (*id, at_work.terminals.get(id) == Some(&Doing::Waiting)))
+            .collect();
+        let shown = focus::shown_terminal(self.home_terminal.get(path).copied(), &waiting);
+        let mut tabs: Vec<AnyElement> = Vec::new();
+        for (id, session) in &terminals {
+            let (_, name) = self.card_name(&Node::Terminal(*id), cx);
+            let doing = at_work.terminals.get(id).copied().unwrap_or(Doing::Rest);
             let activity = session
                 .as_deref()
                 .and_then(|session| self.agents.session(session));
-            let (word, tint) = match (activity, doing) {
-                (_, Doing::Waiting) | (Some(crate::agent::Activity::Waiting(_)), _) => {
-                    let word = match activity {
-                        Some(crate::agent::Activity::Waiting(message)) if !message.is_empty() => {
-                            tr!("agent-waiting", { message: message.clone() })
-                        }
-                        _ => tr!("agent-waiting-bare"),
-                    };
-                    (Some(word), theme.danger)
-                }
-                (_, Doing::Working) | (Some(crate::agent::Activity::Working), _) => {
-                    (Some(tr!("focus-agent-working")), theme.warning)
-                }
-                (Some(crate::agent::Activity::Finished), _) => {
-                    (Some(tr!("agent-finished")), theme.success)
-                }
-                _ => (None, theme.muted_foreground),
+            let tint = match (activity, doing) {
+                (_, Doing::Waiting) | (Some(crate::agent::Activity::Waiting(_)), _) => theme.danger,
+                (_, Doing::Working) | (Some(crate::agent::Activity::Working), _) => theme.warning,
+                (Some(crate::agent::Activity::Finished), _) => theme.success,
+                _ => theme.muted_foreground.opacity(0.5),
             };
-            let preview = self.terminal_preview(&view, cx);
-            let board = path.to_path_buf();
-            rows.push(
-                v_flex()
-                    .id(("focus-home-agent", id as usize))
-                    .w_full()
-                    .gap_1()
+            let lit = shown == Some(*id);
+            let (board, pressed) = (path.to_path_buf(), *id);
+            tabs.push(
+                h_flex()
+                    .id(("focus-home-terminal-tab", *id as usize))
+                    .flex_none()
+                    .max_w(px(220.))
+                    .h(super::theme::bar_height(cx))
+                    .px_2()
+                    .gap_1p5()
+                    .items_center()
                     .cursor_pointer()
+                    .rounded(theme.radius)
+                    .text_sm()
+                    .when(lit, |el| {
+                        el.bg(theme.background)
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_color(theme.foreground)
+                    })
+                    .when(!lit, |el| {
+                        el.text_color(theme.muted_foreground)
+                            .hover(|style| style.bg(theme.list_hover))
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reply_to(&board, id, window, cx);
+                        this.reply_to(&board, pressed, window, cx);
                     }))
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
-                            .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
-                            .child(div().min_w_0().truncate().text_sm().child(name))
-                            .children(word.map(|word| {
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(tint)
-                                    .child(word)
-                            })),
-                    )
-                    .child(preview)
+                    .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
+                    .child(div().min_w_0().truncate().child(name))
                     .into_any_element(),
             );
         }
-        let count = rows.len();
-        let body = if rows.is_empty() {
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(tr!("focus-terminals-none"))
-                .into_any_element()
-        } else {
-            v_flex().gap_3().children(rows).into_any_element()
-        };
         let worktree = path.to_path_buf();
+        let every = path.to_path_buf();
         let (app, hang) = (cx.entity().downgrade(), Hang::Worktree(path.to_path_buf()));
-        let actions = vec![
-            Button::new("focus-home-terminal")
-                .ghost()
-                .xsmall()
-                .icon(icon("plus"))
-                .label(tr!("terminal-new"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_focus_terminal(&worktree, window, cx);
-                }))
-                .into_any_element(),
-            Button::new("focus-home-agent-add")
-                .ghost()
-                .xsmall()
-                .icon(icon("bot"))
-                .label(tr!("focus-home-add"))
-                .dropdown_menu(move |menu, _, cx| {
-                    super::overview_view::add_items(&app, &hang, false, menu, cx)
-                })
-                .into_any_element(),
-        ];
-        let (glyph, title) = view_name(View::Terminals);
-        let detail = (count > 0).then(|| {
-            div()
-                .child(SharedString::from(count.to_string()))
-                .into_any_element()
-        });
-        self.home_card(
-            path,
-            glyph,
-            title,
-            View::Terminals,
-            detail,
-            actions,
-            body,
-            cx,
-        )
+        let bar = h_flex()
+            .flex_none()
+            .w_full()
+            .gap_1()
+            .items_center()
+            .child(
+                h_flex()
+                    .id("focus-home-terminal-tabs")
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .overflow_x_scroll()
+                    .children(tabs),
+            )
+            .child(
+                Button::new("focus-home-terminal")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("plus"))
+                    .tooltip(tr!("terminal-new"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_terminal(&worktree, window, cx);
+                    })),
+            )
+            .child(
+                Button::new("focus-home-agent-add")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("bot"))
+                    .label(tr!("focus-home-add"))
+                    .dropdown_menu(move |menu, _, cx| {
+                        super::overview_view::add_items(&app, &hang, false, menu, cx)
+                    }),
+            )
+            .child(
+                Button::new("focus-home-terminals-all")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("columns-2"))
+                    .tooltip(tr!("focus-home-terminals-all"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_board_view(&every, View::Terminals, cx);
+                    })),
+            );
+        let body = match shown.and_then(|id| {
+            self.terminals
+                .iter()
+                .find(|terminal| terminal.view.entity_id().as_u64() == id)
+        }) {
+            Some(terminal) => {
+                let doing = at_work
+                    .terminals
+                    .get(&terminal.view.entity_id().as_u64())
+                    .copied()
+                    .unwrap_or(Doing::Rest);
+                self.render_tile(terminal, None, 1., doing, window, cx)
+            }
+            None => {
+                let worktree = path.to_path_buf();
+                v_flex()
+                    .size_full()
+                    .gap_2()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(tr!("focus-terminals-none")),
+                    )
+                    .child(
+                        Button::new("focus-home-terminal-open")
+                            .small()
+                            .icon(icon("square-terminal"))
+                            .label(tr!("terminal-new"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_home_terminal(&worktree, window, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .size_full()
+            .gap_1()
+            .child(bar)
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .into_any_element()
+    }
+
+    /// Opens a shell from the home and shows it there, under its sub-tab,
+    /// the keys in it.
+    fn open_home_terminal(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_terminal(worktree, super::terminal_view::Launch::shell(), window, cx);
+        if let Some(view) = self.terminals.last().map(|terminal| terminal.view.clone()) {
+            self.home_terminal
+                .insert(worktree.to_path_buf(), view.entity_id().as_u64());
+            super::dialogs::focus_field(&view, window, cx);
+        }
+        cx.notify();
     }
 
     /// The to-do list: its open tasks, ticked here, how many are done, and
@@ -1205,6 +1204,13 @@ impl ClaudhubApp {
         let open = self.open_findings(path).len();
         let mut rows: Vec<AnyElement> = Vec::new();
         match &files {
+            Some(files) if files.is_empty() => rows.push(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(tr!("review-clean"))
+                    .into_any_element(),
+            ),
             Some(files) => {
                 let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.1, r + f.2));
                 rows.push(
@@ -1315,11 +1321,16 @@ impl ClaudhubApp {
         )
     }
 
-    /// What runs: the environment and the recipes, each with its state and
-    /// its ▶ — ↻ while it runs — and ■. `None` for a worktree with nothing
-    /// to run.
+    /// What runs: the environment and the recipes running now, each with
+    /// its ↻ and ■. `None` when nothing runs — what can be started is the
+    /// board title's widget, and a card listing thirty recipes said less
+    /// than its selector.
     fn home_run(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let configs = self.run_configs(path);
+        let configs: Vec<_> = self
+            .run_configs(path)
+            .into_iter()
+            .filter(|config| self.runs(path, config, cx))
+            .collect();
         if configs.is_empty() {
             return None;
         }

@@ -149,19 +149,19 @@ pub fn heaviest(
         .collect()
 }
 
-/// The last lines a terminal shows, for its preview: the blank ones under
-/// its prompt left out — a screen is mostly empty below where it writes —,
-/// at most `count`, each with its trailing blanks trimmed.
-pub fn tail_lines(lines: &[String], count: usize) -> Vec<String> {
-    let end = lines
+/// The terminal a board's home shows under its sub-tabs — `terminals` in
+/// the order they were opened, with what their agent is doing —: the one
+/// chosen while it lives, else the first whose agent asks something, else
+/// the last opened.
+pub fn shown_terminal(chosen: Option<u64>, terminals: &[(u64, bool)]) -> Option<u64> {
+    if let Some(chosen) = chosen.filter(|id| terminals.iter().any(|(t, _)| t == id)) {
+        return Some(chosen);
+    }
+    terminals
         .iter()
-        .rposition(|line| !line.trim().is_empty())
-        .map_or(0, |last| last + 1);
-    let start = end.saturating_sub(count);
-    lines[start..end]
-        .iter()
-        .map(|line| line.trim_end().to_string())
-        .collect()
+        .find(|(_, waiting)| *waiting)
+        .or(terminals.last())
+        .map(|(id, _)| *id)
 }
 
 /// The worktrees on show, side by side: the ones chosen in the sidebar, as
@@ -482,16 +482,14 @@ mod tests {
         assert!(heaviest(&[], 3).is_empty());
     }
 
-    /// The last written lines, the blank screen under them left out.
+    /// The one chosen while it lives; else the one asking; else the last.
     #[test]
-    fn a_preview_is_the_last_written_lines() {
-        let lines: Vec<String> = ["$ ls", "a  b  ", "$ claude", "", "  ", ""]
-            .iter()
-            .map(|line| line.to_string())
-            .collect();
-        assert_eq!(tail_lines(&lines, 2), vec!["a  b", "$ claude"]);
-        assert_eq!(tail_lines(&lines, 9).len(), 3);
-        assert!(tail_lines(&["".to_string()], 3).is_empty());
+    fn the_home_shows_the_chosen_terminal_else_the_one_asking() {
+        let terminals = [(1, false), (2, true), (3, false)];
+        assert_eq!(shown_terminal(Some(3), &terminals), Some(3));
+        assert_eq!(shown_terminal(Some(9), &terminals), Some(2));
+        assert_eq!(shown_terminal(None, &[(1, false), (3, false)]), Some(3));
+        assert_eq!(shown_terminal(None, &[]), None);
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
