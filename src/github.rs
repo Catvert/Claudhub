@@ -676,13 +676,8 @@ pub fn merge_command(number: u64, how: MergeHow) -> String {
     format!("gh pr merge {number} {flag}")
 }
 
-/// Single-quotes a value for `sh -c`.
-///
-/// A branch name, a pull request's body, go out on a command line: one
-/// apostrophe in them, and the rest of the command is read as something else.
-pub fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
+/// Single-quotes a value for `sh -c`: every `gh` line is one.
+pub use crate::text::single_quoted as quote;
 
 #[cfg(test)]
 mod tests {

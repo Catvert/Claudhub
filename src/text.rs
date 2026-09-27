@@ -72,6 +72,16 @@ pub fn ellipsized(text: &str, max: usize) -> String {
     }
 }
 
+/// One word for a POSIX shell, between single quotes: nothing is special in
+/// there but the quote itself, which closes, is escaped and reopens (`'\''`).
+///
+/// For a line that goes to `sh -c` whole — a branch name, a pull request's
+/// body, a test filter: one apostrophe left bare, and the rest of the command
+/// is read as something else.
+pub fn single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// A fenced block the text cannot close: one backtick more than its longest
 /// run, and never fewer than three. `language` follows the opening fence, and
 /// may be empty.
@@ -174,6 +184,19 @@ mod tests {
         assert_eq!(ellipsized("été", 3), "été");
         assert_eq!(ellipsized("étés", 3), "été…");
         assert_eq!(ellipsized("", 0), "");
+    }
+
+    /// What `sh -c` reads back is the value, apostrophes and all.
+    #[test]
+    fn a_quoted_word_survives_the_shell() {
+        assert_eq!(single_quoted("it's"), r"'it'\''s'");
+        let value = "l'été $HOME `x` \\";
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", single_quoted(value)))
+            .output()
+            .expect("sh runs");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), value);
     }
 
     #[test]

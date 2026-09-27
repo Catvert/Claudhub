@@ -684,12 +684,7 @@ fn vitest_rows(json: &str, worktree: &Path) -> Vec<Test> {
         .filter_map(|entry| {
             let name = crate::json::string(entry, "name")?.to_string();
             let file = crate::json::string(entry, "file")?;
-            let file = Path::new(file)
-                .strip_prefix(worktree)
-                .ok()
-                .and_then(|rel| rel.to_str())
-                .unwrap_or(file)
-                .to_string();
+            let file = relative(file, worktree);
             Some(Test {
                 runner: Runner::Vitest,
                 class: file.clone(),
@@ -701,6 +696,18 @@ fn vitest_rows(json: &str, worktree: &Path) -> Vec<Test> {
             })
         })
         .collect()
+}
+
+/// A path a runner wrote absolute, made relative to the worktree — the file
+/// is also the row the tree and the fates are keyed on. One outside the
+/// worktree stays as it was written.
+fn relative(path: &str, worktree: &Path) -> String {
+    Path::new(path)
+        .strip_prefix(worktree)
+        .ok()
+        .and_then(|rel| rel.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Asks Jest. `--listTests` only names files — Jest cannot enumerate tests
@@ -718,12 +725,7 @@ fn jest_rows(output: &str, worktree: &Path) -> Vec<Test> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let rel = Path::new(line.trim())
-                .strip_prefix(worktree)
-                .ok()
-                .and_then(|rel| rel.to_str())
-                .unwrap_or(line.trim())
-                .to_string();
+            let rel = relative(line.trim(), worktree);
             let (dir, file) = match rel.rsplit_once('/') {
                 Some((dir, file)) => (dir.to_string(), file.to_string()),
                 None => (String::new(), rel.clone()),
@@ -755,14 +757,23 @@ fn title_pattern(title: &str) -> String {
 /// space-joined full title, so it goes through this alone — `title_pattern`'s
 /// ` > ` rewrite would break a Jest title that happens to contain one.
 fn title_regex(joined: &str) -> String {
-    let mut pattern = String::with_capacity(joined.len());
-    for c in joined.chars() {
-        if ".^$*+?()[]{}|\\/".contains(c) {
-            pattern.push('\\');
+    escaped(joined, ".^$*+?()[]{}|\\/")
+}
+
+/// What a JS regex reads as syntax outside a class.
+const REGEX_SPECIAL: &str = ".^$*+?()[]{}|\\";
+
+/// `text` with a backslash before each character of `special` — a literal in
+/// a regex or a glob, whichever `special` describes.
+fn escaped(text: &str, special: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if special.contains(c) {
+            out.push('\\');
         }
-        pattern.push(c);
+        out.push(c);
     }
-    pattern
+    out
 }
 
 /// What a failed listing has to say, both streams read.
@@ -1595,12 +1606,7 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
         let Some(path) = crate::json::string(file, "name") else {
             continue;
         };
-        let rel = Path::new(path)
-            .strip_prefix(worktree)
-            .ok()
-            .and_then(|rel| rel.to_str())
-            .unwrap_or(path)
-            .to_string();
+        let rel = relative(path, worktree);
         for case in crate::json::items(file, "assertionResults") {
             let Some(name) = crate::json::string(case, "fullName") else {
                 continue;
@@ -1944,8 +1950,7 @@ fn shell_word(part: &str) -> String {
     if quoted != part || !(expands || part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c))) {
         return quoted;
     }
-    // Bare means no quote in it: `join_command` would have quoted that.
-    format!("'{part}'")
+    crate::text::single_quoted(part)
 }
 
 /// The arguments that narrow a JS run to `target.path`, **anchored**: neither
@@ -1997,28 +2002,14 @@ fn js_path_args(target: &Target) -> Vec<String> {
 /// A path as a literal in a picomatch glob — what Vitest's `--exclude` is
 /// read by. `[id].test.ts` and `(group)/` are ordinary JS file names.
 fn glob_escape(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for c in path.chars() {
-        if "\\*?[]{}()!@+".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    escaped(path, "\\*?[]{}()!@+")
 }
 
 /// A path as a literal in a Jest path regex. The `/` stays bare: Jest turns
 /// each one into the platform's separator, and an escaped one would become
 /// a separator after a stray backslash on Windows.
 fn path_regex(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for c in path.chars() {
-        if ".^$*+?()[]{}|\\".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    escaped(path, REGEX_SPECIAL)
 }
 
 // — Handing a red test to an agent ——————————————————————————————————————

@@ -76,7 +76,8 @@ src/
   main.rs       le binaire de l'interface : le verrou d'instance, puis `ui::run`
   bin/server.rs le serveur headless
   cmdline.rs    découpe et recompose une ligne de commande (guillemets POSIX)
-  text.rs       le texte nu : échappements ANSI, clôtures Markdown, coupes UTF-8 — pur
+  text.rs       le texte nu : échappements ANSI, clôtures Markdown, coupes UTF-8,
+                guillemets du shell — pur
   json.rs       lire le JSON d'un autre programme, champ par champ — pur
   home.rs       le dossier de l'utilisateur, `~/`, celui de Claude
   wsl.rs        la distro : la lister, y installer le serveur, l'y lancer
