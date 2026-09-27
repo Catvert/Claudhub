@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use gpui_kit::component::{
     dock::{DockPlacement, InsertTarget, PaneRef, PanelId},
     menu::{ContextMenuExt, PopupMenuItem},
-    v_flex, ActiveTheme, WindowExt as _,
+    v_flex, ActiveTheme,
 };
 use gpui_kit::{
     div, prelude::*, px, App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
@@ -2346,25 +2346,21 @@ impl ClaudhubApp {
             return;
         };
         let label = terminal.read(cx).label();
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, label) = (entity.clone(), label.clone());
-            dialog
-                .title(tr!("terminal-close-busy"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label))
-                        .child(div().text_xs().child(tr!("terminal-close-busy-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::confirm())
-                .on_ok(move |_, window, cx| {
-                    entity.update(cx, |this, cx| this.close_terminal(view, window, cx));
-                    true
-                })
-        });
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            tr!("terminal-close-busy"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(tr!("terminal-close-busy-help")))
+                    .into_any_element()
+            },
+            crate::ui::dialogs::confirm,
+            move |this, window, cx| this.close_terminal(view, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// Closes the window — or asks first, when a terminal is in the middle of
@@ -2394,24 +2390,24 @@ impl ClaudhubApp {
         if busy.is_empty() {
             return true;
         }
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let busy = busy.clone();
-            dialog
-                .title(tr!("window-close-busy"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .children(busy.into_iter().map(|label| div().text_sm().child(label)))
-                        .child(div().text_xs().child(tr!("window-close-busy-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    cx.quit();
-                    true
-                })
-        });
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            tr!("window-close-busy"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .children(
+                        busy.iter()
+                            .map(|label| div().text_sm().child(label.clone())),
+                    )
+                    .child(div().text_xs().child(tr!("window-close-busy-help")))
+                    .into_any_element()
+            },
+            crate::ui::dialogs::confirm,
+            |_, _, cx| cx.quit(),
+            window,
+            cx,
+        );
         false
     }
 

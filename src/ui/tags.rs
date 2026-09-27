@@ -316,34 +316,30 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entity = cx.entity();
         let label = SharedString::from(name.clone());
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, name, label) = (entity.clone(), name.clone(), label.clone());
-            dialog
-                .title(if remote {
-                    tr!("tag-delete-remote-title")
-                } else {
-                    tr!("tag-delete-title")
-                })
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(if remote {
-                            tr!("tag-delete-remote-warning")
-                        } else {
-                            tr!("tag-delete-warning")
-                        })),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.delete_tag(name.clone(), remote, cx));
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            if remote {
+                tr!("tag-delete-remote-title")
+            } else {
+                tr!("tag-delete-title")
+            },
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(if remote {
+                        tr!("tag-delete-remote-warning")
+                    } else {
+                        tr!("tag-delete-warning")
+                    }))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| this.delete_tag(name.clone(), remote, cx),
+            window,
+            cx,
+        );
     }
 
     fn delete_tag(&mut self, name: String, remote: bool, cx: &mut Context<Self>) {

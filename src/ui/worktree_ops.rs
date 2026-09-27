@@ -1955,31 +1955,29 @@ impl ClaudhubApp {
             .get(&worktree)
             .filter(|summary| !summary.is_empty())
             .map(|summary| tr!("worktree-remove-wt-dirty", { count: summary.files }));
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (main, worktree, entity) = (main.clone(), worktree.clone(), entity.clone());
-            dialog
-                .title(tr!("worktree-remove-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .children(dirty.clone().map(|dirty| div().text_sm().child(dirty)))
-                        .child(div().text_xs().child(tr!("worktree-remove-wt-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::submit(tr!("worktree-remove")))
-                .on_ok(move |_, window, cx| {
-                    // Deferred for the reason `offer_cleanup` gives: the removal
-                    // opens its console, and `true` closes the topmost dialog.
-                    let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-                    window.defer(cx, move |window, cx| {
-                        entity.update(cx, |this, cx| this.wt_remove(main, &worktree, window, cx));
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("worktree-remove-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .children(dirty.clone().map(|dirty| div().text_sm().child(dirty)))
+                    .child(div().text_xs().child(tr!("worktree-remove-wt-help")))
+                    .into_any_element()
+            },
+            || super::dialogs::submit(tr!("worktree-remove")),
+            move |_, window, cx| {
+                // Deferred for the reason `offer_cleanup` gives: the removal
+                // opens its console, and answering closes the topmost dialog.
+                let (main, worktree) = (main.clone(), worktree.clone());
+                cx.defer_in(window, move |this, window, cx| {
+                    this.wt_remove(main, &worktree, window, cx);
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     fn wt_remove(
@@ -2259,43 +2257,29 @@ impl ClaudhubApp {
             return;
         };
         let label = SharedString::from(format!("{} · {branch}", worktree.display()));
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (worktree, branch, main, entity) = (
-                worktree.clone(),
-                branch.clone(),
-                main.clone(),
-                entity.clone(),
-            );
-            dialog
-                .title(tr!("worktree-cleanup-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(tr!("worktree-cleanup-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, window, cx| {
-                    // The removal opens its console, and it opens **after**
-                    // this dialog has closed: `true` closes the topmost one,
-                    // which would be the console if it were opened here.
-                    let (entity, main, worktree, branch) = (
-                        entity.clone(),
-                        main.clone(),
-                        worktree.clone(),
-                        branch.clone(),
-                    );
-                    window.defer(cx, move |window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.remove_integrated(main, worktree, branch, window, cx)
-                        });
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("worktree-cleanup-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(tr!("worktree-cleanup-help")))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |_, window, cx| {
+                // The removal opens its console, and it opens **after** this
+                // dialog has closed: answering closes the topmost one, which
+                // would be the console if it were opened here.
+                let (main, worktree, branch) = (main.clone(), worktree.clone(), branch.clone());
+                cx.defer_in(window, move |this, window, cx| {
+                    this.remove_integrated(main, worktree, branch, window, cx)
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     /// Removes an integrated worktree, then its branch.
@@ -2875,30 +2859,25 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let label = path.display().to_string();
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (main, path, entity) = (main.clone(), path.clone(), entity.clone());
-            dialog
-                .title(tr!("worktree-remove-title"))
-                .child(div().text_sm().child(label.clone()))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.git.send(Cmd::RemoveWorktree {
-                            main: main.clone(),
-                            path: path.clone(),
-                            // Without `force`, git refuses to remove a worktree
-                            // that has changes — that is the protection we want
-                            // here, and the message will say so.
-                            force: false,
-                        });
-                        cx.notify();
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("worktree-remove-title"),
+            move || div().text_sm().child(label.clone()).into_any_element(),
+            super::dialogs::confirm,
+            move |this, _, cx| {
+                this.git.send(Cmd::RemoveWorktree {
+                    main: main.clone(),
+                    path: path.clone(),
+                    // Without `force`, git refuses to remove a worktree that
+                    // has changes — that is the protection we want here, and
+                    // the message will say so.
+                    force: false,
+                });
+                cx.notify();
+            },
+            window,
+            cx,
+        );
     }
 }
 

@@ -976,23 +976,15 @@ impl ClaudhubApp {
                 tr!("ci-rerun"),
             ),
         };
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            // Cloned into the closure and never read from it: `open_dialog`
-            // keeps a `Fn` called back from the root's own render.
-            let (entity, id) = (entity.clone(), run.id.clone());
-            dialog
-                .title(title.clone())
-                .child(div().text_sm().child(body.clone()))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::submit(label.clone()))
-                .on_ok(move |_, _window, cx| {
-                    let id = id.clone();
-                    entity.update(cx, |this, cx| this.run_gesture(gesture, id, cx));
-                    true
-                })
-        });
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            title,
+            move || div().text_sm().child(body.clone()).into_any_element(),
+            move || crate::ui::dialogs::submit(label.clone()),
+            move |this, _, cx| this.run_gesture(gesture, run.id.clone(), cx),
+            window,
+            cx,
+        );
     }
 
     /// Sends a confirmed cancel or re-run.

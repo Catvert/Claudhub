@@ -34,7 +34,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Editor, EditorState},
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
+    v_flex, ActiveTheme, Disableable, Sizable,
 };
 use gpui_kit::{
     div, prelude::*, px, uniform_list, App, Context, Entity, Pixels, SharedString, Window,
@@ -2815,46 +2815,42 @@ impl ClaudhubApp {
             return;
         }
         let label = SharedString::from(path.display().to_string());
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, label, worktree) = (entity.clone(), label.clone(), worktree.clone());
-            let path = path.clone();
-            // The button that drops the work, and the one Enter makes: saving.
-            // Enter is the answer one gives without reading, so it is the one
-            // that keeps what was typed.
-            let dropping = {
-                let (entity, worktree, path) = (entity.clone(), worktree.clone(), path.clone());
-                move |window: &mut Window, cx: &mut App| {
-                    let (worktree, path) = (worktree.clone(), path.clone());
-                    entity.update(cx, |this, cx| this.close_file(worktree, path, window, cx));
-                }
-            };
-            dialog
-                .title(tr!("editor-discard-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(tr!("editor-discard-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::choose(
+        // The button that drops the work, and the one Enter makes: saving.
+        // Enter is the answer one gives without reading, so it is the one
+        // that keeps what was typed.
+        let dropping = {
+            let (entity, worktree, path) = (cx.entity(), worktree.clone(), path.clone());
+            move |window: &mut Window, cx: &mut App| {
+                let (worktree, path) = (worktree.clone(), path.clone());
+                entity.update(cx, |this, cx| this.close_file(worktree, path, window, cx));
+            }
+        };
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("editor-discard-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(tr!("editor-discard-help")))
+                    .into_any_element()
+            },
+            move || {
+                super::dialogs::choose(
                     tr!("editor-discard-save"),
                     tr!("editor-discard-drop"),
-                    dropping,
-                ))
-                .on_ok(move |_, _window, cx| {
-                    let (worktree, path) = (worktree.clone(), path.clone());
-                    // The tab closes when the write has gone through, and not
-                    // on sending it: refused, it stays, star and text intact.
-                    entity.update(cx, |this, cx| {
-                        this.save_tab_in(&worktree, &path, true, cx);
-                        this.lsp_editor_saved();
-                    });
-                    true
-                })
-        });
+                    dropping.clone(),
+                )
+            },
+            move |this, _, cx| {
+                // The tab closes when the write has gone through, and not on
+                // sending it: refused, it stays, star and text intact.
+                this.save_tab_in(&worktree, &path, true, cx);
+                this.lsp_editor_saved();
+            },
+            window,
+            cx,
+        );
     }
 
     /// Opens a file in the external editor, at a given line.
@@ -3321,27 +3317,21 @@ impl ClaudhubApp {
     /// catch when the file is untracked.
     fn confirm_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let label = SharedString::from(path.display().to_string());
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, path, label) = (entity.clone(), path.clone(), label.clone());
-            dialog
-                .title(tr!("delete-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(tr!("delete-warning"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.file_op(files::Op::Delete { path: path.clone() }, cx)
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("delete-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(tr!("delete-warning")))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| this.file_op(files::Op::Delete { path: path.clone() }, cx),
+            window,
+            cx,
+        );
     }
 
     // — The editor ———————————————————————————————————————————
