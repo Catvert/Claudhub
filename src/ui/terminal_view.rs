@@ -2119,9 +2119,9 @@ impl ClaudhubApp {
             &view,
             window,
             |this, view, _: &TerminalEnded, window, cx| {
-                let stopped = this.terminals.iter().any(|terminal| {
-                    terminal.view.entity_id() == view.entity_id() && terminal.stopping
-                });
+                let stopped = this
+                    .terminal(view.entity_id().as_u64())
+                    .is_some_and(|terminal| terminal.stopping);
                 if stopped {
                     this.close_terminal(view.entity_id(), window, cx);
                 }
