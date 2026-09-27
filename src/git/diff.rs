@@ -244,8 +244,7 @@ pub fn file(
         args.push(path.to_string_lossy().into_owned());
         // Bytes and not `git`'s answer: that one strips the last line's `\r`,
         // and this diff is what a hunk's patch is rebuilt from.
-        let out = super::git_bytes(dir, &args)?;
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        Ok(super::into_text(super::git_bytes(dir, &args)?))
     };
     let mut out = read(original.as_deref())?;
     // The status and this range need not agree on the rename: a file moved
@@ -287,7 +286,7 @@ pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff
     ];
     // Bytes, for `file`'s reason: the remainder's hunks are staged from this.
     let out = super::git_bytes(dir, &args)?;
-    Ok(parse_unified(&String::from_utf8_lossy(&out)))
+    Ok(parse_unified(&super::into_text(out)))
 }
 
 /// The raw text of what is staged, as git writes it.
