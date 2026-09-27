@@ -29,7 +29,7 @@ use gpui_kit::component::{
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
-use gpui_kit::{div, prelude::*, px, uniform_list, App, Context, Entity, SharedString, Window};
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
 
 use crate::git::Stash;
 use crate::runtime::{Action, Cmd};
@@ -37,22 +37,10 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
 use crate::ui::icons::icon;
+use crate::ui::listed::{Empty, Listed, Look, Panel};
 
 /// What is known of a repository's stashes.
-#[derive(Default)]
-pub struct StashesState {
-    /// Behind an `Rc` for the tags' reason: the row closure runs for every
-    /// visible row on every frame and cannot read the application back, so it
-    /// captures the list.
-    pub stashes: Rc<Vec<Stash>>,
-    /// A read has gone out and has not come back — the guard without which
-    /// every frame would restart the command, the panel being what asks and
-    /// asking at render time.
-    pub pending: bool,
-    /// The list has come back at least once. An empty stack and a stack never
-    /// read are the same thing to look at and two different things to act on.
-    pub loaded: bool,
-}
+pub type StashesState = Listed<Stash>;
 
 /// The stash being made, while the dialog is open.
 ///
@@ -116,13 +104,10 @@ impl ClaudhubApp {
     /// Asks for the list, once, at render time — the tags' guard, for the tags'
     /// reason: opening a worktree must not pay for a read nobody will look at.
     fn ensure_stashes(&mut self, main: PathBuf, cx: &mut Context<Self>) {
-        let state = self.stashes.entry(main.clone()).or_default();
-        if state.pending || state.loaded {
-            return;
+        if self.stashes.entry(main.clone()).or_default().ask() {
+            self.git.send(Cmd::LoadStashes { main });
+            cx.notify();
         }
-        state.pending = true;
-        self.git.send(Cmd::LoadStashes { main });
-        cx.notify();
     }
 
     pub(super) fn stashes_arrived(
@@ -131,10 +116,7 @@ impl ClaudhubApp {
         stashes: Vec<Stash>,
         cx: &mut Context<Self>,
     ) {
-        let state = self.stashes.entry(main).or_default();
-        state.stashes = Rc::new(stashes);
-        state.pending = false;
-        state.loaded = true;
+        self.stashes.entry(main).or_default().arrived(stashes);
         cx.notify();
     }
 
@@ -142,8 +124,8 @@ impl ClaudhubApp {
         let Some(main) = self.active_main() else {
             return;
         };
-        let state = self.stashes.entry(main.clone()).or_default();
-        state.pending = true;
+        // The stack stays on screen while it is read again.
+        self.stashes.entry(main.clone()).or_default().refresh(false);
         self.git.send(Cmd::LoadStashes { main });
         cx.notify();
     }
@@ -292,7 +274,7 @@ impl ClaudhubApp {
     fn confirm_clear_stashes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let count = self
             .stashes_of_active()
-            .map(|state| state.stashes.len())
+            .map(|state| state.items.len())
             .unwrap_or(0);
         if count == 0 {
             return;
@@ -382,29 +364,12 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let range = crate::git::DiffRange::Commit {
-            id: hash.clone(),
-            parent: Some(format!("{hash}^")),
-        };
-        let Some(state) = self.review.get_mut(&worktree) else {
+        // The block above the diff comes with it: a stash's message says what
+        // the work was taken from, which is exactly what one asks a stash.
+        let parent = Some(format!("{hash}^"));
+        let Some(range) = self.show_commit(&worktree, hash, parent) else {
             return;
         };
-        state.commit = Some(hash.clone());
-        state.commit_detail = None;
-        state.range = range.clone();
-        state.selected = None;
-        state.diff = None;
-        state.diff_selection = None;
-        state
-            .files
-            .retain(|kept, _| !matches!(kept, crate::git::DiffRange::Commit { .. }));
-        state
-            .pending_files
-            .retain(|kept| !matches!(kept, crate::git::DiffRange::Commit { .. }));
-        // The block above the diff: a stash's message says what the work was
-        // taken from, which is exactly what one asks a stash.
-        self.git
-            .send(crate::runtime::Cmd::LoadCommitDetail { worktree, id: hash });
         self.ensure_files(range, cx);
         cx.notify();
     }
@@ -431,69 +396,42 @@ impl ClaudhubApp {
         let bar = self.render_stashes_bar(cx);
 
         let state = self.stashes.get(&main);
-        // Captured and not read back, and what the search keeps is a list of
-        // **indices** into it: a frame costs no copy of a stash.
-        let stashes = state.map(|state| state.stashes.clone()).unwrap_or_default();
-        let rows: Rc<Vec<usize>> = Rc::new(
-            stashes
-                .iter()
-                .enumerate()
-                .filter(|(_, stash)| {
+        // Captured and not read back: see `render_listed`.
+        let panel = Panel {
+            id: "stashes",
+            items: state.map(|state| state.items.clone()).unwrap_or_default(),
+            rows: state.map_or_else(Vec::new, |state| {
+                state.kept(|stash| {
                     crate::ui::find::matches(&query, &stash.subject)
                         || crate::ui::find::matches(&query, &stash.branch)
                         || crate::ui::find::matches(&query, &stash.name)
                 })
-                .map(|(index, _)| index)
-                .collect(),
-        );
-        if rows.is_empty() {
-            let pending = state.is_some_and(|state| state.pending);
-            return v_flex()
-                .size_full()
-                .child(bar)
-                .children(find)
-                .child(empty_stashes(&query, pending, cx))
-                .into_any_element();
-        }
-
+            }),
+            pending: state.is_some_and(|state| state.pending),
+            query: &query,
+            scroll: &self.stashes_scroll.clone(),
+            empty: Empty {
+                icon: "archive",
+                loading: tr!("stashes-loading"),
+                none: tr!("stashes-empty"),
+            },
+        };
         let look = Look::of(cx);
         let entity = cx.entity();
-        let scroll = self.stashes_scroll.clone();
-        let count = rows.len();
-        v_flex()
-            .size_full()
-            .child(bar)
-            .children(find)
-            .child(
-                div().flex_1().min_h_0().child(
-                    self.scrolled(
-                        "stashes-bar",
-                        &scroll,
-                        crate::ui::motion::Axes::Vertical,
-                        window,
-                        uniform_list("stashes-rows", count, move |visible, _window, cx| {
-                            visible
-                                .map(|index| match rows.get(index) {
-                                    Some(at) => {
-                                        render_stash(index, &stashes, *at, &look, &entity, cx)
-                                    }
-                                    None => div().into_any_element(),
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .size_full()
-                        .track_scroll(&scroll.clone()),
-                        cx,
-                    ),
-                ),
-            )
-            .into_any_element()
+        self.render_listed(
+            panel,
+            bar,
+            find,
+            move |index, stashes, at, cx| render_stash(index, stashes, at, &look, &entity, cx),
+            window,
+            cx,
+        )
     }
 
     fn render_stashes_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self
             .stashes_of_active()
-            .map(|state| state.stashes.len())
+            .map(|state| state.items.len())
             .unwrap_or(0);
         let has_active = self.active.is_some();
         h_flex()
@@ -543,27 +481,6 @@ impl ClaudhubApp {
                     .tooltip(tr!("action-refresh"))
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_stashes(cx))),
             )
-    }
-}
-
-/// What the theme gives a row, read once per frame and not per row.
-#[derive(Clone, Copy)]
-struct Look {
-    /// Two storeys: what the stash says, then where it came from.
-    row: gpui_kit::Pixels,
-    muted: gpui_kit::Hsla,
-    accent: gpui_kit::Hsla,
-    info: gpui_kit::Hsla,
-}
-
-impl Look {
-    fn of(cx: &App) -> Self {
-        Self {
-            row: crate::ui::theme::row_height(cx) * 2.,
-            muted: cx.theme().muted_foreground,
-            accent: cx.theme().accent,
-            info: cx.theme().info,
-        }
     }
 }
 
@@ -786,28 +703,6 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, stash: &Stash) -> Po
                 entity.update(cx, |this, cx| this.confirm_drop_stash(&stash, window, cx));
             })
     })
-}
-
-/// Nothing to show: a read under way, a search that found nothing, or a
-/// repository with nothing put aside — three different things, and saying the
-/// wrong one is how a panel reads as broken.
-fn empty_stashes(query: &str, pending: bool, cx: &App) -> gpui_kit::AnyElement {
-    let message = if pending {
-        tr!("stashes-loading")
-    } else if query.trim().is_empty() {
-        tr!("stashes-empty")
-    } else {
-        tr!("find-no-match")
-    };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("archive"))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
 }
 
 #[cfg(test)]

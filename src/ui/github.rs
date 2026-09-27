@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::{
@@ -505,7 +506,10 @@ pub struct GithubState {
     /// The repository's open pull requests. The branch's own is **found in
     /// here** rather than read on its own: one process answers both questions,
     /// and a list that did not contain it would be a list one could not trust.
-    pub prs: Vec<PullRequest>,
+    ///
+    /// Behind an `Rc`, as the runs: the row closure captures the list, and
+    /// copying it was every frame's cost.
+    pub prs: Rc<Vec<PullRequest>>,
     pub chosen_pr: Option<usize>,
     pub pr_loading: bool,
     /// Which of the lists the panel shows. Pull requests: that is what the
@@ -513,9 +517,9 @@ pub struct GithubState {
     pub mode: Mode,
     pub pr_scroll: gpui_kit::UniformListScrollHandle,
     /// The branch's runs.
-    pub runs: Vec<Run>,
+    pub runs: Rc<Vec<Run>>,
     /// The repository's runs in flight or queued.
-    pub live: Vec<Run>,
+    pub live: Rc<Vec<Run>>,
     /// The run unfolded — a copy, known **by its id** and not by a rank: both
     /// lists are read again while something runs, and a rank would move under
     /// the choice, the jobs shown and the log handed to the agent being
@@ -1219,12 +1223,12 @@ impl ClaudhubApp {
             github.loading = false;
             match result {
                 Ok(out) => {
-                    github.runs = parse_runs(&out);
+                    github.runs = Rc::new(parse_runs(&out));
                     github.refresh_chosen(Mode::Runs);
                     github.error = None;
                 }
                 Err(why) => {
-                    github.runs = Vec::new();
+                    github.runs = Rc::default();
                     github.error = Some(SharedString::from(why));
                 }
             }
@@ -1233,7 +1237,7 @@ impl ClaudhubApp {
             github.live_loading = false;
             match result {
                 Ok(out) => {
-                    github.live = parse_runs(&out);
+                    github.live = Rc::new(parse_runs(&out));
                     github.refresh_chosen(Mode::Live);
                 }
                 Err(why) => github.error = Some(SharedString::from(why)),
@@ -1258,9 +1262,9 @@ impl ClaudhubApp {
         } else if call == github.pr_call {
             github.pr_loading = false;
             match result.and_then(|out| parse_prs(&out)) {
-                Ok(prs) => github.prs = prs,
+                Ok(prs) => github.prs = Rc::new(prs),
                 Err(why) => {
-                    github.prs = Vec::new();
+                    github.prs = Rc::default();
                     github.error = Some(SharedString::from(why));
                 }
             }
@@ -1480,7 +1484,7 @@ impl ClaudhubApp {
                 .map(|(rank, _)| rank)
                 .collect(),
         );
-        let prs = std::rc::Rc::new(self.github.prs.clone());
+        let prs = self.github.prs.clone();
         let here = self.branch_here();
         let chosen = self.github.chosen_pr;
         let entity = cx.entity();
@@ -1813,19 +1817,22 @@ impl ClaudhubApp {
         }
 
         let query = self.query(Pane::Github, cx);
-        let runs: std::rc::Rc<Vec<Run>> = std::rc::Rc::new(
-            runs.iter()
-                .filter(|run| run.matches(&query))
-                .cloned()
-                .collect(),
-        );
+        // Indices into the list, as the pull requests': a frame costs no copy
+        // of a run.
+        let runs = runs.clone();
+        let rows: Vec<usize> = runs
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| run.matches(&query))
+            .map(|(rank, _)| rank)
+            .collect();
         let chosen = self.github.chosen_id().map(str::to_string);
         let entity = cx.entity();
         let theme = cx.theme();
         let (selected, hovered) = (theme.accent, theme.secondary);
         let palette = Palette::of(cx);
         let row_height = crate::ui::theme::row_height(cx) * 2.;
-        let count = runs.len();
+        let count = rows.len();
         let live = mode == Mode::Live;
         let now = now();
         let (id, scroll) = match mode {
@@ -1839,7 +1846,7 @@ impl ClaudhubApp {
                     move |range, _window, _cx| {
                         range
                             .map(|row| {
-                                let run = &runs[row];
+                                let run = &runs[rows[row]];
                                 let app = entity.clone();
                                 let picked = run.clone();
                                 let stage = run.stage();
@@ -2516,17 +2523,19 @@ mod tests {
     fn the_unfolded_run_outlives_the_live_list() {
         let mut state = GithubState {
             mode: Mode::Live,
-            live: parse_runs("44\tNew\tCI\tin_progress\t\n"),
+            live: Rc::new(parse_runs("44\tNew\tCI\tin_progress\t\n")),
             ..Default::default()
         };
         state.chosen = state.live.first().cloned();
         assert!(state.chosen_going());
         // Read again: a newer run first, ours moved to the second rank.
-        state.live = parse_runs("45\tNewer\tCI\tqueued\t\n44\tNew\tCI\tin_progress\t\n");
+        state.live = Rc::new(parse_runs(
+            "45\tNewer\tCI\tqueued\t\n44\tNew\tCI\tin_progress\t\n",
+        ));
         state.refresh_chosen(Mode::Live);
         assert_eq!(state.chosen_id(), Some("44"));
         // Finished: gone from the list, still unfolded.
-        state.live = parse_runs("45\tNewer\tCI\tin_progress\t\n");
+        state.live = Rc::new(parse_runs("45\tNewer\tCI\tin_progress\t\n"));
         state.refresh_chosen(Mode::Live);
         assert_eq!(
             state.chosen_run().map(|run| run.title.as_str()),

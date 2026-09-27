@@ -708,6 +708,11 @@ pub struct ClaudhubApp {
     pub(super) branches_dock: Entity<crate::ui::branch_picker::BranchPicker>,
     /// The worktree picker's surface, kept for its filter field's sake.
     pub(super) worktree_picker: Entity<crate::ui::worktree_picker::WorktreePicker>,
+    /// How many batches of the workers' answers have been handled: what the
+    /// pickers compare to know whether the data behind their kept list moved,
+    /// the application notifying on every hover as well — see
+    /// `picker::Pick::signature`.
+    pub(super) events_seen: u64,
     /// A note's input field. Created **once**: recreated in a `render` or when
     /// the dialog opens, it would lose the cursor, the selection and the text on
     /// the first keystroke.
@@ -1555,6 +1560,7 @@ impl ClaudhubApp {
             branch_picker,
             branches_dock,
             worktree_picker,
+            events_seen: 0,
             note_input,
             prompt_input,
             task_input,
@@ -2126,6 +2132,7 @@ impl ClaudhubApp {
                 }
                 let alive = this
                     .update_in(cx, |app, window, cx| {
+                        app.events_seen += 1;
                         for evt in batch {
                             app.handle_event(evt, window, cx);
                         }

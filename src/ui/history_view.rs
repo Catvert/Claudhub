@@ -285,43 +285,27 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let Some(state) = self.review.get_mut(&worktree) else {
-            return;
-        };
-        let Some(history) = state.history.clone() else {
+        let Some(history) = self
+            .review
+            .get(&worktree)
+            .and_then(|state| state.history.clone())
+        else {
             return;
         };
         let Some(commit) = history.commits.get(index) else {
             return;
         };
-
-        state.commit = Some(commit.id.clone());
-        state.commit_detail = None;
         // The first parent: it is the comparison a reviewer expects in front of
-        // a merge, the one showing what the merge brought in.
-        let range = DiffRange::Commit {
-            id: commit.id.clone(),
-            parent: commit.parents.first().cloned(),
+        // a merge, the one showing what the merge brought in. The commit's
+        // block is asked for in the lines case too: the restricted patch shown
+        // there is captioned all the same.
+        let parent = commit.parents.first().cloned();
+        let Some(range) = self.show_commit(&worktree, commit.id.clone(), parent) else {
+            return;
         };
-        state.range = range.clone();
-        state.selected = None;
-        state.diff = None;
-        state.diff_selection = None;
-        // Another commit's diffs are of no further use: keeping them would
-        // swell the state by one range per commit looked at.
-        state
-            .files
-            .retain(|kept, _| !matches!(kept, DiffRange::Commit { .. }));
-        state
-            .pending_files
-            .retain(|kept| !matches!(kept, DiffRange::Commit { .. }));
-        // The block above the diff wants the full message, which the history's
-        // one-line format does not carry. Asked for in the lines case too: the
-        // restricted patch shown there is captioned all the same.
-        self.git.send(Cmd::LoadCommitDetail {
-            worktree: worktree.clone(),
-            id: commit.id.clone(),
-        });
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
 
         // In a line history, the restricted patch is already here: it came with
         // the list, from the same `git log -L`. Showing it costs no command —
