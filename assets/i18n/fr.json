@@ -953,8 +953,6 @@
   "overview-recent": "Derniers commits",
   "overview-tile-size": "Taille de la carte",
   "overview-mode-canvas": "Canvas",
-  "focus-column-back": "Colonne précédente",
-  "focus-column-forward": "Colonne suivante",
   "sheet-review-title": "Revue — %{name}",
   "sheet-review-against": "contre %{base}",
   "sheet-review-since": "depuis la dernière relecture",

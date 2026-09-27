@@ -43,6 +43,8 @@ const MAX_WIDTH: gpui_kit::Pixels = px(1440.);
 const MAX_HEIGHT: gpui_kit::Pixels = px(900.);
 /// The list's column in the review; the diff takes the rest.
 const LIST_WIDTH: gpui_kit::Pixels = px(380.);
+/// The same, as a board lays it out.
+pub(super) const REVIEW_LIST_WIDTH: f32 = 380.;
 /// The list's height in the review card; the diff takes the rest.
 const CARD_LIST_HEIGHT: gpui_kit::Pixels = px(200.);
 /// What a maximized sheet leaves of the window round it.

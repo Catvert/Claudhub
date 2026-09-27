@@ -668,18 +668,13 @@ worktree.
   sélecteurs à cases dans la barre de titre, pour le plan seul : deux façons
   de choisir la même chose. **Par défaut le focus** (`ui::focus_view`) :
   chaque worktree choisi sur son **tableau** (`ui::focus`). « Réinitialiser »
-  y rend aussi aux tableaux montrés leur vue de départ. **Les titres
-  ne défilent pas avec la rangée** (`render_focus_header`) : chacun est tenu
-  à gauche de la part visible de son tableau (`focus::header_span`), mesurée
-  dans les coordonnées de la rangée — que le défilement ne change pas — et
-  relue au défilement de la frame, sans quoi il traînait d'une image. **Il
-  porte ce que la carte et la barre de l'éditeur disaient du checkout**
-  (`board_title`) — la branche en sélecteur, pull et push, « Éditer », les
-  liens, le widget d'exécution tout à droite, le `…`. Avec plusieurs
-  tableaux, deux flèches font glisser la rangée d'une colonne
-  (`focus::next_stop`), par le lissage de la molette ; **un tableau seul a
-  la ligne entière, sans rien lire de ce que la rangée a mesuré** — un
-  défilement de côté dans ses terminaux faisait clignoter la ligne. Un clic montre un worktree seul et le rend regardé
+  y rend aussi aux tableaux montrés leur vue de départ. **Le titre d'un
+  tableau est à lui et défile avec lui** (`board_title`) — la branche en
+  sélecteur, pull et push, « Éditer », les liens, le widget d'exécution tout
+  à droite, le `…` : il a été une ligne au-dessus de la rangée, tenue à
+  gauche de la part visible de chaque tableau, placée d'après ce que la
+  rangée mesurait à chaque frame, et elle clignotait à chaque défilement de
+  côté. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
   retire, jamais le dernier ; choisir un worktree ailleurs dans la fenêtre le
   montre seul (`focus::shown_worktrees`). La sélection et la barre repliée en
@@ -687,9 +682,10 @@ worktree.
   Colonnes, tous les worktrees à la fois et sans main dans la disposition :
   deux vues des mêmes tableaux ne différaient que par le nombre choisi, et
   une session enregistrée sur elle se relit en focus (`serde(alias)`). Un
-  tableau prend sa part de la largeur, **jamais moins que ce qu'il montre**
-  — c'est la rangée des tableaux qui défile, jamais un tableau seul — et ce
-  qu'il tient dans l'instant est **rangé par worktree**.
+  tableau prend sa part de la largeur, **jamais moins que ce que sa vue met
+  côte à côte** (`HOME_LEAST`, la liste et le diff…) — c'est la rangée des
+  tableaux qui défile, jamais un tableau seul, et ce qui dépasse est coupé
+  à son bord plutôt que peint sur le voisin.
   **Un tableau, ce sont des onglets et une seule vue** (`ui::summary_view`,
   `ui::focus`) : **Accueil**, Git, Revue, note principale, TODO, terminaux.
   **L'Accueil**, ce sont deux colonnes : à gauche l'état des choses (la

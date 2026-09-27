@@ -1143,17 +1143,11 @@ pub struct ClaudhubApp {
     pub(super) focus_rail: bool,
     /// The projects folded to their name in the sidebar.
     pub(super) focus_folded: Vec<PathBuf>,
-    /// Where each board's home and view stood at the last frame, left and
-    /// right edges in the window: where the header's arrows stop.
-    pub(super) focus_geometry: HashMap<PathBuf, crate::ui::focus_view::Spans>,
     /// The worktrees whose status has been read at least once: before that,
     /// the status a review holds is the empty default, not an answer.
     pub(super) status_seen: std::collections::HashSet<PathBuf>,
     /// The boards' row scroll, sideways.
     pub(super) focus_scroll: gpui_kit::ScrollHandle,
-    /// Where the boards stood at the last paint, for the header over them.
-    pub(super) focus_laid_out:
-        std::rc::Rc<std::cell::RefCell<crate::ui::focus_view::BoardsLaidOut>>,
     /// The focus view's sidebar scroll.
     pub(super) focus_sidebar_scroll: gpui_kit::ScrollHandle,
     /// The one node a laid-out view shows, filling it — its « maximise ».
@@ -1649,10 +1643,8 @@ impl ClaudhubApp {
                 .session
                 .focus_folded
                 .clone(),
-            focus_geometry: HashMap::new(),
             status_seen: std::collections::HashSet::new(),
             focus_scroll: gpui_kit::ScrollHandle::new(),
-            focus_laid_out: Default::default(),
             focus_sidebar_scroll: gpui_kit::ScrollHandle::new(),
             overview_zoomed: None,
             overview_flow_frame: None,

@@ -31,6 +31,11 @@ use crate::ui::focus_view::view_name;
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
 
+/// The least width of the home: its two columns side by side, and the
+/// gap between them.
+pub(super) const HOME_LEAST: f32 = HOME_LEFT_MIN + 12. + HOME_RIGHT_MIN;
+const HOME_LEFT_MIN: f32 = 300.;
+const HOME_RIGHT_MIN: f32 = 360.;
 /// The open tasks the home lists; the tab has the rest.
 const HOME_TASKS: usize = 12;
 /// The lines of the principal note the home shows.
@@ -166,7 +171,17 @@ impl ClaudhubApp {
             .w_full()
             .gap_1()
             .items_center()
-            .children(tabs)
+            // A narrow board scrolls its tabs rather than push the board
+            // wider than its view.
+            .child(
+                h_flex()
+                    .id("focus-tabs")
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .gap_1()
+                    .overflow_x_scroll()
+                    .children(tabs),
+            )
             .child(
                 h_flex()
                     .flex_1()
@@ -221,7 +236,7 @@ impl ClaudhubApp {
             .id("focus-home-left")
             .flex_grow(2.)
             .flex_basis(px(0.))
-            .min_w(px(300.))
+            .min_w(px(HOME_LEFT_MIN))
             .h_full()
             .gap_3()
             .overflow_y_scroll()
@@ -234,7 +249,7 @@ impl ClaudhubApp {
         let right = v_flex()
             .flex_grow(3.)
             .flex_basis(px(0.))
-            .min_w(px(360.))
+            .min_w(px(HOME_RIGHT_MIN))
             .h_full()
             .child(self.home_terminals(path, at_work, window, cx));
         v_flex()

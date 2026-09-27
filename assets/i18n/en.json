@@ -953,8 +953,6 @@
   "overview-recent": "Latest commits",
   "overview-tile-size": "Card size",
   "overview-mode-canvas": "Canvas",
-  "focus-column-back": "Previous column",
-  "focus-column-forward": "Next column",
   "sheet-review-title": "Review — %{name}",
   "sheet-review-against": "against %{base}",
   "sheet-review-since": "since the last review",

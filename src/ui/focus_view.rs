@@ -29,14 +29,13 @@
 //! **What a board holds in the moment is its own** — where its home and
 //! its view stand — keyed by worktree.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenu},
-    v_flex, ActiveTheme, Disableable as _, Sizable as _,
+    v_flex, ActiveTheme, Sizable as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Pixels, SharedString, Window,
@@ -67,24 +66,6 @@ const GIT_LIST_WIDTH: f32 = 380.;
 /// The notes view's list, left of the note it shows.
 const NOTES_LIST_WIDTH: f32 = 240.;
 
-/// A board's home's and view's left and right edges in the window, as the
-/// last frame painted them.
-pub(super) type Spans = std::rc::Rc<std::cell::RefCell<Vec<(f32, f32)>>>;
-
-/// Where the boards stood at the last paint, for the header over them —
-/// each board's edges in the row's own coordinates, what the window saw
-/// less how far the row was scrolled — so that the header, drawn before the
-/// row, can place each title against the scroll of **this** frame.
-#[derive(Default)]
-pub(super) struct BoardsLaidOut {
-    /// The header's left edge and width, in the window.
-    strip: (f32, f32),
-    /// How far the row was scrolled when the boards were measured.
-    painted: f32,
-    /// Each board's left and right edges in the row.
-    boards: HashMap<PathBuf, (f32, f32)>,
-}
-
 impl ClaudhubApp {
     /// The focus view: the sidebar, and the worktrees on show.
     pub(super) fn render_overview_focus(
@@ -97,12 +78,6 @@ impl ClaudhubApp {
         let at_work = self.prepare_laid_out(&shown, &doings, cx);
         let gap = window.rem_size() * 0.75;
         let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
-        // The boards gone take what they held in the moment with them.
-        self.focus_geometry.retain(|path, _| shown.contains(path));
-        self.focus_laid_out
-            .borrow_mut()
-            .boards
-            .retain(|path, _| shown.contains(path));
         let main: AnyElement = match self.overview_zoomed.clone() {
             // A maximised node fills the middle, the sidebar staying: it is
             // how one goes elsewhere.
@@ -122,11 +97,10 @@ impl ClaudhubApp {
                 // Their lists of changes, even if the pickers leave them out
                 // of what the home screen reads.
                 self.ensure_changes_read(&shown, cx);
-                // An arrow's slide goes on where the last frame left it.
+                // A wheel's slide goes on where the last frame left it.
                 let scroll = self.focus_scroll.clone();
                 self.motion(BOARD_BAR.into(), Axes::Both)
                     .advance(&scroll, window);
-                let header = self.render_focus_header(&shown, window, cx);
                 let mut boards: Vec<AnyElement> = Vec::new();
                 for (index, path) in shown.iter().enumerate() {
                     // Between two boards, a line: side by side, one's last
@@ -153,17 +127,17 @@ impl ClaudhubApp {
                     // The wheel scrolls what it is over, up and down: a row
                     // that scrolls only sideways would otherwise turn every
                     // notch that misses a column into a slide of the whole
-                    // row. Sideways is the bar's, a sideways wheel's, or the
-                    // header's arrows.
+                    // row. Sideways is the bar's, or a sideways wheel's.
                     .restrict_scroll_to_axis()
                     .overflow_x_scroll()
                     .children(boards);
-                // The header stays: the titles over the row do not scroll
-                // away with it — see `render_focus_header`.
+                // The window's buttons are drawn over the top-right corner:
+                // where they are, the row starts under them.
+                let corner = Self::draws_window_buttons(window)
+                    .then(|| div().flex_none().h(super::theme::toolbar_height(cx)));
                 v_flex()
                     .size_full()
-                    .gap_2()
-                    .child(header)
+                    .children(corner)
                     .child(div().flex_1().min_h_0().child(super::scroll::both(
                         BOARD_BAR,
                         &self.focus_scroll,
@@ -1096,177 +1070,13 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// The line over the boards, which does not scroll with them: each
-    /// board's title — its name, its branch, « Edit » — held at the left of
-    /// the part of it in view, and at the right the arrows that slide the
-    /// row a column at a time.
+    /// A worktree on show: its title — its name, its branch and what acts
+    /// on it —, its tabs, and the one view chosen under them.
     ///
-    /// **It is drawn before the row, from what the row measured**: each
-    /// board's edges in the row's own coordinates, which scrolling does not
-    /// change, set against the scroll of this frame — so a title keeps up
-    /// with the slide instead of trailing it by a frame.
-    fn render_focus_header(
-        &mut self,
-        shown: &[PathBuf],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let height = super::theme::toolbar_height(cx);
-        let at = -f32::from(self.focus_scroll.offset().x);
-        let max = f32::from(self.focus_scroll.max_offset().x).max(0.);
-        // The window's buttons sit over the top-right corner, and the arrows
-        // before them: the titles have the rest.
-        let corner = if Self::draws_window_buttons(window) {
-            super::topbar::WINDOW_BUTTON_WIDTH * 3.
-        } else {
-            0.
-        };
-        // A lone board has no column to slide to, and its line is all its
-        // title's: nothing here reads what the row measured, which moved
-        // under a sideways scroll inside the board — the terminals' — and
-        // made the line flicker while the tabs under it stood still.
-        let alone = shown.len() == 1;
-        let overflows = !alone && max > 0.5;
-        let arrows_width = if overflows { 72. } else { 0. };
-        let (strip, boards) = {
-            let laid = self.focus_laid_out.borrow();
-            (laid.strip, laid.boards.clone())
-        };
-        let room = strip.1 - corner - arrows_width;
-        let mut cells: Vec<AnyElement> = Vec::new();
-        for path in shown {
-            // Several: each where its board stands, from what the row
-            // measured — before it has, the one frame, they wait.
-            let span = match boards.get(path) {
-                _ if alone => Some((0., room.max(0.))),
-                Some(board) => focus::header_span(*board, at, room),
-                None => None,
-            };
-            let Some((left, right)) = span else {
-                continue;
-            };
-            let open = path.to_path_buf();
-            let actions = vec![Button::new("focus-edit")
-                .ghost()
-                .small()
-                .icon(icon("pencil"))
-                .label(tr!("focus-edit"))
-                .tooltip(tr!("overview-open-worktree"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.work_in_worktree(&open, window, cx);
-                }))
-                .into_any_element()];
-            // What runs in it — the environment, the recipes —, at the far
-            // right: see `run_view`. No « Review »: the board has its tab.
-            let run: Vec<AnyElement> = self
-                .render_run(path, gpui_kit::component::Size::Small, cx)
-                .into_iter()
-                .collect();
-            cells.push(
-                h_flex()
-                    .absolute()
-                    .top_0()
-                    .left(px(left))
-                    .w(px(right - left))
-                    .h_full()
-                    .gap_2()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.board_title(path, actions, run, cx)),
-                    )
-                    .into_any_element(),
-            );
-        }
-        let arrows = overflows.then(|| {
-            h_flex()
-                .absolute()
-                .top_0()
-                .right(px(corner))
-                .h_full()
-                .gap_1()
-                .items_center()
-                .child(
-                    Button::new("focus-scroll-back")
-                        .ghost()
-                        .small()
-                        .icon(icon("arrow-left"))
-                        .tooltip(tr!("focus-column-back"))
-                        .disabled(at <= 0.5)
-                        .on_click(cx.listener(|this, _, _, cx| this.slide_focus(false, cx))),
-                )
-                .child(
-                    Button::new("focus-scroll-forward")
-                        .ghost()
-                        .small()
-                        .icon(icon("arrow-right"))
-                        .tooltip(tr!("focus-column-forward"))
-                        .disabled(at >= max - 0.5)
-                        .on_click(cx.listener(|this, _, _, cx| this.slide_focus(true, cx))),
-                )
-        });
-        let laid = self.focus_laid_out.clone();
-        let measure = canvas(
-            move |_, _, _| {},
-            move |bounds, _, window, _| {
-                let seen = (f32::from(bounds.origin.x), f32::from(bounds.size.width));
-                let mut laid = laid.borrow_mut();
-                if laid.strip != seen {
-                    laid.strip = seen;
-                    window.refresh();
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-        div()
-            .relative()
-            .flex_none()
-            .w_full()
-            .h(height)
-            .child(measure)
-            .children(cells)
-            .children(arrows)
-            .into_any_element()
-    }
-
-    /// The row slid a column on, or back — smoothly, as a notch of the wheel
-    /// is: the same motion, keyed by the row's bar. The columns' edges are
-    /// the ones the last frame painted, taken into the row's coordinates.
-    fn slide_focus(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let (strip_left, painted) = {
-            let laid = self.focus_laid_out.borrow();
-            (laid.strip.0, laid.painted)
-        };
-        let mut lefts: Vec<f32> = Vec::new();
-        for path in self.focus_worktrees() {
-            if let Some(spans) = self.focus_geometry.get(&path) {
-                lefts.extend(
-                    spans
-                        .borrow()
-                        .iter()
-                        .map(|(left, _)| left - strip_left - painted),
-                );
-            }
-        }
-        let offset = self.focus_scroll.offset();
-        let max = self.focus_scroll.max_offset();
-        let at = -f32::from(offset.x);
-        let target = focus::next_stop(&lefts, at, f32::from(max.x), forward);
-        let next = self.motion(BOARD_BAR.into(), Axes::Both).push(
-            offset,
-            point(px(at - target), px(0.)),
-            max,
-        );
-        self.focus_scroll.set_offset(next);
-        cx.notify();
-    }
-
-    /// A worktree on show: its tabs, and the one view chosen under them;
-    /// its title is the header's.
+    /// **The title is the board's own and scrolls with it.** It stood in a
+    /// line over the row, held at the left of the part of its board in view,
+    /// which meant placing it from what the row measured at every frame —
+    /// and the line flickered at every sideways scroll.
     fn render_focus_board(
         &mut self,
         path: &Path,
@@ -1276,46 +1086,42 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = self.board_view(path, cx);
-        let spans = self
-            .focus_geometry
-            .entry(path.to_path_buf())
-            .or_default()
-            .clone();
-        *spans.borrow_mut() = vec![(0., 0.)];
         let column_min = super::settings::Settings::global(cx).terminal.column_min;
-        // The terminals' tab scrolls its terminals, not the board: the tabs
-        // stay in view.
-        let least_width = column_min;
+        // Never narrower than what its view lays side by side: under it, the
+        // view ran over the next board. The terminals' tab scrolls its
+        // terminals, not the board.
+        let least_width = match view {
+            View::Home => super::summary_view::HOME_LEAST,
+            View::Git => GIT_LIST_WIDTH + 8. + column_min,
+            View::Notes => NOTES_LIST_WIDTH + 8. + column_min,
+            View::Review => super::changes_view::REVIEW_LIST_WIDTH + column_min,
+            View::Todo | View::Terminals => column_min,
+        };
+        let open = path.to_path_buf();
+        let actions = vec![Button::new("focus-edit")
+            .ghost()
+            .small()
+            .icon(icon("pencil"))
+            .label(tr!("focus-edit"))
+            .tooltip(tr!("overview-open-worktree"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.work_in_worktree(&open, window, cx);
+            }))
+            .into_any_element()];
+        // What runs in it — the environment, the recipes —, at the far
+        // right: see `run_view`. No « Review »: the board has its tab.
+        let run: Vec<AnyElement> = self
+            .render_run(path, gpui_kit::component::Size::Small, cx)
+            .into_iter()
+            .collect();
+        let title = h_flex()
+            .flex_none()
+            .w_full()
+            .h(super::theme::toolbar_height(cx))
+            .items_center()
+            .child(self.board_title(path, actions, run, cx));
         let tabs = self.render_board_tabs(path, view, at_work, cx);
         let shown = self.render_board_view(path, view, at_work, window, cx);
-        let measure = canvas(
-            move |_, _, _| {},
-            move |bounds, _, _, _| {
-                if let Some(span) = spans.borrow_mut().first_mut() {
-                    *span = (
-                        f32::from(bounds.origin.x),
-                        f32::from(bounds.origin.x + bounds.size.width),
-                    );
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-        let row = v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .gap_2()
-            .child(tabs)
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(measure)
-                    .child(shown),
-            );
         v_flex()
             .relative()
             // Its own id, under which its ids are told apart from the next
@@ -1327,39 +1133,13 @@ impl ClaudhubApp {
             .flex_1()
             .min_w(px(least_width))
             .h_full()
-            // Where it stands, for the header's title over it.
-            .child({
-                let (laid, scroll, board) = (
-                    self.focus_laid_out.clone(),
-                    self.focus_scroll.clone(),
-                    path.to_path_buf(),
-                );
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let mut laid = laid.borrow_mut();
-                        let at = f32::from(scroll.offset().x);
-                        let left = laid.strip.0;
-                        let edges = (
-                            f32::from(bounds.origin.x) - left - at,
-                            f32::from(bounds.origin.x + bounds.size.width) - left - at,
-                        );
-                        laid.painted = at;
-                        // Only a board that moved in the row asks again:
-                        // scrolling moves none of them.
-                        let moved = laid.boards.get(&board).is_none_or(|was| {
-                            (was.0 - edges.0).abs() > 0.5 || (was.1 - edges.1).abs() > 0.5
-                        });
-                        if moved {
-                            laid.boards.insert(board.clone(), edges);
-                            window.refresh();
-                        }
-                    },
-                )
-                .absolute()
-                .size_full()
-            })
-            .child(row)
+            .gap_2()
+            // What does not fit is cut at the board's edge, never painted
+            // over the next one.
+            .overflow_hidden()
+            .child(title)
+            .child(tabs)
+            .child(div().relative().flex_1().min_h_0().w_full().child(shown))
             .into_any_element()
     }
 
