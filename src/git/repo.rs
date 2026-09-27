@@ -842,7 +842,7 @@ fn list_files_in(
     ignored: bool,
     seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<Files> {
-    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+    if !super::first_visit(seen, dir) {
         return Ok(Files::default());
     }
     // The index mode distinguishes a gitlink from a file without a stat per

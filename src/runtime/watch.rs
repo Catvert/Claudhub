@@ -566,10 +566,7 @@ fn watch_plan(worktree: &Path) -> WatchPlan {
 }
 
 fn add_checkout(worktree: &Path, plan: &mut WatchPlan, seen: &mut HashSet<PathBuf>) {
-    let canonical = worktree
-        .canonicalize()
-        .unwrap_or_else(|_| worktree.to_path_buf());
-    if !seen.insert(canonical) {
+    if !crate::git::first_visit(seen, worktree) {
         return;
     }
 

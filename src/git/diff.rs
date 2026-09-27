@@ -152,7 +152,7 @@ fn files_in(
     range: &Range,
     seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<Vec<DiffFile>> {
-    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+    if !super::first_visit(seen, dir) {
         return Ok(Vec::new());
     }
     let mut args: Vec<String> = vec![

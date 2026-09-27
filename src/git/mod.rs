@@ -39,7 +39,7 @@ pub use tags::Tag;
 
 use std::ffi::OsStr;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -638,6 +638,17 @@ fn strip_trailing_newline(mut s: String) -> String {
         s.pop();
     }
     s
+}
+
+/// Records a repository about to be walked into, and says whether it is the
+/// first time.
+///
+/// For the reads that descend into submodules — status, diff, file list,
+/// watch plan: a gitlink can point back at a checkout already on the way down,
+/// through a symbolic link or a relative `.git`, and the walk would not end.
+/// The path is canonical so that two spellings of one folder are one visit.
+pub(crate) fn first_visit(seen: &mut std::collections::HashSet<PathBuf>, dir: &Path) -> bool {
+    seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
 }
 
 /// Splits a `-z` output (records separated by null bytes).
