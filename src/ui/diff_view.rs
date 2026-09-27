@@ -2275,23 +2275,10 @@ struct DiffLayout {
     cols: usize,
 }
 
-/// A character's width, measured on the font actually chosen: a fixed pitch does
-/// not mean a width known in advance, and a one-pixel discrepancy shifts the
-/// gutter by a whole character after a hundred columns.
+/// A character's width, measured on the font actually chosen — see
+/// `theme::mono_advance`.
 fn cell_width(mono: &SharedString, font_size: Pixels, window: &mut Window) -> Pixels {
-    let font = gpui_kit::Font {
-        family: mono.clone(),
-        features: Default::default(),
-        weight: Default::default(),
-        style: Default::default(),
-        fallbacks: None,
-    };
-    let font_id = window.text_system().resolve_font(&font);
-    window
-        .text_system()
-        .advance(font_id, font_size, 'M')
-        .map(|size| size.width)
-        .unwrap_or(px(7.))
+    crate::ui::theme::mono_advance(window, mono, font_size, 'M')
 }
 
 /// The right click on a diff line: the gestures that have no button to hand.
