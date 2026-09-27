@@ -184,6 +184,7 @@ impl ClaudhubApp {
     /// Asks the workers for these worktrees' node files, against the stamps
     /// of what is already held: only what changed comes back with its text.
     pub(super) fn read_canvas(&mut self, worktrees: impl IntoIterator<Item = PathBuf>, cx: &App) {
+        let now = std::time::Instant::now();
         for worktree in worktrees {
             let mut dirs = vec![(canvas::shared_dir(&worktree), false)];
             if let Some(vault) = self.notes_dir(&worktree, cx) {
@@ -207,12 +208,24 @@ impl ClaudhubApp {
                     .collect(),
                 None => Vec::new(),
             };
+            self.sweep.canvas_asked(worktree.clone(), now);
             self.git.send(Cmd::ReadCanvas {
                 worktree,
                 dirs,
                 known,
             });
         }
+    }
+
+    /// The sweep's reading: the worktrees whose previous reading has not
+    /// answered yet are left for the next pass — see `ui::sweep`.
+    pub(super) fn sweep_canvas(&mut self, worktrees: Vec<PathBuf>, cx: &App) {
+        let now = std::time::Instant::now();
+        let free: Vec<PathBuf> = worktrees
+            .into_iter()
+            .filter(|worktree| self.sweep.canvas_free(worktree, now))
+            .collect();
+        self.read_canvas(free, cx);
     }
 
     /// A worktree's node files, read — the text of those that changed only.
@@ -226,6 +239,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.sweep.canvas_answered(&worktree);
         // A first reading is news even when it finds nothing.
         let mut changed = !self.canvas.contains_key(&worktree);
         let mut before: std::collections::HashMap<PathBuf, CanvasEntry> = self
