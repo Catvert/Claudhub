@@ -1090,12 +1090,7 @@ pub struct ClaudhubApp {
     /// The review was opened without a file, and takes the first one once
     /// the list is known.
     pub(super) review_sheet_pick: bool,
-    /// True while the review of a branch since its base is open, in the
-    /// commit's sheet — see `changes_view::SheetKind`.
-    pub(super) branch_sheet: bool,
-    /// It takes the branch's first file once the list is known.
-    pub(super) branch_sheet_pick: bool,
-    /// Whether the sheets open maximized: the last one's choice.
+    /// Whether the sheet opens maximized: the last one's choice.
     pub(super) sheet_maximized: bool,
     /// The configuration each worktree's run widget shows, once chosen —
     /// see `run::shown`.
@@ -1625,8 +1620,6 @@ impl ClaudhubApp {
             overview_previous: None,
             commit_sheet: false,
             review_sheet_pick: false,
-            branch_sheet: false,
-            branch_sheet_pick: false,
             sheet_maximized: false,
             run_choice: HashMap::new(),
             changes_read: std::collections::HashSet::new(),

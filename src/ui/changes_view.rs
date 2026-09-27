@@ -13,11 +13,11 @@
 //! does: one surface, and what is started here is finished in the editor and
 //! back. A second copy of either panel would be a second set of bugs.
 //!
-//! **The review card** is the branch review's sheet laid on the focus board:
-//! the same list, the same base selector, the same diff. For the reason
-//! above it is live only on the worktree on show, and only while no sheet
-//! paints the same panels over it — two copies of one virtual list in a
-//! frame would share its scroll.
+//! **The review card** is the editor's branch review laid on the focus
+//! board — its Review tab: the same list, the same base selector, the same
+//! diff. For the reason above it is live only on the worktree on show, and
+//! only while no sheet paints the same panels over it — two copies of one
+//! virtual list in a frame would share its scroll.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -48,27 +48,17 @@ const CARD_LIST_HEIGHT: gpui_kit::Pixels = px(200.);
 /// What a maximized sheet leaves of the window round it.
 const SHEET_MARGIN: gpui_kit::Pixels = px(16.);
 
-/// What a sheet shows beside the diff.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SheetKind {
-    /// The changes in progress and the commit box: « Commit ».
-    Commit,
-    /// What the branch has written since its base: « Review ».
-    Review,
-}
-
 /// A sheet in its dialog: a child entity, for the reason of the settings
 /// form — `open_dialog` keeps a `Fn` called back from the root's render,
 /// where reading the application panics, and a child's render runs after.
 ///
-/// **It draws its own head** — its title, what it is compared against, and
-/// the buttons of a window: the dialog's title could say none of the rest,
+/// **It draws its own head** — its title and the buttons of a window: the
+/// dialog's title could say none of the rest,
 /// and a sheet two columns of code wide is one that wants the whole screen
 /// now and then. `maximized` is shared with the dialog's closure, which
 /// cannot read the application to size itself.
 pub(super) struct ReviewSheet {
     app: WeakEntity<ClaudhubApp>,
-    kind: SheetKind,
     maximized: Rc<Cell<bool>>,
 }
 
@@ -77,10 +67,8 @@ impl Render for ReviewSheet {
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        let (kind, maximized) = (self.kind, self.maximized.clone());
-        app.update(cx, |app, cx| {
-            app.render_review_sheet(kind, maximized, window, cx)
-        })
+        let maximized = self.maximized.clone();
+        app.update(cx, |app, cx| app.render_review_sheet(maximized, window, cx))
     }
 }
 
@@ -174,41 +162,6 @@ impl ClaudhubApp {
             .child(head)
             .child(body)
             .when(detail, |el| el.child(foot))
-            .into_any_element()
-    }
-
-    /// The changes as a board's column: the node without its head, the
-    /// column's title saying what it would. A clean worktree says so.
-    pub(super) fn render_changes_column(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let body = if self.has_changes(path) {
-            let files = self.listed_status(path).map(|status| status.files.clone());
-            let (body, foot) = self.changes_parts(path, files, cx);
-            v_flex()
-                .size_full()
-                .child(body)
-                .child(foot)
-                .into_any_element()
-        } else {
-            v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(tr!("home-clean"))
-                .into_any_element()
-        };
-        div()
-            .size_full()
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .text_sm()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(body)
             .into_any_element()
     }
 
@@ -471,28 +424,8 @@ impl ClaudhubApp {
             cx.notify();
             return;
         }
-        self.show_sheet(SheetKind::Commit, window, cx);
+        self.show_sheet(window, cx);
         super::dialogs::focus_field(&self.commit_input, window, cx);
-        cx.notify();
-    }
-
-    /// Opens the review of what a worktree's branch has written since its
-    /// base, on its first file — the editor's branch review and its diff,
-    /// in the sheet the commit has.
-    pub(super) fn open_branch_sheet(
-        &mut self,
-        worktree: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active.as_deref() != Some(worktree) {
-            self.select_worktree(worktree.to_path_buf(), window, cx);
-        }
-        self.branch_sheet_pick = true;
-        self.forget_closed_sheets(window, cx);
-        if !self.branch_sheet {
-            self.show_sheet(SheetKind::Review, window, cx);
-        }
         cx.notify();
     }
 
@@ -513,7 +446,7 @@ impl ClaudhubApp {
         let node = Node::Review(path.to_path_buf());
         let app = cx.entity().downgrade();
         let on_show = self.active.as_deref() == Some(path);
-        let sheet_open = self.commit_sheet || self.branch_sheet;
+        let sheet_open = self.commit_sheet;
         let against = self.review.get(path).and_then(|state| {
             match (state.since_review, state.review_point.as_ref()) {
                 (true, Some(_)) => Some(tr!("sheet-review-since")),
@@ -697,17 +630,9 @@ impl ClaudhubApp {
     /// dialog's `on_close`** — it only pops it — so what that would have
     /// reset is reset here, or the sheet stays « open » and its button
     /// never opens it again.
-    fn close_sheet(&mut self, kind: SheetKind, window: &mut Window, cx: &mut Context<Self>) {
-        match kind {
-            SheetKind::Commit => {
-                self.commit_sheet = false;
-                self.review_sheet_pick = false;
-            }
-            SheetKind::Review => {
-                self.branch_sheet = false;
-                self.branch_sheet_pick = false;
-            }
-        }
+    fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_sheet = false;
+        self.review_sheet_pick = false;
         window.close_dialog(cx);
         cx.notify();
     }
@@ -718,7 +643,6 @@ impl ClaudhubApp {
     fn forget_closed_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !window.has_active_dialog(cx) {
             self.commit_sheet = false;
-            self.branch_sheet = false;
         }
     }
 
@@ -726,18 +650,14 @@ impl ClaudhubApp {
     /// two columns of which one is code, and code in six hundred pixels is
     /// read a word per line — the whole window when maximized. No title and
     /// no cross of the dialog's: the sheet draws its own head.
-    fn show_sheet(&mut self, kind: SheetKind, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let app = cx.entity().downgrade();
         let maximized = Rc::new(Cell::new(self.sheet_maximized));
         let sheet = cx.new(|_| ReviewSheet {
             app: app.clone(),
-            kind,
             maximized: maximized.clone(),
         });
-        match kind {
-            SheetKind::Commit => self.commit_sheet = true,
-            SheetKind::Review => self.branch_sheet = true,
-        }
+        self.commit_sheet = true;
         window.open_dialog(cx, move |dialog, window, _| {
             let viewport = window.viewport_size();
             let (width, height, top) = if maximized.get() {
@@ -772,15 +692,9 @@ impl ClaudhubApp {
                 .on_ok(|_, _, _| false)
                 .on_close(move |_, _, cx| {
                     if let Some(app) = app.upgrade() {
-                        app.update(cx, |this, _| match kind {
-                            SheetKind::Commit => {
-                                this.commit_sheet = false;
-                                this.review_sheet_pick = false;
-                            }
-                            SheetKind::Review => {
-                                this.branch_sheet = false;
-                                this.branch_sheet_pick = false;
-                            }
+                        app.update(cx, |this, _| {
+                            this.commit_sheet = false;
+                            this.review_sheet_pick = false;
                         });
                     }
                 })
@@ -790,20 +704,13 @@ impl ClaudhubApp {
     /// A sheet: its head, then its two columns — the list, and the diff.
     fn render_review_sheet(
         &mut self,
-        kind: SheetKind,
         maximized: Rc<Cell<bool>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match kind {
-            SheetKind::Commit => self.pick_review_file(cx),
-            SheetKind::Review => self.pick_branch_file(cx),
-        }
-        let head = self.render_sheet_head(kind, maximized, cx);
-        let list = match kind {
-            SheetKind::Commit => self.render_changes(window, cx).into_any_element(),
-            SheetKind::Review => self.render_branch_review(window, cx).into_any_element(),
-        };
+        self.pick_review_file(cx);
+        let head = self.render_sheet_head(maximized, cx);
+        let list = self.render_changes(window, cx).into_any_element();
         let border = cx.theme().border;
         v_flex()
             .size_full()
@@ -841,12 +748,11 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// A sheet's head: what it is and whose — the review saying what it
-    /// compares against — and the two buttons of a window: maximize, which
-    /// a double click on the head does too, and close.
+    /// A sheet's head: what it is and whose, and the two buttons of a
+    /// window: maximize, which a double click on the head does too, and
+    /// close.
     fn render_sheet_head(
         &mut self,
-        kind: SheetKind,
         maximized: Rc<Cell<bool>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -861,25 +767,7 @@ impl ClaudhubApp {
             }
             None => String::new(),
         };
-        let (glyph, title) = match kind {
-            SheetKind::Commit => (
-                "git-commit-horizontal",
-                tr!("overview-commit-title", { name: name }),
-            ),
-            SheetKind::Review => ("file-diff", tr!("sheet-review-title", { name: name })),
-        };
-        let against = (kind == SheetKind::Review)
-            .then(|| self.active_review())
-            .flatten()
-            .and_then(
-                |state| match (state.since_review, state.review_point.as_ref()) {
-                    (true, Some(_)) => Some(tr!("sheet-review-since")),
-                    _ => state
-                        .base
-                        .clone()
-                        .map(|base| tr!("sheet-review-against", { base: base })),
-                },
-            );
+        let title = tr!("overview-commit-title", { name: name });
         let big = maximized.get();
         let toggle = {
             let maximized = maximized.clone();
@@ -910,7 +798,7 @@ impl ClaudhubApp {
                     }
                 }),
             )
-            .child(icon(glyph).text_color(theme.muted_foreground))
+            .child(icon("git-commit-horizontal").text_color(theme.muted_foreground))
             .child(
                 div()
                     .flex_none()
@@ -919,14 +807,6 @@ impl ClaudhubApp {
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child(title),
             )
-            .children(against.map(|against| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(against)
-            }))
             .child(div().flex_1())
             .child(
                 Button::new("sheet-maximize")
@@ -947,45 +827,10 @@ impl ClaudhubApp {
                     .icon(icon("x"))
                     .tooltip(tr!("sheet-close"))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.close_sheet(kind, window, cx);
+                        this.close_sheet(window, cx);
                     })),
             )
             .into_any_element()
-    }
-
-    /// The branch review's first file, once its list is there, when the
-    /// sheet was opened — the diff brought to the branch's range, whatever
-    /// the editor had left it on.
-    fn pick_branch_file(&mut self, cx: &mut Context<Self>) {
-        if !self.branch_sheet_pick {
-            return;
-        }
-        let Some(worktree) = self.active.clone() else {
-            return;
-        };
-        let Some(state) = self.review.get(&worktree) else {
-            return;
-        };
-        let Some(range) = super::review::branch_panel_range(
-            state.base.as_deref(),
-            state.review_point.as_ref(),
-            state.since_review,
-        ) else {
-            return;
-        };
-        let Some(files) = state.files.get(&range) else {
-            return;
-        };
-        self.branch_sheet_pick = false;
-        let kept = state.range == range
-            && state
-                .selected
-                .as_deref()
-                .is_some_and(|selected| files.iter().any(|file| file.path == selected));
-        let first = files.first().map(|file| file.path.clone());
-        if let (false, Some(first)) = (kept, first) {
-            self.open_file(worktree, first, range, cx);
-        }
     }
 
     /// The first file, once the list is there, when the review was opened

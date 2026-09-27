@@ -770,13 +770,14 @@ worktree.
   Les deux parlent du worktree regardé, donc l'ouvrir sélectionne la carte,
   comme le sélecteur de branches ; le commit réussi la referme
   (`commit_sheet`). Le bouton « Valider » d'une carte l'ouvre aussi. Elle
-  a une sœur, **la revue** (`SheetKind::Review`, « Revue » au titre d'un
-  tableau) : la revue de branche de l'éditeur, depuis la base, et le diff.
-  Les deux **dessinent leur tête** — ce qu'elles sont, contre quoi elles
-  comparent, agrandir (le double clic aussi, retenu d'une fois sur l'autre)
-  et fermer : le titre du dialogue n'en disait rien, et sa taille se lit
-  sur un `Rc<Cell>` que la fermeture du dialogue partage avec la feuille,
-  lire l'application de là étant une panique.
+  **dessine sa tête** — ce qu'elle est, agrandir (le double clic aussi,
+  retenu d'une fois sur l'autre) et fermer : le titre du dialogue n'en
+  disait rien, et sa taille se lit sur un `Rc<Cell>` que la fermeture du
+  dialogue partage avec la feuille, lire l'application de là étant une
+  panique. **Sur un tableau, pas de feuille** : l'onglet Git est ces mêmes
+  panneaux posés dans le tableau, avec la branche au-dessus, et l'onglet
+  Revue la revue de branche et son diff — une sœur en dialogue, « Revue »
+  au titre d'un tableau, disait deux fois ce qu'un onglet dit.
 - **Chaque nœud a les trois boutons d'une fenêtre** : replier jusqu'à l'en-tête
   (`Hand::collapsed`, le niveau d'en dessous remonte), agrandir — taille et vue
   d'avant rendues au second clic —, et une croix qui demande : un terminal

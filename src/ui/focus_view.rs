@@ -60,7 +60,10 @@ pub(super) type Doings = std::collections::HashMap<PathBuf, Doing>;
 /// The sidebar folded to its rail: a column of initials.
 const RAIL_WIDTH: f32 = 52.;
 /// How many of the commits a branch adds its git view lists.
-const GIT_COMMITS: usize = 12;
+const GIT_COMMITS: usize = 5;
+/// The git view's left column — the branch and the Changes panel —, the
+/// diff taking the rest.
+const GIT_LIST_WIDTH: f32 = 380.;
 /// The notes view's list, left of the note it shows.
 const NOTES_LIST_WIDTH: f32 = 240.;
 
@@ -1158,8 +1161,10 @@ impl ClaudhubApp {
                     .icon(icon("file-diff"))
                     .label(tr!("focus-review"))
                     .tooltip(tr!("overview-review"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_branch_sheet(&review, window, cx);
+                    // The board's own tab, not the sheet: a dialog over a
+                    // board that has the review under a tab said it twice.
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_board_view(&review, View::Review, cx);
                     }))
                     .into_any_element(),
             );
@@ -1377,7 +1382,7 @@ impl ClaudhubApp {
     ) -> AnyElement {
         match view {
             View::Home => self.render_home_view(path, at_work, cx),
-            View::Git => self.render_git_view(path, cx),
+            View::Git => self.render_git_view(path, window, cx),
             View::Review => self.render_review_card(path, true, false, window, cx),
             View::Notes => self.render_notes_view(path, cx),
             View::Todo => self.render_todo_view(path, cx),
@@ -1434,10 +1439,16 @@ impl ClaudhubApp {
         }
     }
 
-    /// The git view: the branch, how far it is from its remote and from its
-    /// base — with the way to merge it there — the commits it adds, and
-    /// what waits for a commit.
-    fn render_git_view(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// The git view — the commit sheet laid in the board, no dialog: on the
+    /// left the branch, how far it is from its remote and from its base —
+    /// with the way to merge it there — and the commits it adds, over the
+    /// Changes panel and its commit box; the diff on the right.
+    fn render_git_view(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let worktree = self.repos.worktree(path);
@@ -1526,18 +1537,90 @@ impl ClaudhubApp {
                             .child(super::overview_view::ago(now, commit.at)),
                     )
             }));
-        v_flex()
+        // The Changes panel and the diff are the editor's, one of each: only
+        // the worktree on show has them, and only while no sheet paints them.
+        let (list, diff) = if self.active.as_deref() != Some(path) {
+            (div().into_any_element(), self.follow_the_active(path, cx))
+        } else if self.commit_sheet {
+            (
+                div().into_any_element(),
+                centered(tr!("focus-review-sheet"), cx),
+            )
+        } else {
+            let ready = self.pick_git_file(path, cx);
+            let list = self.render_changes(window, cx).into_any_element();
+            let diff = if ready {
+                self.render_diff(window, cx).into_any_element()
+            } else {
+                centered(tr!("review-clean"), cx)
+            };
+            (list, diff)
+        };
+        let border = theme.border;
+        h_flex()
             .size_full()
             .gap_2()
-            .child(facts)
+            .child(
+                v_flex()
+                    .flex_none()
+                    .w(px(GIT_LIST_WIDTH))
+                    .h_full()
+                    .gap_2()
+                    .child(facts)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .overflow_hidden()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(border)
+                            .bg(theme.background)
+                            .child(list),
+                    ),
+            )
             .child(
                 div()
                     .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(self.render_changes_column(path, cx)),
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(border)
+                    .bg(theme.background)
+                    .child(diff),
             )
             .into_any_element()
+    }
+
+    /// Brings the diff to the changes in progress for the git view — the
+    /// file shown kept when it is among them, else the first one — and says
+    /// whether there is one to show. The review leaves it on the branch's
+    /// range, the editor on whatever it was reading.
+    fn pick_git_file(&mut self, worktree: &Path, cx: &mut Context<Self>) -> bool {
+        let Some(state) = self.review.get(worktree) else {
+            return false;
+        };
+        let kept = state.range == crate::git::DiffRange::Working
+            && state
+                .selected
+                .as_deref()
+                .is_some_and(|selected| state.status.file(selected).is_some());
+        if kept {
+            return true;
+        }
+        let Some(first) = state.status.files.first().map(|file| file.path.clone()) else {
+            return false;
+        };
+        self.open_file(
+            worktree.to_path_buf(),
+            first,
+            crate::git::DiffRange::Working,
+            cx,
+        );
+        true
     }
 
     /// The notes view: the list on the left — each with its pin, the
