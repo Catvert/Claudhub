@@ -40,6 +40,7 @@ pub mod skill;
 pub mod suite;
 #[cfg(feature = "ui")]
 pub mod terminal;
+pub mod text;
 #[cfg(feature = "ui")]
 pub mod ui;
 pub mod wsl;

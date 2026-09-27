@@ -1401,7 +1401,7 @@ fn follow(
         }
         match incoming.recv_timeout((deadline - now).min(POLL)) {
             Ok((is_err, line)) => {
-                let line = strip_ansi(&line);
+                let line = crate::text::strip_ansi(&line);
                 let tail = if is_err { &mut err_tail } else { &mut kept };
                 if tail.len() == COMPLAINT_KEPT {
                     tail.pop_front();
@@ -1475,31 +1475,6 @@ fn kill_run(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
-}
-
-/// Colours out of a narrated line: the run is followed through a pipe, and
-/// Jest paints its stderr even there.
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        // ESC [ … final-byte, or a lone two-byte escape.
-        if chars.peek() == Some(&'[') {
-            chars.next();
-            for c in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&c) {
-                    break;
-                }
-            }
-        } else {
-            chars.next();
-        }
-    }
-    out
 }
 
 /// Reads the JUnit account: one `Outcome` per test, dataset cases folded.
@@ -1665,7 +1640,7 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
                 .and_then(|list| list.as_array())
                 .and_then(|list| list.first())
                 .and_then(|message| message.as_str())
-                .map(|message| strip_ansi(message.trim()))
+                .map(|message| crate::text::strip_ansi(message.trim()))
                 .unwrap_or_default();
             // The stack ends `(…/src/http.test.js:2:53)`: the line follows
             // the file's own name.
@@ -3126,17 +3101,6 @@ at tests/Feature/HttpTest.php:3</failure>
             vec!["--runTestsByPath", "src/a.test.ts"]
         );
         assert!(js_path_args(&Target::everything(Runner::Vitest)).is_empty());
-    }
-
-    #[test]
-    fn the_colours_come_out_of_a_narrated_line() {
-        assert_eq!(
-            strip_ansi(
-                "\u{1b}[7m\u{1b}[1m\u{1b}[31m FAIL \u{1b}[39m\u{1b}[22m\u{1b}[27m src/http.test.js"
-            ),
-            " FAIL  src/http.test.js"
-        );
-        assert_eq!(strip_ansi("plain"), "plain");
     }
 
     fn listed(runner: Runner, class: &str, method: &str, file: &str) -> Test {
