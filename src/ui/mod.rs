@@ -74,6 +74,7 @@ mod stashes;
 mod store;
 mod summary_view;
 mod surface;
+mod sweep;
 mod tags;
 mod terminal_view;
 mod tests_view;

@@ -1107,6 +1107,13 @@ pub struct ClaudhubApp {
     pub(super) canvas: HashMap<PathBuf, Vec<crate::ui::canvas_view::CanvasEntry>>,
     /// A note just created, to open for writing once it has been read.
     pub(super) canvas_created: Option<PathBuf>,
+    /// What the readings of the node files leave beside the entries: the
+    /// files that are not nodes, where each entry is, the context sheets
+    /// sent — see `canvas_view::CanvasReads`.
+    pub(super) canvas_reads: crate::ui::canvas_view::CanvasReads,
+    /// The periodic readings still on their way, and the sweep's pass — see
+    /// `ui::sweep`.
+    pub(super) sweep: crate::ui::sweep::Sweep,
     /// The diagrams' pictures, decoded once per stamp — see
     /// `canvas_view::CanvasPicture`.
     pub(super) canvas_pictures: HashMap<PathBuf, crate::ui::canvas_view::CanvasPicture>,
@@ -1641,6 +1648,8 @@ impl ClaudhubApp {
             note_editors: HashMap::new(),
             canvas: HashMap::new(),
             canvas_created: None,
+            canvas_reads: Default::default(),
+            sweep: Default::default(),
             skill_status: HashMap::new(),
             generations: Vec::new(),
             canvas_pictures: HashMap::new(),
@@ -1956,11 +1965,19 @@ impl ClaudhubApp {
             // to run them more often than a `git status`.
             self.scan_wt();
             // And the home screen's cards, only while it is up: four commands
-            // a worktree, for a screen nobody is looking at otherwise.
+            // a worktree, for a screen nobody is looking at otherwise — and
+            // of those not on it, one pass in six (`sweep::Sweep::outlines`).
             if self.overview {
-                self.git.send(Cmd::LoadOutlines {
-                    worktrees: worktrees.clone(),
-                });
+                let mut shown: Vec<PathBuf> = self
+                    .overview_repos()
+                    .into_iter()
+                    .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
+                    .collect();
+                shown.extend(self.active.clone());
+                let due = self.sweep.outlines(&worktrees, &shown);
+                if !due.is_empty() {
+                    self.git.send(Cmd::LoadOutlines { worktrees: due });
+                }
             }
             // What each agent can read of its surroundings, at the same pace
             // as what it is made of.
@@ -1976,13 +1993,17 @@ impl ClaudhubApp {
                 .into_iter()
                 .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
                 .collect();
-            self.read_canvas(shown, cx);
+            self.sweep_canvas(shown, cx);
         }
-        let programs = Settings::global(cx).terminal.agent_programs();
-        self.git.send(Cmd::ScanAgents {
-            worktrees,
-            programs,
-        });
+        // Not again before the last scan has answered: behind a slow one,
+        // they would pile up and all arrive stale — see `ui::sweep`.
+        if self.sweep.ask_agents(std::time::Instant::now()) {
+            let programs = Settings::global(cx).terminal.agent_programs();
+            self.git.send(Cmd::ScanAgents {
+                worktrees,
+                programs,
+            });
+        }
     }
 
     /// Goes to fetch what is new in the open repositories, at the configured period.
@@ -2430,7 +2451,14 @@ impl ClaudhubApp {
                 worktree,
                 files,
                 pictures,
-            } => self.canvas_read(worktree, files, pictures, window, cx),
+            } => {
+                // Read every two seconds, and most of the time unchanged:
+                // nothing to redraw then — `canvas_read` notifies itself
+                // when something moved.
+                if !self.canvas_read(worktree, files, pictures, window, cx) {
+                    return;
+                }
+            }
             Evt::CanvasPicture { path, stamp, bytes } => {
                 self.canvas_picture(path, stamp, bytes, cx)
             }
@@ -2443,7 +2471,10 @@ impl ClaudhubApp {
                 self.outlines.extend(outlines);
                 cx.notify();
             }
-            Evt::Agents { agents } => self.agents_scanned(agents),
+            Evt::Agents { agents } => {
+                self.sweep.agents_answered();
+                self.agents_scanned(agents)
+            }
             Evt::AgentSessions { sessions } => self.agent_sessions_heard(sessions, cx),
             Evt::AgentHooksWritten {
                 worktree,
@@ -2731,6 +2762,9 @@ impl ClaudhubApp {
                 // answer for it. A spinner that turns for ever says less than
                 // one that never turned — the status bar carries the reason.
                 self.clear_running();
+                // Nor for the periodic readings, which would wait for it.
+                self.sweep.forget_asked();
+                self.canvas_reads.forget_sent();
             }
         }
         cx.notify();

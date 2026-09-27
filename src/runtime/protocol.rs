@@ -672,9 +672,14 @@ pub enum Cmd {
     /// The home screen's nodes of a worktree: its shared folder
     /// (`.claudhub/notes` in the checkout) and its private one (in the vault),
     /// `true` for the private. See `crate::canvas`.
+    ///
+    /// `known` is the stamp of each node file the view already holds
+    /// (`files::read_notes_since`): the answer carries the text of the others
+    /// only.
     ReadCanvas {
         worktree: WorktreeId,
         dirs: Vec<(PathBuf, bool)>,
+        known: Vec<(PathBuf, u64)>,
     },
     /// Writes a new note into a folder: the worker picks a free name on the
     /// disk and signs it with the checkout's `user.name` — two things only it
@@ -1537,11 +1542,13 @@ pub enum Evt {
         worktree: WorktreeId,
         status: crate::skill::Status,
     },
-    /// A worktree's node files: full path, private or not, and text — and
-    /// the pictures beside them, by stamp only (`files::picture_stamps`).
+    /// A worktree's node files: full path, private or not, stamp, and text —
+    /// `None` when the stamp is the one `ReadCanvas` gave — and the pictures
+    /// beside them, by stamp only (`files::picture_stamps`). A file missing
+    /// from the list is gone.
     CanvasRead {
         worktree: WorktreeId,
-        files: Vec<(PathBuf, bool, String)>,
+        files: Vec<(PathBuf, bool, u64, Option<String>)>,
         pictures: Vec<(PathBuf, bool, u64)>,
     },
     /// A diagram's picture, undecoded.
