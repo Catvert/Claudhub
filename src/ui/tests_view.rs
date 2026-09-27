@@ -18,7 +18,7 @@ use std::rc::Rc;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
-    menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     spinner::Spinner,
     v_flex, ActiveTheme, Disableable, Selectable, Sizable,
 };
@@ -1626,7 +1626,119 @@ impl ClaudhubApp {
                         .child(SharedString::from(clock(last.at))),
                 )
             });
-        let top = h_flex()
+        let app = cx.entity().downgrade();
+        let filtering = only_failed || only_changed;
+        // The two filters under one button, lit while one narrows the list.
+        let filter = {
+            let app = app.clone();
+            Button::new("pest-filter")
+                .ghost()
+                .small()
+                .icon(icon("funnel"))
+                .tooltip(tr!("tests-filter"))
+                .selected(filtering)
+                .dropdown_menu(move |menu, _window, _cx| {
+                    let (changed_app, failed_app) = (app.clone(), app.clone());
+                    menu.item(
+                        PopupMenuItem::new(tr!("tests-only-changed"))
+                            .checked(only_changed)
+                            .on_click(move |_, _window, cx| {
+                                with_pest(&changed_app, cx, |state| {
+                                    state.only_changed = Some(!only_changed)
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(tr!("tests-only-failed"))
+                            .checked(only_failed)
+                            .on_click(move |_, _window, cx| {
+                                with_pest(&failed_app, cx, |state| {
+                                    state.only_failed = !state.only_failed
+                                });
+                            }),
+                    )
+                })
+        };
+        // What is set once and left: Pest's run modes — where Pest is —, and
+        // the two gestures on the list itself. `--parallel` excludes the
+        // other modes — the browser plugin refuses it with `--headed`, and a
+        // worker per browser leaves nothing single to watch — so turning one
+        // on turns it off rather than launching a run that only errors.
+        let options = {
+            let app = app.clone();
+            Button::new("pest-options")
+                .ghost()
+                .small()
+                .icon(icon("settings-2"))
+                .tooltip(tr!("tests-options"))
+                .selected(modes.is_some_and(|(cast, slow, headed, parallel)| {
+                    cast || slow || headed || parallel
+                }))
+                .dropdown_menu(move |menu, _window, _cx| {
+                    let mut menu = menu;
+                    if let Some((cast, slow, headed, parallel)) = modes {
+                        let toggles: [ModeToggle; 4] = [
+                            (tr!("tests-cast-label"), cast, |state| {
+                                state.cast = !state.cast;
+                                if state.cast {
+                                    state.parallel = false;
+                                }
+                            }),
+                            (tr!("tests-slow-label"), slow, |state| {
+                                state.slow = !state.slow;
+                            }),
+                            (tr!("tests-headed-label"), headed, |state| {
+                                state.headed = !state.headed;
+                                if state.headed {
+                                    state.parallel = false;
+                                }
+                            }),
+                            (tr!("tests-parallel-label"), parallel, |state| {
+                                state.parallel = !state.parallel;
+                                if state.parallel {
+                                    state.headed = false;
+                                    state.cast = false;
+                                }
+                            }),
+                        ];
+                        for (label, on, toggle) in toggles {
+                            let app = app.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .checked(on)
+                                    .on_click(move |_, _window, cx| with_pest(&app, cx, toggle)),
+                            );
+                        }
+                        menu = menu.separator();
+                    }
+                    let (reload, reset) = (app.clone(), app.clone());
+                    menu.item(
+                        PopupMenuItem::new(tr!("tests-reload"))
+                            .icon(icon("refresh-cw"))
+                            .disabled(pending)
+                            .on_click(move |_, _window, cx| {
+                                if let Some(app) = reload.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        if let Some(active) = this.active.clone() {
+                                            this.reload_pest(&active, cx);
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(tr!("tests-reset"))
+                            .icon(icon("eraser"))
+                            .on_click(move |_, window, cx| {
+                                if let Some(app) = reset.upgrade() {
+                                    app.update(cx, |this, cx| this.reset_tests(window, cx));
+                                }
+                            }),
+                    )
+                })
+        };
+        h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_2()
@@ -1637,36 +1749,7 @@ impl ClaudhubApp {
             .child(icon("circle-check").xsmall())
             .child(summary)
             .child(self.find_button(Pane::Tests, cx))
-            .child(
-                Button::new("pest-only-changed")
-                    .ghost()
-                    .small()
-                    .icon(icon("git-branch"))
-                    .tooltip(tr!("tests-only-changed"))
-                    .selected(only_changed)
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        if let Some(active) = this.active.clone() {
-                            this.pest.entry(active).or_default().only_changed = Some(!only_changed);
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("pest-only-failed")
-                    .ghost()
-                    .small()
-                    .icon(icon("circle-x"))
-                    .tooltip(tr!("tests-only-failed"))
-                    .selected(only_failed)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        if let Some(active) = this.active.clone() {
-                            if let Some(state) = this.pest.get_mut(&active) {
-                                state.only_failed = !state.only_failed;
-                            }
-                        }
-                        cx.notify();
-                    })),
-            )
+            .child(filter)
             .when(failing > 0, |el| {
                 el.child(
                     Button::new("tests-hand-all")
@@ -1679,21 +1762,13 @@ impl ClaudhubApp {
                         })),
                 )
             })
-            .child(
-                Button::new("tests-reset")
-                    .ghost()
-                    .small()
-                    .icon(icon("eraser"))
-                    .tooltip(tr!("tests-reset"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.reset_tests(window, cx);
-                    })),
-            )
+            .child(options)
             .child(
                 Button::new("pest-run-all")
-                    .ghost()
+                    .primary()
                     .small()
                     .icon(icon("play"))
+                    .label(tr!("tests-run-all-short"))
                     .tooltip(tr!("tests-run-all"))
                     .disabled(count == 0)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1727,118 +1802,6 @@ impl ClaudhubApp {
                         this.launch_tests(label, targets, window, cx);
                     })),
             )
-            .child(
-                Button::new("pest-refresh")
-                    .ghost()
-                    .small()
-                    .icon(icon("refresh-cw"))
-                    .tooltip(tr!("action-refresh"))
-                    .disabled(pending)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        if let Some(active) = this.active.clone() {
-                            this.reload_pest(&active, cx);
-                        }
-                        cx.notify();
-                    })),
-            );
-        // Pest's run modes, on their own line: labelled toggles read better
-        // than one more icon squeezed into the bar. `--parallel` excludes the
-        // other two — the browser plugin refuses it with `--headed`, and a
-        // worker per browser leaves nothing single to watch — so a toggle
-        // turns it off rather than launching a run that only errors.
-        v_flex()
-            .w_full()
-            .child(top)
-            .when_some(modes, |el, (cast, slow, headed, parallel)| {
-                el.child(
-                    h_flex()
-                        .h(crate::ui::theme::bar_height(cx))
-                        .w_full()
-                        .px_2()
-                        .gap_1()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            Button::new("pest-cast")
-                                .ghost()
-                                .small()
-                                .icon(icon("monitor-play"))
-                                .label(tr!("tests-cast-label"))
-                                .tooltip(tr!("tests-cast"))
-                                .selected(cast)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    if let Some(active) = this.active.clone() {
-                                        if let Some(state) = this.pest.get_mut(&active) {
-                                            state.cast = !state.cast;
-                                            if state.cast {
-                                                state.parallel = false;
-                                            }
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("pest-slow")
-                                .ghost()
-                                .small()
-                                .icon(icon("clock"))
-                                .label(tr!("tests-slow-label"))
-                                .tooltip(tr!("tests-slow"))
-                                .selected(slow)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    if let Some(active) = this.active.clone() {
-                                        if let Some(state) = this.pest.get_mut(&active) {
-                                            state.slow = !state.slow;
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("pest-headed")
-                                .ghost()
-                                .small()
-                                .icon(icon("eye"))
-                                .label(tr!("tests-headed-label"))
-                                .tooltip(tr!("tests-headed"))
-                                .selected(headed)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    if let Some(active) = this.active.clone() {
-                                        if let Some(state) = this.pest.get_mut(&active) {
-                                            state.headed = !state.headed;
-                                            if state.headed {
-                                                state.parallel = false;
-                                            }
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("pest-parallel")
-                                .ghost()
-                                .small()
-                                .icon(icon("zap"))
-                                .label(tr!("tests-parallel-label"))
-                                .tooltip(tr!("tests-parallel"))
-                                .selected(parallel)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    if let Some(active) = this.active.clone() {
-                                        if let Some(state) = this.pest.get_mut(&active) {
-                                            state.parallel = !state.parallel;
-                                            if state.parallel {
-                                                state.headed = false;
-                                                state.cast = false;
-                                            }
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
     }
 }
 
@@ -2239,6 +2202,27 @@ fn missing_pest(pending: bool, cx: &App) -> gpui_kit::AnyElement {
 /// Nothing to show: a listing under way, a search or the failures filter
 /// that found nothing, or a suite with no test at all — different things,
 /// and saying the wrong one is how a panel reads as broken.
+/// A run mode in the options' menu: its name, whether it is on, and what
+/// turns it over.
+type ModeToggle = (SharedString, bool, fn(&mut PestState));
+
+/// A change to the worktree on show's tests state, from a menu — whose
+/// closure holds the application weakly, and cannot borrow it.
+fn with_pest(
+    app: &gpui_kit::WeakEntity<ClaudhubApp>,
+    cx: &mut App,
+    change: impl FnOnce(&mut PestState),
+) {
+    if let Some(app) = app.upgrade() {
+        app.update(cx, |this, cx| {
+            if let Some(active) = this.active.clone() {
+                change(this.pest.entry(active).or_default());
+            }
+            cx.notify();
+        });
+    }
+}
+
 fn empty_pest(
     query: &str,
     pending: bool,
