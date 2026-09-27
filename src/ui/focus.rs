@@ -21,6 +21,8 @@ pub enum View {
     Git,
     /// What the branch has written since its base.
     Review,
+    /// The branch's pull request, or the form that opens one.
+    Pr,
     /// The notes, the principal one first.
     Notes,
     /// The worktree's `TODO.md`.
@@ -31,10 +33,11 @@ pub enum View {
 
 impl View {
     /// In the tabs' order.
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 7] = [
         View::Home,
         View::Git,
         View::Review,
+        View::Pr,
         View::Notes,
         View::Todo,
         View::Terminals,

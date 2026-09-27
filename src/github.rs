@@ -394,6 +394,8 @@ pub struct Comment {
 /// One review thread: a place in the diff, and what was said about it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Thread {
+    /// GraphQL's id, which a reply and a resolution name it by.
+    pub id: String,
     pub path: String,
     /// The line in the current diff; `None` once the line has left it.
     pub line: Option<u64>,
@@ -417,7 +419,7 @@ pub fn threads_command(number: u64) -> String {
     format!(
         "gh api graphql -F owner='{{owner}}' -F name='{{repo}}' -F number={number} -f query='\
          query($owner:String!,$name:String!,$number:Int!){{repository(owner:$owner,name:$name)\
-         {{pullRequest(number:$number){{reviewThreads(first:100){{nodes{{isResolved isOutdated \
+         {{pullRequest(number:$number){{reviewThreads(first:100){{nodes{{id isResolved isOutdated \
          path line originalLine comments(first:50){{nodes{{author{{login}} body url}}}}}}}}}}}}}}'"
     )
 }
@@ -443,6 +445,7 @@ pub fn parse_threads(out: &str) -> Result<Vec<Thread>, String> {
     Ok(nodes
         .iter()
         .map(|thread| Thread {
+            id: text(thread, "id"),
             path: text(thread, "path"),
             line: thread.get("line").and_then(Value::as_u64),
             original_line: thread.get("originalLine").and_then(Value::as_u64),
@@ -639,6 +642,64 @@ fn text(value: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// The command that answers a review thread.
+///
+/// GraphQL's own variables carry the id and the body — `-f` sends them as
+/// strings, quoted for the shell —, never the query text: a body written
+/// into the query would have to be escaped for GraphQL too.
+pub fn reply_command(thread: &str, body: &str) -> String {
+    format!(
+        "gh api graphql -f query='mutation($id:ID!,$body:String!)\
+         {{addPullRequestReviewThreadReply(input:{{pullRequestReviewThreadId:$id,body:$body}})\
+         {{comment{{id}}}}}}' -f id={} -f body={}",
+        quote(thread),
+        quote(body)
+    )
+}
+
+/// The command that resolves a review thread, or opens it again.
+pub fn resolve_command(thread: &str, resolved: bool) -> String {
+    let mutation = if resolved {
+        "resolveReviewThread"
+    } else {
+        "unresolveReviewThread"
+    };
+    format!(
+        "gh api graphql -f query='mutation($id:ID!){{{mutation}(input:{{threadId:$id}})\
+         {{thread{{isResolved}}}}}}' -f id={}",
+        quote(thread)
+    )
+}
+
+/// The command that marks a draft ready for review, or — `ready` false —
+/// turns it back into a draft.
+pub fn ready_command(number: u64, ready: bool) -> String {
+    if ready {
+        format!("gh pr ready {number}")
+    } else {
+        format!("gh pr ready {number} --undo")
+    }
+}
+
+/// How a pull request is merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeHow {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+/// The command that merges a pull request. `gh` would ask how, and stdin is
+/// closed in a worker: the way is always said.
+pub fn merge_command(number: u64, how: MergeHow) -> String {
+    let flag = match how {
+        MergeHow::Merge => "--merge",
+        MergeHow::Squash => "--squash",
+        MergeHow::Rebase => "--rebase",
+    };
+    format!("gh pr merge {number} {flag}")
 }
 
 /// Single-quotes a value for `sh -c`.
@@ -863,7 +924,7 @@ mod tests {
     /// Cut down from a real answer of the GraphQL API, with the nulls it
     /// writes: an outdated thread's line, a deleted account.
     const THREADS: &str = r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-        {"isResolved":false,"isOutdated":false,"path":"internal/flock/flock.go","line":32,"originalLine":32,
+        {"id":"PRRT_1","isResolved":false,"isOutdated":false,"path":"internal/flock/flock.go","line":32,"originalLine":32,
          "comments":{"nodes":[{"author":{"login":"copilot-pull-request-reviewer"},
            "body":"Lock attempts TryLock before observing ctx.\n\nCheck ctx first.",
            "url":"https://github.com/cli/cli/pull/14450#discussion_r1"},
@@ -879,12 +940,38 @@ mod tests {
         let threads = parse_threads(THREADS).expect("the fixture reads");
         assert_eq!(threads.len(), 3);
         assert_eq!(threads[0].comments[1].author, "ghost");
+        assert_eq!(threads[0].id, "PRRT_1");
+        assert_eq!(threads[1].id, "");
         assert_eq!(threads[2].line, None);
         assert_eq!(threads[2].original_line, Some(19));
         // Unresolved, by file: `api/` before `internal/`.
         let open = unresolved(&threads);
         assert_eq!(open.len(), 2);
         assert_eq!(open[0].path, "api/http_client.go");
+    }
+
+    /// A reply's body goes as a variable, quoted for the shell: an
+    /// apostrophe in it ends nothing.
+    #[test]
+    fn a_reply_carries_its_body_as_a_variable() {
+        let command = reply_command("PRRT_1", "it's fixed");
+        assert!(
+            command.contains("addPullRequestReviewThreadReply"),
+            "{command}"
+        );
+        assert!(
+            command.ends_with(r"-f id='PRRT_1' -f body='it'\''s fixed'"),
+            "{command}"
+        );
+        assert!(resolve_command("T", true).contains("resolveReviewThread(input:{threadId:$id})"));
+        assert!(resolve_command("T", false).contains("unresolveReviewThread"));
+    }
+
+    #[test]
+    fn a_merge_and_a_ready_say_everything_gh_would_ask() {
+        assert_eq!(merge_command(7, MergeHow::Squash), "gh pr merge 7 --squash");
+        assert_eq!(ready_command(7, true), "gh pr ready 7");
+        assert_eq!(ready_command(7, false), "gh pr ready 7 --undo");
     }
 
     /// GraphQL's refusal is an error, not "no thread".

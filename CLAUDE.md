@@ -142,6 +142,8 @@ src/
                      note principale — pur
     focus_view.rs    la barre latérale des worktrees, les tableaux et leurs vues
     summary_view.rs  les onglets d'un tableau, et son Accueil
+    pr_view.rs       l'onglet PR : le formulaire, ou la PR, ses vérifications,
+                     ses fils de revue et ses gestes
     changes_view.rs  le nœud « Modifications », la feuille de validation, la
                      revue d'un tableau
     canvas_view.rs   les notes de l'accueil : fichiers lus, écrits, déplacés
@@ -401,7 +403,7 @@ bord. **Le titre d'un tableau est à lui et défile avec lui** (`board_title`) :
 placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
 
 - **Des onglets et une seule vue** (`focus::View`, retenue par worktree) :
-  Accueil, Git, Revue, note principale, TODO, Terminaux. Des vues de types
+  Accueil, Git, Revue, PR, note principale, TODO, Terminaux. Des vues de types
   différents côte à côte ont été essayées et refusées.
 - **L'Accueil** (`ui::summary_view`) : à gauche l'état en cartes (branche, PR
   et CI, ce qui attend un commit, revue, tâches, note principale, ce qui
@@ -414,6 +416,11 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
   qu'aucune feuille ne peint les mêmes panneaux — une liste virtuelle peinte
   deux fois partagerait son défilement. La PR et la CI ne sont lues que pour le
   worktree regardé : l'état GitHub n'en suit qu'un.
+- **L'onglet PR** (`ui::pr_view`) : sans PR, le formulaire est l'onglet (titre
+  et corps d'après les commits, base de la revue) ; avec une PR, son état, ses
+  vérifications, ses fils de revue — répondus et résolus d'ici par GraphQL,
+  le corps en variable et jamais dans la requête — et prête / brouillon /
+  fusionner. Chaque geste relit tout (`GithubState::pr_action_call`).
 - **La note principale** est celle qu'on épingle (`pinned_note`), à défaut la
   plus récente (`focus::principal_note`).
 - **Ce qu'un agent fait se lit pour tous les terminaux des worktrees vivants**

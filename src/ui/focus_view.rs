@@ -1095,7 +1095,7 @@ impl ClaudhubApp {
             View::Git => GIT_LIST_WIDTH + 8. + column_min,
             View::Notes => NOTES_LIST_WIDTH + 8. + column_min,
             View::Review => super::changes_view::REVIEW_LIST_WIDTH + column_min,
-            View::Todo | View::Terminals => column_min,
+            View::Todo | View::Terminals | View::Pr => column_min,
         };
         let open = path.to_path_buf();
         let actions = vec![Button::new("focus-edit")
@@ -1156,6 +1156,7 @@ impl ClaudhubApp {
             View::Home => self.render_home_view(path, at_work, window, cx),
             View::Git => self.render_git_view(path, window, cx),
             View::Review => self.render_review_card(path, true, false, window, cx),
+            View::Pr => self.render_pr_view(path, window, cx),
             View::Notes => self.render_notes_view(path, cx),
             View::Todo => self.render_todo_view(path, cx),
             View::Terminals => self.render_terminals_view(path, at_work, window, cx),
@@ -1207,7 +1208,7 @@ impl ClaudhubApp {
                         .child(tr!("todo-progress", { done: todo.done(), total: todo.tasks.len() }))
                         .into_any_element()
                 }),
-            View::Home | View::Notes | View::Terminals => None,
+            View::Home | View::Notes | View::Terminals | View::Pr => None,
         }
     }
 
@@ -1670,6 +1671,7 @@ pub(super) fn view_name(view: View) -> (&'static str, SharedString) {
         View::Home => ("house", tr!("focus-home")),
         View::Git => ("git-branch", tr!("focus-view-git")),
         View::Review => ("file-diff", tr!("focus-review")),
+        View::Pr => ("git-pull-request", tr!("focus-view-pr")),
         View::Notes => ("sticky-note", tr!("focus-view-notes")),
         View::Todo => ("check-check", tr!("todo-title")),
         View::Terminals => ("square-terminal", tr!("focus-view-terminals")),

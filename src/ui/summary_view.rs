@@ -83,6 +83,15 @@ impl ClaudhubApp {
                         .map(|todo| todo.tasks.len() - todo.done())
                         .filter(|open| *open > 0),
                     View::Terminals => Some(self.board_terminals(path).len()).filter(|n| *n > 0),
+                    // The threads still open, once read for the branch's PR.
+                    View::Pr => self
+                        .branch_pr()
+                        .filter(|pr| {
+                            self.active.as_deref() == Some(path)
+                                && self.github.view_threads_for == Some(pr.number)
+                        })
+                        .map(|_| crate::github::unresolved(&self.github.view_threads).len())
+                        .filter(|open| *open > 0),
                     View::Home | View::Review | View::Notes => None,
                 };
                 // The agents' tab wears the loudest of them.
@@ -241,6 +250,7 @@ impl ClaudhubApp {
             .gap_3()
             .overflow_y_scroll()
             .child(self.home_branch(path, cx))
+            .child(self.home_pr(path, cx))
             .child(self.home_to_commit(path, cx))
             .child(self.home_review(path, cx))
             .child(self.home_tasks(path, cx))
@@ -776,7 +786,6 @@ impl ClaudhubApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let github = (self.active.as_deref() == Some(path)).then(|| self.home_github(cx));
         let body = v_flex()
             .gap_1p5()
             .child(
@@ -828,7 +837,6 @@ impl ClaudhubApp {
                     )
             }))
             .children(merge.map(|merge| h_flex().child(merge)))
-            .children(github.flatten())
             .into_any_element();
         let (glyph, _) = view_name(View::Git);
         self.home_card(
@@ -843,28 +851,66 @@ impl ClaudhubApp {
         )
     }
 
-    /// The branch's pull request and its last CI run, as the GitHub panel
-    /// read them — for the worktree on show, the one it reads for.
-    fn home_github(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The branch's pull request: its title, where it stands — checks,
+    /// review, threads still open — and its last CI run; without one, the
+    /// button that opens one. For the worktree on show, the one the GitHub
+    /// state reads for.
+    fn home_pr(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let (glyph, title) = view_name(View::Pr);
+        let body = if self.active.as_deref() == Some(path) {
+            if let Some(number) = self.branch_pr().map(|pr| pr.number) {
+                self.ensure_pr_threads(number);
+            }
+            self.home_github(path, cx)
+        } else {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr!("focus-review-idle"))
+                .into_any_element()
+        };
+        self.home_card(path, glyph, title, View::Pr, None, Vec::new(), body, cx)
+    }
+
+    fn home_github(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let pr = self.branch_pr().cloned();
         let run = self.github.runs.first().cloned();
-        let loaded = !self.github.pr_loading && self.github.error.is_none();
-        if pr.is_none() && run.is_none() && !loaded {
-            return None;
+        if pr.is_none() {
+            if self.github.pr_loading {
+                return div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(tr!("github-pr-loading"))
+                    .into_any_element();
+            }
+            if let Some(error) = self.github.error.clone() {
+                return div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(error)
+                    .into_any_element();
+            }
         }
+        let board = path.to_path_buf();
+        let open_threads = pr
+            .as_ref()
+            .filter(|pr| self.github.view_threads_for == Some(pr.number))
+            .map(|_| crate::github::unresolved(&self.github.view_threads).len())
+            .unwrap_or(0);
         let pr_line = match pr {
             Some(pr) => {
                 let checks = pr.checks();
-                let url = pr.url.clone();
                 h_flex()
                     .id("focus-home-pr")
                     .gap_1p5()
                     .items_center()
                     .text_xs()
                     .cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_board_view(&board, View::Pr, cx);
+                    }))
                     .child(
                         icon("git-pull-request")
                             .xsmall()
@@ -913,12 +959,34 @@ impl ClaudhubApp {
                     })
                     .into_any_element()
             }
-            None => div()
-                .text_xs()
-                .text_color(muted)
-                .child(tr!("focus-home-no-pr"))
+            None => h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(tr!("focus-home-no-pr")),
+                )
+                .child(
+                    Button::new("focus-home-create-pr")
+                        .small()
+                        .primary()
+                        .icon(icon("git-pull-request"))
+                        .label(tr!("pr-form-create"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.show_board_view(&board, View::Pr, cx);
+                        })),
+                )
                 .into_any_element(),
         };
+        let threads_line = (open_threads > 0).then(|| {
+            div()
+                .text_xs()
+                .text_color(theme.warning)
+                .child(tr!("pr-threads-open", { count: open_threads }))
+        });
         let run_line = run.map(|run| {
             let tint = match run.stage() {
                 crate::github::Stage::Passed => theme.success,
@@ -949,16 +1017,12 @@ impl ClaudhubApp {
                         .child(SharedString::from(run.title.clone())),
                 )
         });
-        Some(
-            v_flex()
-                .gap_1()
-                .pt_1p5()
-                .border_t_1()
-                .border_color(theme.border)
-                .child(pr_line)
-                .children(run_line)
-                .into_any_element(),
-        )
+        v_flex()
+            .gap_1()
+            .child(pr_line)
+            .children(threads_line)
+            .children(run_line)
+            .into_any_element()
     }
 
     /// What waits for a commit: its files, the first few, and the way to

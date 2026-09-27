@@ -1136,6 +1136,11 @@ pub struct ClaudhubApp {
     /// The terminal each board's home shows under its sub-tabs, once one
     /// was pressed — see `focus::shown_terminal`; not kept.
     pub(super) home_terminal: HashMap<PathBuf, u64>,
+    /// The PR tab's form, for the worktree it was made for — see
+    /// `ui::pr_view`.
+    pub(super) pr_form: Option<crate::ui::pr_view::PrForm>,
+    /// The PR tab's reply field, made once.
+    pub(super) pr_reply: Option<gpui_kit::Entity<gpui_kit::component::input::InputState>>,
     /// The worktrees chosen in the focus view's sidebar — see
     /// `focus::shown_worktrees`.
     pub(super) focus_chosen: Vec<PathBuf>,
@@ -1634,6 +1639,8 @@ impl ClaudhubApp {
             home_mode: crate::ui::store::Store::global(cx).session.home_mode,
             focus_note_shown: HashMap::new(),
             home_terminal: HashMap::new(),
+            pr_form: None,
+            pr_reply: None,
             focus_chosen: crate::ui::store::Store::global(cx)
                 .session
                 .focus_shown

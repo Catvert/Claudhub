@@ -47,6 +47,7 @@ mod overview;
 pub(crate) mod overview_view;
 mod panels;
 mod picker;
+mod pr_view;
 mod preview;
 mod quick;
 mod quick_view;

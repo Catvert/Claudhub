@@ -584,6 +584,21 @@ pub struct GithubState {
     pub landing: Option<Landing>,
     pub threads_call: u64,
     pub threads_for: Option<ThreadsFor>,
+    /// The branch's pull request's review threads, as a board's PR tab shows
+    /// them, and the pull request they are of — see `ui::pr_view`.
+    pub view_threads: Vec<crate::github::Thread>,
+    pub view_threads_for: Option<u64>,
+    pub view_threads_call: u64,
+    pub view_threads_loading: bool,
+    /// A gesture on the pull request — a reply, a resolution, ready, merge —
+    /// sent; everything is read again once it is answered.
+    pub pr_action_call: u64,
+    /// The `git log` that fills the PR tab's form.
+    pub form_call: u64,
+    /// The thread a reply is being written to, by id.
+    pub replying: Option<String>,
+    /// The resolved threads are shown too.
+    pub resolved_open: bool,
 }
 
 impl GithubState {
@@ -641,7 +656,7 @@ impl GithubState {
 }
 
 impl ClaudhubApp {
-    fn ask_gh(&mut self, command: String, worktree: PathBuf) -> u64 {
+    pub(super) fn ask_gh(&mut self, command: String, worktree: PathBuf) -> u64 {
         self.github_seq += 1;
         let call = self.github_seq;
         self.git.send(Cmd::Call {
@@ -657,14 +672,14 @@ impl ClaudhubApp {
     /// The status's and not the worktree list's: a checkout rereads the status,
     /// and nothing rereads the list — which is the same reading
     /// `ClaudhubApp::status_arrived` trusts.
-    fn branch_here(&self) -> Option<String> {
+    pub(super) fn branch_here(&self) -> Option<String> {
         let worktree = self.active.as_deref()?;
         self.review.get(worktree)?.status.branch.clone()
     }
 
     /// Whether the branch has never been published, which is what decides
     /// whether opening a pull request has to push first.
-    fn unpublished(&self) -> bool {
+    pub(super) fn unpublished(&self) -> bool {
         self.active
             .as_deref()
             .and_then(|worktree| self.review.get(worktree))
@@ -675,7 +690,7 @@ impl ClaudhubApp {
     /// request would target: the two questions are the same question, and
     /// answering them differently would compare one thing on screen and merge
     /// another.
-    fn base_here(&self) -> Option<String> {
+    pub(super) fn base_here(&self) -> Option<String> {
         let worktree = self.active.as_deref()?;
         self.review.get(worktree)?.base.clone()
     }
@@ -846,7 +861,7 @@ impl ClaudhubApp {
     }
 
     /// Opens a pull request, and reads everything back once it is there.
-    fn create_pr(
+    pub(super) fn create_pr(
         &mut self,
         base: Option<String>,
         title: String,
@@ -1273,6 +1288,28 @@ impl ClaudhubApp {
             }
         } else if call == github.threads_call {
             self.threads_arrived(result, window, cx);
+        } else if call == github.view_threads_call {
+            github.view_threads_loading = false;
+            match result.and_then(|out| parse_threads(&out)) {
+                Ok(threads) => github.view_threads = threads,
+                Err(why) => github.error = Some(SharedString::from(why)),
+            }
+        } else if call == github.pr_action_call {
+            match result {
+                Ok(_) => {
+                    // Read everything again: the pull request's state, its
+                    // threads, and the runs a merge may have started.
+                    github.view_threads_for = None;
+                    github.replying = None;
+                    self.announce(tr!("github-pr-done"), cx);
+                    self.load_github(cx);
+                }
+                Err(why) => self.announce_error(SharedString::from(why), cx),
+            }
+        } else if call == github.form_call {
+            if let Ok(subjects) = result {
+                self.fill_pr_form(&subjects, window, cx);
+            }
         } else if call == github.draft_call {
             let branch = self.branch_here().unwrap_or_default();
             let base = self.github.draft_base.take();
@@ -1293,7 +1330,10 @@ impl ClaudhubApp {
             match result {
                 // Everything is read back: the pull request that has just been
                 // opened, and the runs its push has started.
-                Ok(_) => self.load_github(cx),
+                Ok(_) => {
+                    self.pr_form = None;
+                    self.load_github(cx);
+                }
                 Err(why) => github.error = Some(SharedString::from(why)),
             }
         } else if call == github.log_call {
