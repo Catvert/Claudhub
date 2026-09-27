@@ -48,12 +48,13 @@ pub struct WorktreeState {
     /// Its branch review on its focus board: its height, fold and whether
     /// it was taken off.
     pub home_review: NodePlace,
-    /// Its cards' columns in the home screen's focus view, as the hand left
-    /// them — see `ui::focus`.
-    pub focus_board: Vec<Vec<crate::ui::focus::Key>>,
-    /// The widths the hand gave those columns, column for column; `None`
-    /// fills.
-    pub focus_widths: Vec<Option<f32>>,
+    /// What the right of its board shows in the home screen's focus view,
+    /// once chosen — see `ui::focus`.
+    pub focus_view: Option<crate::ui::focus::View>,
+    /// The note its board's home shows as its principal one.
+    pub pinned_note: Option<PathBuf>,
+    /// Its board's home folded to its rail.
+    pub focus_summary_folded: bool,
     /// The terminals that were open, in order, to open again — see
     /// `ui::revive`.
     pub terminals: Vec<SavedTerminal>,

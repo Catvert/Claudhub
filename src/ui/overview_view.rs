@@ -774,7 +774,7 @@ impl ClaudhubApp {
             ),
             Node::Review(path) => {
                 let height = kept(overview::REVIEW);
-                let card = self.render_review_card(path, !in_column, window, cx);
+                let card = self.render_review_card(path, !in_column, true, window, cx);
                 boxed(height, card)
             }
             Node::Worktree(path) => {
@@ -1246,18 +1246,13 @@ impl ClaudhubApp {
                 }
             }
         });
-        // On the boards, the cards go back where the rules put them: read
-        // anew from nothing, as a worktree never arranged is.
+        // On the boards, the view goes back to what a board opens on.
         if self.home_mode == HomeMode::Focus {
             let shown = self.focus_worktrees();
-            for path in &shown {
-                self.focus_boards.remove(path);
-            }
             super::store::Store::update_global(cx, |store| {
                 for path in &shown {
                     if let Some(state) = store.worktrees.get_mut(path) {
-                        state.focus_board = Default::default();
-                        state.focus_widths = Default::default();
+                        state.focus_view = None;
                     }
                 }
             });
@@ -1777,24 +1772,6 @@ fn outline(
     path.cubic_bezier_to(at(x + r, y), at(x, y + r - k), at(x + r - k, y));
     path.build().ok()
 }
-
-/// How far past a column's right edge its width grip ends: centred in the
-/// **empty** space between two columns, which is not the gap alone — the
-/// bar's gutter is empty too while nothing scrolls, and the grip used to sit
-/// in the gap only, off to the right of what reads as the space between two
-/// cards. When the column scrolls, its bar takes the gutter but its inner
-/// margin, and the grip moves over so as never to lie on the thumb.
-pub(super) fn grip_offset(gap: Pixels, scroll: &gpui_kit::ScrollHandle) -> Pixels {
-    let gutter = super::theme::scroll_gutter();
-    // What the thumb leaves of the gutter at its right, when it is painted.
-    let margin = px(4.);
-    let scrolls = scroll.max_offset().y > px(0.);
-    let empty_inside = if scrolls { margin } else { gutter };
-    (gap - empty_inside) / 2. + GRIP_WIDTH / 2.
-}
-
-/// A width grip's breadth.
-pub(super) const GRIP_WIDTH: Pixels = px(8.);
 
 /// The line between two projects: a thin rule that fades in and out at its
 /// ends rather than stopping dead, so that it reads as a border between two
@@ -2360,10 +2337,6 @@ impl ClaudhubApp {
                 }))
         });
 
-        // In the focus view the card and its changes are one card.
-        let merged = (detail && self.home_mode == HomeMode::Focus)
-            .then(|| self.render_changes_section(path, cx))
-            .flatten();
         let open = path.to_path_buf();
         v_flex()
             .id(SharedString::from(format!(
@@ -2403,12 +2376,9 @@ impl ClaudhubApp {
                     .p_2()
                     .gap_1p5()
                     .child(branch_row)
-                    // The one line that counts the changes, unless the card
-                    // lists them itself below.
-                    .when(merged.is_none(), |el| el.child(changes))
+                    .child(changes)
                     .children(word)
-                    .children(commits)
-                    .children(merged),
+                    .children(commits),
             )
             .into_any_element()
     }
@@ -2928,13 +2898,10 @@ pub(super) fn grab(
         cx.stop_propagation();
         if let Some(app) = app.upgrade() {
             app.update(cx, |this, _| {
-                // The plane moves the node; the focus board moves a card to
-                // another column.
-                match this.home_mode {
-                    HomeMode::Canvas => {
-                        this.overview_drag = Some(Drag::Node(node.clone(), event.position));
-                    }
-                    HomeMode::Focus => this.focus_grab(node.clone(), event.position),
+                // The plane moves the node; on a board, what shows where is
+                // the summary's to say.
+                if this.home_mode == HomeMode::Canvas {
+                    this.overview_drag = Some(Drag::Node(node.clone(), event.position));
                 }
             });
         }
@@ -3007,6 +2974,9 @@ impl ClaudhubApp {
                         .xsmall()
                         .icon(icon("x"))
                         .tooltip(match close {
+                            Node::Changes(_) | Node::Review(_) if self.home_mode.laid_out() => {
+                                tr!("overview-close")
+                            }
                             Node::Worktree(_) | Node::Changes(_) | Node::Review(_) => {
                                 tr!("overview-hide")
                             }
@@ -3137,6 +3107,12 @@ impl ClaudhubApp {
             Node::Git(_) => {}
             // Nothing is lost by taking it off: the files stay what they are,
             // and the « Hidden » menu brings it back — no question to ask.
+            // On a board, it is a view and not a node: filling the middle,
+            // its cross gives the board back.
+            Node::Changes(_) | Node::Review(_) if self.home_mode == HomeMode::Focus => {
+                self.overview_zoomed = None;
+                cx.notify();
+            }
             Node::Changes(_) | Node::Review(_) => {
                 self.overview_hand.hidden.insert(node.clone());
                 self.remember_folds(node, cx);
@@ -3455,7 +3431,7 @@ impl ClaudhubApp {
 }
 
 /// "3 h ago", in the window's words.
-fn ago(now: i64, at: i64) -> SharedString {
+pub(super) fn ago(now: i64, at: i64) -> SharedString {
     use super::base_select::Ago;
     match super::base_select::ago(now, at) {
         Ago::JustNow => tr!("when-just-now"),

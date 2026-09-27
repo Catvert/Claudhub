@@ -1,6 +1,6 @@
 //! The home screen's focus view, its default: a sidebar of every worktree on
-//! show, and the ones chosen in it in the middle, side by side, each one's
-//! cards on its board.
+//! show, and the ones chosen in it in the middle, side by side, each one on
+//! its board.
 //!
 //! The plane answers « where does each worktree stand », and pays for it in
 //! room: five worktrees share one screen. Most of a day is spent in one
@@ -14,32 +14,20 @@
 //! two views of the same boards differed only by how many were chosen. The
 //! sidebar folds to a rail of initials, for the room.
 //!
-//! **The middle is a board** (`ui::focus`, pure): columns of cards the hand
-//! arranges. A card is dragged by its head — the head every node already
-//! has — and dropped in another column, at a rank, or right of the last
-//! column, which makes a new one. While it travels, the card stays in place,
-//! faded, a chip follows the pointer, and a bar says where it would land:
-//! nothing moves under the hand until it lets go, so what one aims at stays
-//! where it was aimed at. Its arrangement is kept per worktree.
-//!
-//! **The worktree's card carries its changes**: on this board they are one
-//! card, what the branch is and what it is about to say. A terminal alone at
-//! the foot of a column takes the rest of its height — a column of
-//! terminals is read as one — and a column that holds a terminal or a note
-//! ends with a button that stacks another of it; the tall button right of the last column
-//! opens one in a column of its own. A column's right edge is taken to give
-//! it a width, never under the least the settings give; a double click
-//! lets it fill again.
+//! **A board is a home and one view** (`ui::focus`, pure): on the left a
+//! digest of the worktree — its git, its review, its principal note, its
+//! to-do list, its agents (`ui::summary_view`) — and on the right the whole
+//! of one of them, the one its section was pressed for. One at a time:
+//! views of different kinds side by side were a board to arrange before
+//! they were one to read.
 //!
 //! **Which worktree is the one on show** — `active`, the window's: choosing
 //! one here is choosing it for the editor too, and the branch picker, the
 //! review and the title bar all speak of it already. The others shown beside
 //! it are only shown.
 //!
-//! **What a board holds in the moment is its own** — its geometry, its
-//! columns' scrolls, the column being widened — keyed by worktree: two
-//! boards side by side measure two sets of columns, and a card only ever
-//! moves within its own.
+//! **What a board holds in the moment is its own** — where its home and
+//! its view stand — keyed by worktree.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,26 +35,21 @@ use std::path::{Path, PathBuf};
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu},
+    menu::{ContextMenuExt as _, PopupMenu},
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
 use gpui_kit::{
-    anchored, canvas, deferred, div, point, prelude::*, px, Animation, AnimationExt as _,
-    AnyElement, Context, Pixels, Point, SharedString, Window,
+    canvas, div, point, prelude::*, px, AnyElement, App, Context, Pixels, SharedString, Window,
 };
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
-use crate::ui::focus::{self, Board, ColumnSpan, Target};
+use crate::ui::focus::{self, View};
 use crate::ui::icons::icon;
 use crate::ui::motion::Axes;
 use crate::ui::overview::{self, Doing, HomeMode, Node};
 use crate::ui::overview_view::live_worktrees;
-
-/// How fast a card held at the very edge of the row scrolls it, in pixels
-/// a second: a board's width in well under a second.
-const EDGE_SCROLL_SPEED: f32 = 1400.;
 
 /// The boards' row's bar, and the key of its arrows' slide.
 const BOARD_BAR: &str = "focus-board-bar";
@@ -77,44 +60,14 @@ const SIDEBAR_WIDTH: f32 = 260.;
 pub(super) type Doings = std::collections::HashMap<PathBuf, Doing>;
 /// The sidebar folded to its rail: a column of initials.
 const RAIL_WIDTH: f32 = 52.;
-/// The button right of the last column.
-const ADD_COLUMN_WIDTH: f32 = 44.;
-/// How far the pointer travels before a press on a head is a drag: a click
-/// on a head that trembled is still a click.
-const DRAG_SLOP: f32 = 5.;
+/// How many of the commits a branch adds its git view lists.
+const GIT_COMMITS: usize = 12;
+/// The notes view's list, left of the note it shows.
+const NOTES_LIST_WIDTH: f32 = 240.;
 
-/// The room opened for a drop: never smaller than a card's head and a
-/// line, never taller than a card one can still see past.
-const ROOM_HEIGHT: (f32, f32) = (56., 180.);
-/// The widest the column a drop would make is drawn.
-const NEW_COLUMN_ROOM: f32 = 320.;
-
-/// How long the room for a drop takes to open, a card to land, and the
-/// chip to come under the pointer: long enough to be seen as movement,
-/// short enough never to be waited for.
-const ROOM_OPENS: std::time::Duration = std::time::Duration::from_millis(180);
-const CARD_LANDS: std::time::Duration = std::time::Duration::from_millis(380);
-const CHIP_SHOWS: std::time::Duration = std::time::Duration::from_millis(120);
-
-/// Fast out, slow in: what moves arrives, it does not stop.
-fn ease_out(t: f32) -> f32 {
-    1. - (1. - t).powi(3)
-}
-
-/// What a column of the board is told besides its cards.
-struct FocusColumn<'a> {
-    /// The card on its way, if one is.
-    drag: Option<&'a FocusDrag>,
-    /// The room to open for it here: before which card, how tall, and the
-    /// gap that follows it.
-    room: Option<(usize, f32, f32)>,
-    /// The least width of a column, from the settings.
-    least: f32,
-    /// The width the hand gave it; `None` fills.
-    width: Option<f32>,
-    /// The gap between two columns, which its grip is centred in.
-    gap: Pixels,
-}
+/// A board's home's and view's left and right edges in the window, as the
+/// last frame painted them.
+pub(super) type Spans = std::rc::Rc<std::cell::RefCell<Vec<(f32, f32)>>>;
 
 /// Where the boards stood at the last paint, for the header over them —
 /// each board's edges in the row's own coordinates, what the window saw
@@ -128,19 +81,6 @@ pub(super) struct BoardsLaidOut {
     painted: f32,
     /// Each board's left and right edges in the row.
     boards: HashMap<PathBuf, (f32, f32)>,
-}
-
-/// A card on its way to another place.
-#[derive(Clone, Debug)]
-pub(super) struct FocusDrag {
-    /// The board it was taken from, and the only one it is dropped on: a
-    /// repository's note stands on every board at once.
-    pub board: PathBuf,
-    pub node: Node,
-    pub from: Point<Pixels>,
-    pub at: Point<Pixels>,
-    /// Past the slop: a drag, and no longer a click.
-    pub moving: bool,
 }
 
 impl ClaudhubApp {
@@ -157,8 +97,6 @@ impl ClaudhubApp {
         let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
         // The boards gone take what they held in the moment with them.
         self.focus_geometry.retain(|path, _| shown.contains(path));
-        self.focus_column_scrolls
-            .retain(|path, _| shown.contains(path));
         self.focus_laid_out
             .borrow_mut()
             .boards
@@ -186,7 +124,6 @@ impl ClaudhubApp {
                 let scroll = self.focus_scroll.clone();
                 self.motion(BOARD_BAR.into(), Axes::Both)
                     .advance(&scroll, window);
-                self.scroll_under_drag(window);
                 let header = self.render_focus_header(&shown, window, cx);
                 let mut boards: Vec<AnyElement> = Vec::new();
                 for (index, path) in shown.iter().enumerate() {
@@ -233,7 +170,6 @@ impl ClaudhubApp {
                     .into_any_element()
             }
         };
-        let dragging = self.focus_drag.as_ref().is_some_and(|drag| drag.moving);
         let buttons = self.render_window_buttons(window, cx);
         h_flex()
             .id("overview")
@@ -245,19 +181,15 @@ impl ClaudhubApp {
             .bg(super::theme::gutter(cx))
             .p_3()
             .gap(gap)
-            .when(dragging, |el| el.cursor_grabbing())
-            // A node's height is dragged from its bottom edge, and a card
-            // from its head: both are followed from here — the pointer
-            // leaves what it pressed at once.
+            // A node's height is dragged from its bottom edge: followed from
+            // here — the pointer leaves what it pressed at once.
             .on_mouse_move(
                 cx.listener(|this, event: &gpui_kit::MouseMoveEvent, _, cx| {
                     this.overview_dragged(event, cx);
-                    this.focus_dragged(event.position, cx);
                 }),
             )
             .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
                 this.end_overview_drag(cx);
-                this.focus_dropped(cx);
             }))
             .child(sidebar)
             .child(div().flex_1().min_w_0().h_full().child(main))
@@ -1081,107 +1013,85 @@ impl ClaudhubApp {
 
     // — The board ——————————————————————————————————————————————————
 
-    /// What of a worktree is on its board: its card, its branch review, its
-    /// terminals, and its notes and the repository's that are not hidden.
-    fn focus_present(&self, path: &Path) -> Vec<Node> {
+    /// A worktree's terminals, in the order they were opened.
+    pub(super) fn board_terminals(&self, path: &Path) -> Vec<u64> {
+        self.terminals
+            .iter()
+            .filter(|terminal| terminal.worktree == path)
+            .map(|terminal| terminal.view.entity_id().as_u64())
+            .collect()
+    }
+
+    /// A worktree's notes and its repository's, the hidden ones left out.
+    pub(super) fn board_notes(&self, path: &Path) -> Vec<PathBuf> {
         let hidden = &self.overview_hand.hidden;
         let groups = self.overview_groups();
         let group = groups
             .iter()
             .find(|group| group.checkouts.iter().any(|c| c.path == path));
         let checkout = group.and_then(|group| group.checkouts.iter().find(|c| c.path == path));
-        let mut present = vec![Node::Worktree(path.to_path_buf())];
-        let review = Node::Review(path.to_path_buf());
-        if !hidden.contains(&review) {
-            present.push(review);
-        }
-        present.extend(
-            self.terminals
-                .iter()
-                .filter(|terminal| terminal.worktree == path)
-                .map(|terminal| Node::Terminal(terminal.view.entity_id().as_u64())),
-        );
-        present.extend(
-            checkout
-                .map(|checkout| checkout.notes.clone())
-                .into_iter()
-                .flatten()
-                .chain(group.map(|group| group.notes.clone()).into_iter().flatten())
-                .map(Node::Note)
-                .filter(|node| !hidden.contains(node)),
-        );
-        present
+        checkout
+            .map(|checkout| checkout.notes.clone())
+            .into_iter()
+            .flatten()
+            .chain(group.map(|group| group.notes.clone()).into_iter().flatten())
+            .filter(|note| !hidden.contains(&Node::Note(note.clone())))
+            .collect()
     }
 
-    /// Brings a worktree's board in line with what it has: read back from
-    /// the store the first time, then new cards placed by rule — a terminal
-    /// in the column whose button asked for it.
-    fn settle_focus_board(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let present = self.focus_present(path);
-        let board = self
-            .focus_boards
-            .entry(path.to_path_buf())
-            .or_insert_with(|| {
-                let (keys, widths) = super::store::Store::global(cx)
-                    .worktrees
-                    .get(path)
-                    .map(|state| (state.focus_board.clone(), state.focus_widths.clone()))
-                    .unwrap_or_default();
-                Board::from_keys(path, &keys, &widths)
-            });
-        let asked = |wish: &Option<(PathBuf, usize)>| {
-            wish.as_ref()
-                .filter(|(worktree, _)| worktree == path)
-                .map(|(_, column)| *column)
-        };
-        let pending = focus::Pending {
-            terminal: asked(&self.focus_pending),
-            note: asked(&self.focus_pending_note),
-        };
-        let count = |board: &Board, terminal: bool| {
-            board
-                .columns
-                .iter()
-                .flatten()
-                .filter(|slot| match slot {
-                    focus::Slot::Card(Node::Terminal(_)) => terminal,
-                    focus::Slot::Card(Node::Note(_)) => !terminal,
-                    _ => false,
-                })
-                .count()
-        };
-        let (terminals_before, notes_before) = (count(board, true), count(board, false));
-        let mut changed = board.settle(&present, pending);
-        // Every terminal kept from the last session has come back, or never
-        // will: the places left held are nobody's.
-        if self.terminals_revived.contains(path) {
-            changed |= board.drop_vacants();
-        }
-        if changed {
-            // What was asked for has come: the next one goes by rule.
-            if count(board, true) > terminals_before && pending.terminal.is_some() {
-                self.focus_pending = None;
-            }
-            if count(board, false) > notes_before && pending.note.is_some() {
-                self.focus_pending_note = None;
-            }
-            self.remember_focus_board(path, cx);
-        }
-    }
-
-    fn remember_focus_board(&self, path: &Path, cx: &mut Context<Self>) {
-        let Some((keys, widths)) = self
-            .focus_boards
+    /// The note a board's home shows as its principal one — see
+    /// `focus::principal_note`.
+    pub(super) fn principal_note(&self, path: &Path, cx: &App) -> Option<PathBuf> {
+        let pinned = super::store::Store::global(cx)
+            .worktrees
             .get(path)
-            .map(|board| (board.keys(), board.widths()))
-        else {
-            return;
-        };
+            .and_then(|state| state.pinned_note.clone());
+        let notes: Vec<(PathBuf, Option<String>)> = self
+            .board_notes(path)
+            .into_iter()
+            .map(|note| {
+                let created = self
+                    .canvas_entry(&note)
+                    .and_then(|(_, entry)| entry.node.created.clone());
+                (note, created)
+            })
+            .collect();
+        focus::principal_note(pinned.as_deref(), &notes)
+    }
+
+    /// Pins a note as a board's principal one, or — pinned already — lets
+    /// the newest be again.
+    pub(super) fn toggle_pinned_note(&mut self, path: &Path, note: &Path, cx: &mut Context<Self>) {
         super::store::Store::update_global(cx, |store| {
             let state = store.worktrees.entry(path.to_path_buf()).or_default();
-            state.focus_board = keys;
-            state.focus_widths = widths;
+            state.pinned_note = match state.pinned_note.as_deref() {
+                Some(pinned) if pinned == note => None,
+                _ => Some(note.to_path_buf()),
+            };
         });
+        cx.notify();
+    }
+
+    /// What the right of a board shows — see `focus::view_of`.
+    pub(super) fn board_view(&self, path: &Path, cx: &App) -> View {
+        let chosen = super::store::Store::global(cx)
+            .worktrees
+            .get(path)
+            .and_then(|state| state.focus_view);
+        focus::view_of(chosen, !self.board_terminals(path).is_empty())
+    }
+
+    /// Puts a view on the right of a board, in the place of the one there.
+    pub(super) fn show_board_view(&mut self, path: &Path, view: View, cx: &mut Context<Self>) {
+        super::store::Store::update_global(cx, |store| {
+            store
+                .worktrees
+                .entry(path.to_path_buf())
+                .or_default()
+                .focus_view = Some(view);
+        });
+        self.overview_zoomed = None;
+        cx.notify();
     }
 
     /// The line over the boards, which does not scroll with them: each
@@ -1335,13 +1245,12 @@ impl ClaudhubApp {
         };
         let mut lefts: Vec<f32> = Vec::new();
         for path in self.focus_worktrees() {
-            if let Some(geometry) = self.focus_geometry.get(&path) {
+            if let Some(spans) = self.focus_geometry.get(&path) {
                 lefts.extend(
-                    geometry
+                    spans
                         .borrow()
-                        .spans
                         .iter()
-                        .map(|span| span.left - strip_left - painted),
+                        .map(|(left, _)| left - strip_left - painted),
                 );
             }
         }
@@ -1358,12 +1267,8 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// A worktree on show: its board, its title being the header's.
-    ///
-    /// **A board is as wide as its share, never narrower than its columns**
-    /// — each at the width the hand gave it or the least the settings give,
-    /// the gaps and the button after the last: the row of boards scrolls,
-    /// never a board alone.
+    /// A worktree on show: its home, and on its right the one view chosen;
+    /// its title is the header's.
     fn render_focus_board(
         &mut self,
         path: &Path,
@@ -1372,108 +1277,63 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.settle_focus_board(path, cx);
-        let shown = self
-            .focus_boards
-            .get(path)
-            .map(Board::shown)
-            .unwrap_or_default();
-        let scrolls = self
-            .focus_column_scrolls
-            .entry(path.to_path_buf())
-            .or_default();
-        while scrolls.len() < shown.len() {
-            scrolls.push(gpui_kit::ScrollHandle::new());
-        }
-        let geometry = self
+        let view = self.board_view(path, cx);
+        let spans = self
             .focus_geometry
             .entry(path.to_path_buf())
             .or_default()
             .clone();
-        // Where a drop would land, read against what the last frame
-        // measured, the room it opened taken back out — before this frame
-        // measures anew. Only on the board the card was taken from.
-        let drag = self
-            .focus_drag
-            .clone()
-            .filter(|drag| drag.moving && drag.board == path);
-        let count = shown.len();
-        let list_gap = f32::from(window.rem_size() * 0.5);
-        let (aim, room_height) = match &drag {
-            Some(drag) => self.focus_aim(drag, &shown, &geometry, self.board_span(path)),
-            None => (None, 0.),
-        };
-        // The room's height is what it is painted at — it grows as it opens,
-        // and its own measure writes it here — so that the drop is always
-        // read against the cards as they would stand without it.
-        let opened = aim
-            .filter(|target| target.column < count)
-            .map(|target| (target.column, target.index, 0.));
-        *geometry.borrow_mut() = focus::Geometry {
-            spans: shown
-                .iter()
-                .map(|(_, cards)| ColumnSpan {
-                    left: 0.,
-                    right: 0.,
-                    cards: vec![(0., 0.); cards.len()],
-                })
-                .collect(),
-            opened,
-        };
-
+        *spans.borrow_mut() = vec![(0., 0.); 2];
         let column_min = super::settings::Settings::global(cx).terminal.column_min;
-        let widths: Vec<Option<f32>> = shown
-            .iter()
-            .map(|(board_column, _)| {
-                self.focus_boards
-                    .get(path)
-                    .and_then(|board| board.width(*board_column))
-            })
-            .collect();
-        let least_width = widths
-            .iter()
-            .map(|width| width.map_or(column_min, |width| width.max(column_min)))
-            .sum::<f32>()
-            + f32::from(gap) * count as f32
-            + ADD_COLUMN_WIDTH;
-        let mut columns: Vec<AnyElement> = Vec::new();
-        for (rank, (board_column, cards)) in shown.into_iter().enumerate() {
-            let room = opened
-                .filter(|(column, _, _)| *column == rank)
-                .map(|(_, index, _)| (index, room_height, list_gap));
-            columns.push(self.render_focus_column(
-                path,
-                rank,
-                board_column,
-                cards,
-                FocusColumn {
-                    drag: drag.as_ref(),
-                    room,
-                    least: column_min,
-                    width: widths[rank],
-                    gap,
+        // Terminals stand side by side, each never under the least width.
+        let view_least = match view {
+            View::Terminals => column_min * self.board_terminals(path).len().max(1) as f32,
+            _ => column_min,
+        };
+        let least_width = self.summary_width(path, cx) + f32::from(gap) + view_least;
+        let home = self.render_board_summary(path, view, at_work, cx);
+        let shown = self.render_board_view(path, view, at_work, window, cx);
+        let measured = |rank: usize, spans: Spans| {
+            canvas(
+                move |_, _, _| {},
+                move |bounds, _, _, _| {
+                    if let Some(span) = spans.borrow_mut().get_mut(rank) {
+                        *span = (
+                            f32::from(bounds.origin.x),
+                            f32::from(bounds.origin.x + bounds.size.width),
+                        );
+                    }
                 },
-                at_work,
-                window,
-                cx,
-            ));
-        }
-        let new_column = aim.is_some_and(|target| target.column >= count);
-        if let (true, Some(drag)) = (new_column, drag.as_ref()) {
-            columns.push(self.render_new_column_room(drag, column_min, cx));
-        }
-        columns.push(self.render_add_column(path, new_column, cx));
-
+            )
+            .absolute()
+            .size_full()
+        };
         let row = h_flex()
             .flex_1()
             .min_h_0()
             .w_full()
             .gap(gap)
-            .children(columns);
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .h_full()
+                    .child(measured(0, spans.clone()))
+                    .child(home),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w(px(view_least))
+                    .h_full()
+                    .child(measured(1, spans))
+                    .child(shown),
+            );
         v_flex()
             .relative()
-            // Its own id, under which its columns' ids are told apart from
-            // the next board's.
+            // Its own id, under which its ids are told apart from the next
+            // board's.
             .id(SharedString::from(format!(
                 "focus-board-{}",
                 path.display()
@@ -1514,742 +1374,482 @@ impl ClaudhubApp {
                 .size_full()
             })
             .child(row)
-            .children(drag.map(|drag| self.render_drag_ghost(&drag, aim, count, cx)))
             .into_any_element()
     }
 
-    /// Where the card being dragged would land — `None` where it would not
-    /// move — and the height of the room to open for it: its own, within
-    /// reason, so that the room reads as the card's place.
-    fn focus_aim(
-        &self,
-        drag: &FocusDrag,
-        shown: &[(usize, Vec<(usize, Node)>)],
-        geometry: &std::rc::Rc<std::cell::RefCell<focus::Geometry>>,
-        span: Option<(f32, f32)>,
-    ) -> (Option<Target>, f32) {
-        let geometry = geometry.borrow();
-        let closed = geometry.closed();
-        let x = f32::from(drag.at.x);
-        let target =
-            focus::drop_target(&closed, (x, f32::from(drag.at.y))).filter(|_| on_span(span, x));
-        let from = shown.iter().enumerate().find_map(|(column, (_, cards))| {
-            cards
-                .iter()
-                .position(|(_, node)| *node == drag.node)
-                .map(|index| (column, index))
-        });
-        let height = from
-            .and_then(|(column, index)| closed.get(column)?.cards.get(index).copied())
-            .map_or(ROOM_HEIGHT.0, |(top, bottom)| bottom - top)
-            .clamp(ROOM_HEIGHT.0, ROOM_HEIGHT.1);
-        // Just above or just below itself, in its own column: it stays.
-        let stays = matches!(
-            (target, from),
-            (Some(target), Some((column, index)))
-                if target.column == column && (target.index == index || target.index == index + 1)
-        );
-        (target.filter(|_| !stays), height)
-    }
-
-    /// One column of the board: its cards, a terminal at its foot taking
-    /// the rest of the height, and the button that stacks another terminal
-    /// when it holds one.
-    #[allow(clippy::too_many_arguments)]
-    fn render_focus_column(
+    /// The view on the right of a board: its title — what it is, what it
+    /// says of itself, what adds one more — and the whole of it below.
+    fn render_board_view(
         &mut self,
         path: &Path,
-        rank: usize,
-        board_column: usize,
-        cards: Vec<(usize, Node)>,
-        column: FocusColumn,
+        view: View,
         at_work: &overview::AtWork,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let FocusColumn {
-            drag,
-            room,
-            least,
-            width,
-            gap,
-        } = column;
-        let geometry = self.focus_geometry[path].clone();
-        let last = cards.len().saturating_sub(1);
-        let holds_terminal = cards
-            .iter()
-            .any(|(_, node)| matches!(node, Node::Terminal(_)));
-        let holds_note = cards.iter().any(|(_, node)| matches!(node, Node::Note(_)));
-        let mut elements: Vec<AnyElement> = Vec::new();
-        let count = cards.len();
-        for (index, (_, node)) in cards.into_iter().enumerate() {
-            if let (Some((at, height, gap)), Some(drag)) = (room, drag) {
-                if at == index {
-                    elements.push(self.render_drop_room(drag, (rank, at), height, gap, cx));
-                }
+        let theme = cx.theme().clone();
+        let (glyph, title) = view_name(view);
+        let detail = self.view_detail(path, view, cx);
+        let add = match view {
+            View::Terminals => {
+                let worktree = path.to_path_buf();
+                Some(
+                    Button::new("focus-view-add")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("plus"))
+                        .label(tr!("terminal-new"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_focus_terminal(&worktree, window, cx);
+                        })),
+                )
             }
-            let fills = index == last
-                && matches!(node, Node::Terminal(_))
-                && !self.overview_hand.collapsed.contains(&node);
-            let faded = drag.is_some_and(|drag| drag.node == node);
-            let card = self.render_focus_card(&node, fills, at_work, window, cx);
-            let measured = geometry.clone();
-            let measure = canvas(
-                move |_, _, _| {},
-                move |bounds, _, _, _| {
-                    if let Some(span) = measured.borrow_mut().spans.get_mut(rank) {
-                        if let Some(card) = span.cards.get_mut(index) {
-                            *card = (
-                                f32::from(bounds.origin.y),
-                                f32::from(bounds.origin.y + bounds.size.height),
-                            );
-                        }
-                    }
-                },
-            )
-            .absolute()
-            .size_full();
-            elements.push(
+            View::Notes => {
+                let worktree = path.to_path_buf();
+                Some(
+                    Button::new("focus-view-add")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("plus"))
+                        .label(tr!("overview-add-note"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_home_note(Hang::Worktree(worktree.clone()), cx);
+                        })),
+                )
+            }
+            View::Git | View::Review | View::Todo => None,
+        };
+        let head = h_flex()
+            .flex_none()
+            .w_full()
+            .h(super::theme::bar_height(cx))
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .child(icon(glyph).xsmall().text_color(theme.muted_foreground))
+            .child(
                 div()
-                    .relative()
-                    .w_full()
-                    .map(|el| {
-                        if fills {
-                            el.flex_1().min_h(px(overview::MIN_COLUMN_TILE))
-                        } else {
-                            el.flex_none()
-                        }
-                    })
-                    // The card on its way stays in place, faded: nothing
-                    // moves under the hand until it lets go.
-                    .when(faded, |el| el.opacity(0.35))
-                    .child(card)
-                    .child(measure)
-                    .map(|el| self.landing(el, &node, cx)),
-            );
-        }
-        if let (Some((at, height, gap)), Some(drag)) = (room, drag) {
-            if at >= count {
-                elements.push(self.render_drop_room(drag, (rank, at), height, gap, cx));
-            }
-        }
-        // One more of what the column holds, at its foot: a terminal where
-        // terminals are, a note where notes are — side by side when it
-        // holds both.
-        if holds_terminal || holds_note {
-            let terminal = holds_terminal.then(|| {
-                let worktree = path.to_path_buf();
-                Button::new(("focus-stack-terminal", rank))
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .icon(icon("plus"))
-                    .label(tr!("focus-stack-terminal"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_pending = Some((worktree.clone(), board_column));
-                        this.open_focus_terminal(&worktree, window, cx);
-                    }))
-            });
-            let note = holds_note.then(|| {
-                let worktree = path.to_path_buf();
-                Button::new(("focus-stack-note", rank))
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .icon(icon("plus"))
-                    .label(tr!("focus-stack-note"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.focus_pending_note = Some((worktree.clone(), board_column));
-                        this.add_home_note(Hang::Worktree(worktree.clone()), cx);
-                    }))
-            });
-            elements.push(
-                h_flex()
                     .flex_none()
-                    .w_full()
-                    .gap_1()
-                    .children(terminal)
-                    .children(note)
-                    .into_any_element(),
-            );
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .children(detail),
+            )
+            .children(add);
+        let body = match view {
+            View::Git => self.render_git_view(path, cx),
+            View::Review => self.render_review_card(path, true, false, window, cx),
+            View::Notes => self.render_notes_view(path, cx),
+            View::Todo => self.render_todo_view(path, cx),
+            View::Terminals => self.render_terminals_view(path, at_work, window, cx),
+        };
+        v_flex()
+            .size_full()
+            .gap_1()
+            .child(head)
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .into_any_element()
+    }
+
+    /// What a view's title says beside its name — and what its line in the
+    /// home says too: the files and lines a commit would take, what the
+    /// review compares against, how far the to-do list has come.
+    pub(super) fn view_detail(
+        &self,
+        path: &Path,
+        view: View,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match view {
+            View::Git => {
+                let summary = self.summaries.get(path).copied().unwrap_or_default();
+                Some(if summary.is_empty() {
+                    div().child(tr!("home-clean")).into_any_element()
+                } else {
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(tr!("home-files", { count: summary.files }))
+                        .child(super::topbar::volume_on(summary, None, cx))
+                        .into_any_element()
+                })
+            }
+            View::Review => self
+                .review
+                .get(path)
+                .and_then(
+                    |state| match (state.since_review, state.review_point.as_ref()) {
+                        (true, Some(_)) => Some(tr!("sheet-review-since")),
+                        _ => state
+                            .base
+                            .clone()
+                            .map(|base| tr!("sheet-review-against", { base: base })),
+                    },
+                )
+                .map(|text| div().truncate().child(text).into_any_element()),
+            View::Todo => self
+                .review
+                .get(path)
+                .and_then(|state| state.todo.as_ref())
+                .map(|todo| {
+                    div()
+                        .child(tr!("todo-progress", { done: todo.done(), total: todo.tasks.len() }))
+                        .into_any_element()
+                }),
+            View::Notes | View::Terminals => None,
         }
-        let measured = geometry.clone();
-        let measure = canvas(
-            move |_, _, _| {},
-            move |bounds, _, _, _| {
-                if let Some(span) = measured.borrow_mut().spans.get_mut(rank) {
-                    span.left = f32::from(bounds.origin.x);
-                    span.right = f32::from(bounds.origin.x + bounds.size.width);
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-        let gutter = super::theme::scroll_gutter();
-        let scroll = self.focus_column_scrolls[path][rank].clone();
-        let list = v_flex()
-            .id(("focus-column-list", rank))
-            .track_scroll(&scroll)
+    }
+
+    /// The git view: the branch, how far it is from its remote and from its
+    /// base — with the way to merge it there — the commits it adds, and
+    /// what waits for a commit.
+    fn render_git_view(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let worktree = self.repos.worktree(path);
+        let is_main = worktree.is_some_and(|worktree| worktree.is_main);
+        let branch = worktree
+            .and_then(|worktree| worktree.branch.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| tr!("overview-detached"));
+        let outline = self.outlines.get(path);
+        let upstream = outline
+            .and_then(|outline| outline.upstream)
+            .map(|(ahead, behind)| SharedString::from(format!("↑{ahead} ↓{behind}")));
+        let ahead = outline.map_or(0, |outline| outline.ahead_of_base);
+        let base = outline.and_then(|outline| outline.base.clone());
+        let title = match (&base, ahead) {
+            (Some(base), ahead) if ahead > 0 => tr!("overview-ahead", { count: ahead, base: base }),
+            _ => tr!("overview-recent"),
+        };
+        let merge = base.filter(|_| !is_main && ahead > 0).map(|base| {
+            let merge = path.to_path_buf();
+            Button::new("focus-git-merge")
+                .ghost()
+                .xsmall()
+                .icon(icon("git-merge"))
+                .label(tr!("overview-merge", { base: base }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.confirm_merge(&merge, window, cx);
+                }))
+        });
+        let now = chrono::Utc::now().timestamp();
+        let commits = outline
+            .map(|outline| outline.commits.clone())
+            .unwrap_or_default();
+        let facts = v_flex()
+            .flex_none()
+            .w_full()
+            .p_3()
+            .gap_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .text_sm()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(icon("git-branch").xsmall().text_color(muted))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(branch),
+                    )
+                    .children(
+                        upstream
+                            .map(|text| div().flex_none().text_xs().text_color(muted).child(text)),
+                    )
+                    .child(div().flex_1())
+                    .children(merge),
+            )
+            .child(div().text_xs().text_color(muted).child(title))
+            .children(commits.into_iter().take(GIT_COMMITS).map(|commit| {
+                h_flex()
+                    .gap_1p5()
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(muted)
+                            .child(SharedString::from(commit.short)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(commit.subject)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(muted)
+                            .child(super::overview_view::ago(now, commit.at)),
+                    )
+            }));
+        v_flex()
             .size_full()
             .gap_2()
-            .pb_2()
-            .pr(gutter)
-            .overflow_y_scroll()
-            .children(elements);
-        let grip = self
-            .width_grip(path, board_column, rank, cx)
-            .right(-super::overview_view::grip_offset(gap, &scroll));
-        div()
-            .relative()
-            .h_full()
-            // A width of its own is kept, never under the least; without
-            // one the column shares what the others leave.
-            .map(|el| match width {
-                Some(width) => el.flex_none().w(px(width.max(least))),
-                None => el.flex_1().min_w(px(least)),
-            })
-            .child(measure)
-            .child(super::scroll::vertical(
-                SharedString::from(format!("focus-column-bar-{rank}")),
-                &scroll,
-                list,
-            ))
-            .child(grip)
+            .child(facts)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(self.render_changes_column(path, cx)),
+            )
             .into_any_element()
     }
 
-    /// A column's right edge, taken to give it a width: a strip in the gap
-    /// after it, lit under the pointer and while it is held. A double click
-    /// lets the column fill again — the one gesture back to where it started.
-    fn width_grip(
-        &self,
-        path: &Path,
-        board_column: usize,
-        rank: usize,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+    /// The notes view: the list on the left — each with its pin, the
+    /// principal one first — and the note chosen on the right, the
+    /// principal one until another is pressed.
+    fn render_notes_view(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let held = self
-            .focus_resize
-            .as_ref()
-            .is_some_and(|(board, column, _, _)| board == path && *column == board_column);
-        let (pressed, reset) = (path.to_path_buf(), path.to_path_buf());
-        let lit = theme.ring.opacity(0.6);
-        div()
-            .id(("focus-width-grip", rank))
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(super::overview_view::GRIP_WIDTH)
-            .rounded_full()
-            .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
-            .when(held, |el| el.bg(theme.ring))
-            .hover(move |style| style.bg(lit))
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tr!("overview-column-width-hint"))
-                    .build(window, cx)
-            })
-            .on_mouse_down(
-                gpui_kit::MouseButton::Left,
-                cx.listener(move |this, event: &gpui_kit::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    // It starts from the width it is drawn at: a column that
-                    // fills has no width of its own yet.
-                    let drawn = this
-                        .focus_geometry
-                        .get(&pressed)
-                        .and_then(|geometry| {
-                            let geometry = geometry.borrow();
-                            let span = geometry.spans.get(rank)?;
-                            Some(span.right - span.left)
-                        })
-                        .unwrap_or(0.);
-                    if drawn > 0. {
-                        this.focus_resize = Some((
-                            pressed.clone(),
-                            board_column,
-                            f32::from(event.position.x),
-                            drawn,
-                        ));
+        let principal = self.principal_note(path, cx);
+        let pinned = super::store::Store::global(cx)
+            .worktrees
+            .get(path)
+            .and_then(|state| state.pinned_note.clone());
+        let mut notes = self.board_notes(path);
+        if let Some(principal) = &principal {
+            notes.retain(|note| note != principal);
+            notes.insert(0, principal.clone());
+        }
+        if notes.is_empty() {
+            return centered(tr!("focus-notes-none"), cx);
+        }
+        let shown = self
+            .focus_note_shown
+            .get(path)
+            .filter(|note| notes.contains(note))
+            .cloned()
+            .or(principal)
+            .unwrap_or_else(|| notes[0].clone());
+        let rows: Vec<AnyElement> = notes
+            .iter()
+            .enumerate()
+            .map(|(index, note)| {
+                let (_, name) = self.card_name(&Node::Note(note.clone()), cx);
+                let lit = *note == shown;
+                let is_pinned = pinned.as_deref() == Some(note.as_path());
+                let (board, pressed, pin) = (path.to_path_buf(), note.clone(), note.clone());
+                let pin_board = path.to_path_buf();
+                h_flex()
+                    .id(("focus-note-row", index))
+                    .w_full()
+                    .pl_2()
+                    .pr_1()
+                    .h(super::theme::row_height(cx))
+                    .gap_1p5()
+                    .items_center()
+                    .cursor_pointer()
+                    .when(lit, |el| el.bg(theme.list_active))
+                    .when(!lit, |el| el.hover(|style| style.bg(theme.list_hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.focus_note_shown.insert(board.clone(), pressed.clone());
                         cx.notify();
-                    }
-                }),
+                    }))
+                    .child(
+                        icon("sticky-note")
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                    .child(
+                        Button::new(("focus-note-pin", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("pin"))
+                            .when(is_pinned, |button| button.text_color(theme.ring))
+                            .tooltip(if is_pinned {
+                                tr!("focus-note-unpin")
+                            } else {
+                                tr!("focus-note-pin")
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_pinned_note(&pin_board, &pin, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        h_flex()
+            .size_full()
+            .gap_2()
+            .child(
+                v_flex()
+                    .id("focus-notes-list")
+                    .flex_none()
+                    .w(px(NOTES_LIST_WIDTH))
+                    .h_full()
+                    .py_1()
+                    .overflow_y_scroll()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .children(rows),
             )
-            .on_click(
-                cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
-                    if event.click_count() < 2 {
-                        return;
-                    }
-                    this.focus_resize = None;
-                    if let Some(board) = this.focus_boards.get_mut(&reset) {
-                        board.set_width(board_column, None);
-                    }
-                    this.remember_focus_board(&reset, cx);
-                    cx.notify();
-                }),
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.render_home_note(&shown, 1., cx)),
             )
+            .into_any_element()
     }
 
-    /// A card of the board. The worktree's is its own height — its changes
-    /// are in it — the others the one the hand gave them, with a grip at
-    /// their foot; a terminal that `fills` takes the rest of its column.
-    fn render_focus_card(
-        &mut self,
-        node: &Node,
-        fills: bool,
+    /// The to-do view: the notes panel's list — ticked, edited, added to in
+    /// place. It speaks of the worktree on show, as that panel does.
+    fn render_todo_view(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        if self.active.as_deref() != Some(path) {
+            return self.follow_the_active(path, cx);
+        }
+        v_flex()
+            .id("focus-todo")
+            .size_full()
+            .overflow_y_scroll()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(self.render_todo_section(true, cx))
+            .into_any_element()
+    }
+
+    /// A view that only the worktree on show can have — the editor's panels
+    /// are one of each —, on another: what it would be, and the way there.
+    pub(super) fn follow_the_active(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let worktree = path.to_path_buf();
+        v_flex()
+            .size_full()
+            .gap_2()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!("focus-review-idle")),
+            )
+            .child(
+                Button::new(SharedString::from(format!(
+                    "focus-follow-{}",
+                    path.display()
+                )))
+                .small()
+                .icon(icon("eye"))
+                .label(tr!("focus-review-show"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_worktree(worktree.clone(), window, cx);
+                    cx.notify();
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// The terminals view: every terminal of the worktree side by side.
+    fn render_terminals_view(
+        &self,
+        path: &Path,
         at_work: &overview::AtWork,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match node {
-            Node::Worktree(path) => {
-                let folded = self.overview_hand.collapsed.contains(node);
-                let doing = at_work
-                    .cards
-                    .get(path)
-                    .copied()
-                    .unwrap_or(overview::Doing::Rest);
-                div()
-                    .relative()
-                    .w_full()
-                    .when(folded, |el| el.h(px(overview::HEAD)).overflow_hidden())
-                    .child(self.render_worktree_card(path, 1., cx))
-                    .when(doing != overview::Doing::Rest, |el| {
-                        el.child(super::overview_view::tile_outline(
-                            doing,
-                            false,
-                            1.,
-                            cx.theme(),
-                        ))
-                    })
-                    .into_any_element()
-            }
-            Node::Terminal(id) if fills => {
-                let Some(terminal) = self
+        let ids = self.board_terminals(path);
+        if ids.is_empty() {
+            let worktree = path.to_path_buf();
+            return v_flex()
+                .size_full()
+                .gap_2()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr!("focus-terminals-none")),
+                )
+                .child(
+                    Button::new("focus-terminals-open")
+                        .small()
+                        .icon(icon("square-terminal"))
+                        .label(tr!("terminal-new"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_focus_terminal(&worktree, window, cx);
+                        })),
+                )
+                .into_any_element();
+        }
+        let column_min = super::settings::Settings::global(cx).terminal.column_min;
+        let tiles: Vec<AnyElement> = ids
+            .iter()
+            .filter_map(|id| {
+                let terminal = self
                     .terminals
                     .iter()
-                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)
-                else {
-                    return div().into_any_element();
-                };
+                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)?;
                 let doing = at_work
                     .terminals
                     .get(id)
                     .copied()
                     .unwrap_or(overview::Doing::Rest);
-                div()
-                    .size_full()
-                    .child(self.render_tile(terminal, None, 1., doing, window, cx))
-                    .into_any_element()
-            }
-            _ => self.column_node(node, true, at_work, window, cx),
-        }
-    }
-
-    /// The tall button right of the last column: a terminal in a column of
-    /// its own, and under its chevron the rest of what can be added. It is
-    /// also where a card is dropped to make a new column, and lights up
-    /// when one would land there.
-    fn render_add_column(&self, path: &Path, lit: bool, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let worktree = path.to_path_buf();
-        let app = cx.entity().downgrade();
-        let hang = Hang::Worktree(path.to_path_buf());
-        v_flex()
-            .flex_none()
-            .w(px(ADD_COLUMN_WIDTH))
-            .h_full()
-            .gap_1()
-            .child(
-                v_flex()
-                    .id("focus-add-column")
-                    .flex_1()
-                    .w_full()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(if lit { theme.ring } else { theme.border })
-                    .when(lit, |el| el.bg(theme.ring.opacity(0.12)))
-                    .text_color(if lit {
-                        theme.ring
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.list_hover))
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tr!("focus-new-column"))
-                            .build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_pending = None;
-                        this.open_focus_terminal(&worktree, window, cx);
-                    }))
-                    .child(icon("plus"))
-                    .child(icon("square-terminal")),
-            )
-            .child(
-                Button::new("focus-add-more")
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .icon(icon("chevron-down"))
-                    .tooltip(tr!("overview-add"))
-                    .dropdown_menu(move |menu, _, cx| {
-                        super::overview_view::add_items(&app, &hang, false, menu, cx)
-                    }),
-            )
+                Some(
+                    div()
+                        .flex_1()
+                        .min_w(px(column_min))
+                        .h_full()
+                        .child(self.render_tile(terminal, None, 1., doing, window, cx))
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        h_flex()
+            .size_full()
+            .gap_2()
+            .children(tiles)
             .into_any_element()
     }
 
     /// Opens a shell in the worktree and hands it the keyboard, from a
-    /// gesture of the board.
-    fn open_focus_terminal(
+    /// gesture of the board — whose view becomes its terminals: asking for
+    /// one is asking to see it.
+    pub(super) fn open_focus_terminal(
         &mut self,
         worktree: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_board_view(worktree, View::Terminals, cx);
         self.open_terminal(worktree, super::terminal_view::Launch::shell(), window, cx);
         if let Some(view) = self.terminals.last().map(|terminal| terminal.view.clone()) {
             super::dialogs::focus_field(&view, window, cx);
         }
     }
 
-    // — Dragging a card —————————————————————————————————————————————
-
-    /// A press on a card's head, on the focus board: a drag, once it moves.
-    ///
-    /// Its board is the one under the press: a repository's note stands on
-    /// every board, and only where it was taken says which it moves on.
-    pub(super) fn focus_grab(&mut self, node: Node, at: Point<Pixels>) {
-        let x = f32::from(at.x);
-        let under = self
-            .focus_geometry
-            .iter()
-            .find(|(_, geometry)| geometry.borrow().covers(x))
-            .map(|(path, _)| path.clone());
-        let own = match &node {
-            Node::Worktree(path) | Node::Changes(path) | Node::Review(path) => Some(path.clone()),
-            Node::Terminal(id) => self
-                .terminals
-                .iter()
-                .find(|terminal| terminal.view.entity_id().as_u64() == *id)
-                .map(|terminal| terminal.worktree.clone()),
-            Node::Note(_) | Node::Git(_) => None,
-        };
-        let Some(board) = under
-            .or(own)
-            .or_else(|| self.focus_worktrees().into_iter().next())
-        else {
-            return;
-        };
-        self.focus_drag = Some(FocusDrag {
-            board,
-            node,
-            from: at,
-            at,
-            moving: false,
-        });
-    }
-
-    /// A board's left and right edges in the window, as it stands at this
-    /// frame's scroll — see `BoardsLaidOut`.
-    fn board_span(&self, path: &Path) -> Option<(f32, f32)> {
-        let laid = self.focus_laid_out.borrow();
-        let edges = laid.boards.get(path)?;
-        let at = f32::from(self.focus_scroll.offset().x);
-        Some((laid.strip.0 + edges.0 + at, laid.strip.0 + edges.1 + at))
-    }
-
-    /// A card held near an edge of the boards' row scrolls the row that way
-    /// (`focus::edge_push`), frame after frame while it stays there: a
-    /// column out of view is reached by holding the card against the edge,
-    /// not by letting go and scrolling. The pointer does not move, the row
-    /// does — and the target, read on what each frame measured, with it.
-    fn scroll_under_drag(&mut self, window: &mut Window) {
-        let push = self
-            .focus_drag
-            .as_ref()
-            .filter(|drag| drag.moving)
-            .map(|drag| {
-                let (left, width) = self.focus_laid_out.borrow().strip;
-                let push = focus::edge_push(f32::from(drag.at.x), left, width);
-                // A card taken up near an edge does not set the row going:
-                // only going further towards the edge than where it was
-                // taken does.
-                let taken = focus::edge_push(f32::from(drag.from.x), left, width);
-                let further = push.signum() != taken.signum() || push.abs() > taken.abs();
-                if further {
-                    push
-                } else {
-                    0.
-                }
-            })
-            .unwrap_or(0.);
-        if push == 0. {
-            self.focus_edge_scroll = None;
-            return;
-        }
-        let now = std::time::Instant::now();
-        // The first frame in the band only starts the clock; a frame that
-        // came late does not throw the row across the screen.
-        let dt = self
-            .focus_edge_scroll
-            .map_or(0., |then| now.duration_since(then).as_secs_f32())
-            .min(0.05);
-        self.focus_edge_scroll = Some(now);
-        let offset = self.focus_scroll.offset();
-        let max = f32::from(self.focus_scroll.max_offset().x).max(0.);
-        let x = (f32::from(offset.x) - push * EDGE_SCROLL_SPEED * dt).clamp(-max, 0.);
-        self.focus_scroll.set_offset(point(px(x), offset.y));
-        window.request_animation_frame();
-    }
-
-    fn focus_dragged(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        // A column's edge, held: its width follows the pointer, never under
-        // the least the settings give.
-        if let Some((path, column, from, start)) = self.focus_resize.clone() {
-            let least = super::settings::Settings::global(cx).terminal.column_min;
-            let width = (start + f32::from(at.x) - from).max(least);
-            if let Some(board) = self.focus_boards.get_mut(&path) {
-                board.set_width(column, Some(width));
-            }
-            cx.notify();
-            return;
-        }
-        let Some(drag) = self.focus_drag.as_mut() else {
-            return;
-        };
-        drag.at = at;
-        let travelled = (f32::from(at.x - drag.from.x)).hypot(f32::from(at.y - drag.from.y));
-        if travelled > DRAG_SLOP {
-            drag.moving = true;
-        }
-        if drag.moving {
-            cx.notify();
-        }
-    }
-
-    /// The card let go: moved where the bar said, and the board kept.
-    fn focus_dropped(&mut self, cx: &mut Context<Self>) {
-        // A column's edge let go: its width is kept.
-        if let Some((path, ..)) = self.focus_resize.take() {
-            self.remember_focus_board(&path, cx);
-            cx.notify();
-            return;
-        }
-        let Some(drag) = self.focus_drag.take() else {
-            return;
-        };
-        if !drag.moving {
-            return;
-        }
-        let path = drag.board.clone();
-        let x = f32::from(drag.at.x);
-        let span = self.board_span(&path);
-        let target = self
-            .focus_geometry
-            .get(&path)
-            .and_then(|geometry| {
-                let closed = geometry.borrow().closed();
-                focus::drop_target(&closed, (x, f32::from(drag.at.y)))
-            })
-            .filter(|_| on_span(span, x));
-        if let (Some(target), Some(board)) = (target, self.focus_boards.get_mut(&path)) {
-            let target = board.resolve(target);
-            board.move_card(&drag.node, target);
-            let count = self.focus_landed.as_ref().map_or(0, |(_, count)| count + 1);
-            self.focus_landed = Some((drag.node.clone(), count));
-            self.remember_focus_board(&path, cx);
-        }
-        cx.notify();
-    }
-
-    /// The room opened where the card would land: its height, a dashed
-    /// frame in the accent, and its name — the card's place, before it is
-    /// there.
-    fn render_drop_room(
+    /// What a thing is called, with its glyph.
+    pub(super) fn card_name(
         &self,
-        drag: &FocusDrag,
-        (rank, index): (usize, usize),
-        height: f32,
-        gap: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (glyph, name) = self.card_name(&drag.node, cx);
-        let measured = self.focus_geometry.get(&drag.board).cloned();
-        let measure = canvas(
-            move |_, _, _| {},
-            move |bounds, _, _, _| {
-                let Some(measured) = &measured else {
-                    return;
-                };
-                if let Some(opened) = measured.borrow_mut().opened.as_mut() {
-                    opened.2 = f32::from(bounds.size.height) + gap;
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-        h_flex()
-            .relative()
-            .flex_none()
-            .w_full()
-            .overflow_hidden()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .rounded(theme.radius_lg)
-            .border_2()
-            .border_dashed()
-            .border_color(theme.ring.opacity(0.8))
-            .bg(theme.ring.opacity(0.08))
-            .text_sm()
-            .text_color(theme.ring)
-            .child(measure)
-            .child(icon(glyph).small())
-            .child(div().max_w(px(260.)).truncate().child(name))
-            // It opens rather than appears: the cards below slide down to
-            // make it, and a place that moves reads as a place.
-            .with_animation(
-                SharedString::from(format!("focus-room-{rank}-{index}")),
-                Animation::new(ROOM_OPENS).with_easing(ease_out),
-                move |el, t| el.h(px(height * t)).opacity(0.4 + 0.6 * t),
-            )
-            .into_any_element()
-    }
-
-    /// A card just dropped, on its new place: it comes down the last few
-    /// pixels and a ring around it fades — the eye is taken to where it
-    /// went. Every other card is left as it is.
-    fn landing(&self, card: gpui_kit::Div, node: &Node, cx: &mut Context<Self>) -> AnyElement {
-        let Some((_, count)) = self
-            .focus_landed
-            .as_ref()
-            .filter(|(landed, _)| landed == node)
-        else {
-            return card.into_any_element();
-        };
-        let (ring, radius) = (cx.theme().ring, cx.theme().radius_lg);
-        card.with_animation(
-            SharedString::from(format!("focus-landed-{count}")),
-            Animation::new(CARD_LANDS).with_easing(ease_out),
-            move |el, t| {
-                el.top(px(-14. * (1. - t))).opacity(0.5 + 0.5 * t).child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(radius)
-                        .border_2()
-                        .border_color(ring.opacity(1. - t)),
-                )
-            },
-        )
-        .into_any_element()
-    }
-
-    /// The column a drop right of the last one would make, drawn before it
-    /// is made: nothing to its left moves.
-    fn render_new_column_room(
-        &self,
-        drag: &FocusDrag,
-        width: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (glyph, _) = self.card_name(&drag.node, cx);
-        let room = width.min(NEW_COLUMN_ROOM);
-        v_flex()
-            .flex_none()
-            .overflow_hidden()
-            .h_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .rounded(theme.radius_lg)
-            .border_2()
-            .border_dashed()
-            .border_color(theme.ring.opacity(0.8))
-            .bg(theme.ring.opacity(0.06))
-            .text_sm()
-            .text_color(theme.ring)
-            .child(icon(glyph).small())
-            .child(tr!("focus-drop-new-column"))
-            .with_animation(
-                "focus-new-column-room",
-                Animation::new(ROOM_OPENS).with_easing(ease_out),
-                move |el, t| el.w(px(room * t)).opacity(0.4 + 0.6 * t),
-            )
-            .into_any_element()
-    }
-
-    /// What travels with the pointer: a card in miniature — its glyph, its
-    /// name, and where it would land — over everything.
-    fn render_drag_ghost(
-        &self,
-        drag: &FocusDrag,
-        aim: Option<Target>,
-        columns: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (glyph, name) = self.card_name(&drag.node, cx);
-        let whither = match aim {
-            None => tr!("focus-drop-stays"),
-            Some(target) if target.column >= columns => tr!("focus-drop-new-column"),
-            Some(target) => tr!("focus-drop-column", { n: target.column + 1 }),
-        };
-        let chip = v_flex()
-            .w(px(240.))
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.ring)
-            .bg(theme.background)
-            .shadow_lg()
-            .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1p5()
-                    .items_center()
-                    .bg(theme.ring.opacity(0.14))
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(icon(glyph).xsmall().text_color(theme.ring))
-                    .child(div().flex_1().min_w_0().truncate().child(name)),
-            )
-            .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .items_center()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(icon("arrow-right").xsmall())
-                    .child(whither),
-            );
-        let chip = chip.with_animation(
-            "focus-drag-chip",
-            Animation::new(CHIP_SHOWS).with_easing(ease_out),
-            |el, t| el.opacity(t),
-        );
-        deferred(
-            anchored()
-                .position(drag.at + point(px(16.), px(12.)))
-                .child(chip),
-        )
-        .with_priority(2)
-        .into_any_element()
-    }
-
-    /// What a card is called on the chip that carries it.
-    fn card_name(&self, node: &Node, cx: &Context<Self>) -> (&'static str, SharedString) {
+        node: &Node,
+        cx: &Context<Self>,
+    ) -> (&'static str, SharedString) {
         match node {
             Node::Worktree(path) => ("git-branch", self.project_label(path).1),
             Node::Terminal(id) => (
@@ -2272,10 +1872,33 @@ impl ClaudhubApp {
                     .map(SharedString::from)
                     .unwrap_or_else(|| tr!("overview-note")),
             ),
-            Node::Git(_) | Node::Changes(_) => ("file-diff", tr!("overview-changes")),
-            Node::Review(_) => ("file-diff", tr!("focus-review")),
+            Node::Git(_) | Node::Changes(_) => view_name(View::Git),
+            Node::Review(_) => view_name(View::Review),
         }
     }
+}
+
+/// A view's glyph and name.
+pub(super) fn view_name(view: View) -> (&'static str, SharedString) {
+    match view {
+        View::Git => ("git-branch", tr!("focus-view-git")),
+        View::Review => ("file-diff", tr!("focus-review")),
+        View::Notes => ("sticky-note", tr!("focus-view-notes")),
+        View::Todo => ("check-check", tr!("todo-title")),
+        View::Terminals => ("square-terminal", tr!("focus-view-terminals")),
+    }
+}
+
+/// A line of text in the middle of a view that has nothing to show.
+fn centered(text: SharedString, cx: &mut Context<ClaudhubApp>) -> AnyElement {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
 }
 
 /// A sidebar entry's signal when its agents work or wait: **its own left
@@ -2288,7 +1911,7 @@ fn outline_of(doing: Option<&Doing>, theme: &gpui_kit::component::Theme) -> Opti
     edge_signal(doing, 0., theme)
 }
 
-fn edge_signal(
+pub(super) fn edge_signal(
     doing: Option<&Doing>,
     inset: f32,
     theme: &gpui_kit::component::Theme,
@@ -2379,13 +2002,4 @@ fn held(child: impl IntoElement) -> gpui_kit::Div {
             cx.stop_propagation()
         })
         .child(child)
-}
-
-/// Whether a pointer this far across is on a board — `span` its edges, and
-/// none yet measured counting as on it. A card carried over the next board
-/// stays where it was: right of the last column used to mean « a new
-/// column », so passing over a neighbour opened one at the end of its own
-/// board, which widened it and moved everything under the hand.
-fn on_span(span: Option<(f32, f32)>, x: f32) -> bool {
-    span.is_none_or(|(left, right)| left <= x && x <= right)
 }

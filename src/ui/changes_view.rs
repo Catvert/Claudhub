@@ -123,9 +123,6 @@ impl ClaudhubApp {
         // once the home screen asked for it — `ensure_changes_read`.
         let files: Option<Vec<FileStatus>> =
             self.listed_status(path).map(|status| status.files.clone());
-        let staged = files
-            .as_ref()
-            .map_or(0, |files| files.iter().filter(|f| f.is_staged()).count());
         let tint = theme.success;
         let app = cx.entity().downgrade();
 
@@ -162,6 +159,72 @@ impl ClaudhubApp {
                 el.child(self.window_controls(node.clone(), cx))
             });
 
+        let (body, foot) = self.changes_parts(path, files, cx);
+
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(tint.opacity(0.45))
+            .bg(theme.background)
+            .text_sm()
+            // Its rows are pressed, not the node dragged by them.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(head)
+            .child(body)
+            .when(detail, |el| el.child(foot))
+            .into_any_element()
+    }
+
+    /// The changes as a board's column: the node without its head, the
+    /// column's title saying what it would. A clean worktree says so.
+    pub(super) fn render_changes_column(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let body = if self.has_changes(path) {
+            let files = self.listed_status(path).map(|status| status.files.clone());
+            let (body, foot) = self.changes_parts(path, files, cx);
+            v_flex()
+                .size_full()
+                .child(body)
+                .child(foot)
+                .into_any_element()
+        } else {
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(tr!("home-clean"))
+                .into_any_element()
+        };
+        div()
+            .size_full()
+            .overflow_hidden()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .text_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The node's list and its foot — how much is staged, and the way into
+    /// the review.
+    fn changes_parts(
+        &self,
+        path: &Path,
+        files: Option<Vec<FileStatus>>,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, AnyElement) {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let staged = files
+            .as_ref()
+            .map_or(0, |files| files.iter().filter(|f| f.is_staged()).count());
         let worktree = path.to_path_buf();
         let body = match files {
             None => div()
@@ -220,131 +283,7 @@ impl ClaudhubApp {
                     this.open_review_sheet(&open, None, window, cx);
                 })),
             );
-
-        v_flex()
-            .size_full()
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(tint.opacity(0.45))
-            .bg(theme.background)
-            .text_sm()
-            // Its rows are pressed, not the node dragged by them.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(head)
-            .child(body)
-            .when(detail, |el| el.child(foot))
-            .into_any_element()
-    }
-
-    /// The changes as a section of the worktree's own card — the focus
-    /// view's, where the card and its changes are one card: a rule, a line
-    /// that names them with their count, the files, and the way into the
-    /// review. `None` with nothing to commit.
-    pub(super) fn render_changes_section(
-        &self,
-        path: &Path,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.has_changes(path) {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let muted = theme.muted_foreground;
-        let summary = self.summaries.get(path).copied().unwrap_or_default();
-        let files: Option<Vec<FileStatus>> =
-            self.listed_status(path).map(|status| status.files.clone());
-        let staged = files
-            .as_ref()
-            .map_or(0, |files| files.iter().filter(|f| f.is_staged()).count());
-        let worktree = path.to_path_buf();
-        let list = match files {
-            None => div()
-                .py_1()
-                .text_xs()
-                .text_color(muted)
-                .child(tr!("overview-changes-reading"))
-                .into_any_element(),
-            Some(files) => v_flex()
-                .id(SharedString::from(format!(
-                    "focus-changes-list-{}",
-                    path.display()
-                )))
-                .w_full()
-                // A long list scrolls inside the card rather than making the
-                // card the height of the list: the commits and the button
-                // stay in view.
-                .max_h(px(320.))
-                .overflow_y_scroll()
-                .children(
-                    files
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, file)| self.render_changes_row(&worktree, index, file, cx)),
-                )
-                .into_any_element(),
-        };
-        let open = path.to_path_buf();
-        Some(
-            v_flex()
-                .id(SharedString::from(format!(
-                    "focus-changes-{}",
-                    path.display()
-                )))
-                // Its gestures are its own: a press here neither selects the
-                // card nor, twice, leaves the screen for the editor.
-                .on_click(|_, _, cx| cx.stop_propagation())
-                .w_full()
-                .gap_1()
-                .pt_2()
-                .border_t_1()
-                .border_color(theme.border)
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .child(icon("file-diff").xsmall().text_color(theme.success))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child(tr!("overview-changes")),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(tr!("home-files", { count: summary.files })),
-                        )
-                        .child(super::topbar::volume_on(summary, None, cx))
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(tr!("commit-staged-count", { count: staged })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "focus-changes-review-{}",
-                                path.display()
-                            )))
-                            .primary()
-                            .xsmall()
-                            .icon(icon("git-commit-horizontal"))
-                            .label(tr!("overview-changes-review"))
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.open_review_sheet(&open, None, window, cx);
-                                },
-                            )),
-                        ),
-                )
-                // The rows run to the card's edges, as a list's do: the
-                // body's padding is given back.
-                .child(div().mx(px(-8.)).child(list))
-                .into_any_element(),
-        )
+        (body, foot.into_any_element())
     }
 
     /// One file of the node: its tick, its code, its name and folder. The
@@ -557,13 +496,15 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// A worktree's branch review as a card of its board: a head that names
-    /// it and what it compares against, then the list above the diff — side
-    /// by side when the card fills the middle, `wide`.
+    /// A worktree's branch review as a thing of its board: a head that
+    /// names it and what it compares against — unless its column's title
+    /// says it, `head` false — then the list above the diff, side by side
+    /// when it fills the middle, `wide`.
     pub(super) fn render_review_card(
         &mut self,
         path: &Path,
         wide: bool,
+        head: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -583,36 +524,38 @@ impl ClaudhubApp {
             }
         });
 
-        let head = h_flex()
-            .flex_none()
-            .h(px(overview::HEAD))
-            .px_2()
-            .gap_1p5()
-            .items_center()
-            .bg(theme.info.opacity(0.14))
-            .cursor_grab()
-            .on_mouse_down(
-                MouseButton::Left,
-                super::overview_view::grab(app.clone(), node.clone()),
-            )
-            .child(icon("file-diff").text_color(theme.info))
-            .child(
-                div()
-                    .flex_none()
-                    .truncate()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(tr!("focus-review")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .text_color(muted)
-                    .children(against),
-            )
-            .child(self.window_controls(node.clone(), cx));
+        let head = head.then(|| {
+            h_flex()
+                .flex_none()
+                .h(px(overview::HEAD))
+                .px_2()
+                .gap_1p5()
+                .items_center()
+                .bg(theme.info.opacity(0.14))
+                .cursor_grab()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    super::overview_view::grab(app.clone(), node.clone()),
+                )
+                .child(icon("file-diff").text_color(theme.info))
+                .child(
+                    div()
+                        .flex_none()
+                        .truncate()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(tr!("focus-review")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .children(against),
+                )
+                .child(self.window_controls(node.clone(), cx))
+        });
 
         let message =
             |text: SharedString| div().text_xs().text_color(muted).text_center().child(text);
@@ -714,7 +657,7 @@ impl ClaudhubApp {
             // press here neither selects the board nor, twice, leaves the
             // screen for the editor.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(head)
+            .children(head)
             .child(body)
             .into_any_element()
     }

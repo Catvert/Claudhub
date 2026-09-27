@@ -71,6 +71,7 @@ mod sql_history;
 mod sql_history_view;
 mod stashes;
 mod store;
+mod summary_view;
 mod surface;
 mod tags;
 mod terminal_view;

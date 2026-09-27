@@ -283,9 +283,20 @@ impl ClaudhubApp {
     /// watch will bring back the disk's truth a quarter of a second later
     /// anyway.
     pub(super) fn toggle_task(&mut self, line: usize, done: bool, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active.clone() else {
-            return;
-        };
+        if let Some(worktree) = self.active.clone() {
+            self.toggle_task_in(worktree, line, done, cx);
+        }
+    }
+
+    /// The same, in any worktree's list — a board's home ticks the list of
+    /// a worktree that is not the one on show.
+    pub(super) fn toggle_task_in(
+        &mut self,
+        worktree: PathBuf,
+        line: usize,
+        done: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(dir) = self.notes_dir(&worktree, cx) else {
             return;
         };
@@ -803,7 +814,7 @@ impl ClaudhubApp {
             return empty_notes(tr!("no-worktree"), cx).into_any_element();
         }
         let bar = self.render_vault_bar(cx);
-        let todo = self.render_todo_section(cx);
+        let todo = self.render_todo_section(false, cx);
         let journal = self.render_journal_section(cx);
         let notes = self.render_notes_section(cx);
         let reviews = self.render_reviews_section(cx);
@@ -1206,7 +1217,14 @@ impl ClaudhubApp {
     /// amount to never seeing it. Without a `TODO.md`, the section stays and
     /// carries the button that creates one — an empty state that says what to do
     /// beats an absent section nobody knows could exist.
-    fn render_todo_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    ///
+    /// `open` holds it unfolded, whatever the panel's fold: a board's to-do
+    /// view is the list and nothing else.
+    pub(super) fn render_todo_section(
+        &mut self,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let todo = self.active_review().and_then(|state| state.todo.clone());
         let count = match &todo {
             Some(todo) => tr!("todo-progress", { done: todo.done(), total: todo.tasks.len() }),
@@ -1229,7 +1247,7 @@ impl ClaudhubApp {
                         cx.notify();
                     })),
             );
-        if self.collapsed("todo") {
+        if !open && self.collapsed("todo") {
             return v_flex().w_full().child(header);
         }
 

@@ -215,16 +215,18 @@ src/
     canvas_view.rs  les notes de l'accueil : les fichiers lus, écrits, déplacés
     changes_view.rs le nœud « Modifications » d'une carte, et la relecture qu'il
                     ouvre : le panneau des changements et le diff, en dialogue ;
-                    la carte « Revue » d'un tableau
+                    les modifications et la revue d'un tableau
     context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
                     zoom, ses deux vues — pur, testé
-    focus.rs        le tableau du focus : quelle carte dans quelle colonne, ce
-                    qui arrive se place par règle, où tombe un dépôt, quels
-                    worktrees sont montrés — pur, testé
+    focus.rs        le tableau du focus : quelle vue il montre, quelle note
+                    est la principale ; quels worktrees sont montrés — pur,
+                    testé
     focus_view.rs   la vue par défaut de l'accueil : la barre latérale des
                     worktrees (ou son rail), et ceux choisis côte à côte,
-                    chacun sur son tableau
+                    chacun sur son tableau, et les vues d'un tableau
+    summary_view.rs l'accueil d'un tableau, sa première colonne : Git, Revue,
+                    note principale, TODO, agents, en résumé
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes
     revive.rs       les terminaux qui survivent à la fenêtre : quelle session
                     Claude un onglet porte, la commande qui la reprend — pur
@@ -666,15 +668,14 @@ worktree.
   sélecteurs à cases dans la barre de titre, pour le plan seul : deux façons
   de choisir la même chose. **Par défaut le focus** (`ui::focus_view`) :
   chaque worktree choisi sur son **tableau** (`ui::focus`). « Réinitialiser »
-  y rend aussi aux tableaux montrés la disposition par règle. **Les titres
+  y rend aussi aux tableaux montrés leur vue de départ. **Les titres
   ne défilent pas avec la rangée** (`render_focus_header`) : chacun est tenu
   à gauche de la part visible de son tableau (`focus::header_span`), mesurée
   dans les coordonnées de la rangée — que le défilement ne change pas — et
   relue au défilement de la frame, sans quoi il traînait d'une image. **Il
   porte ce que la carte et la barre de l'éditeur disaient du checkout**
   (`board_title`) — la branche en sélecteur, pull et push, « Éditer », le
-  widget d'exécution, « Revue », les liens, le `…` — et la carte, sur un
-  tableau, n'en répète rien. À droite, deux flèches font
+  widget d'exécution, « Revue », les liens, le `…`. À droite, deux flèches font
   glisser la rangée d'une colonne (`focus::next_stop`), par le lissage de la
   molette. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
@@ -684,53 +685,32 @@ worktree.
   Colonnes, tous les worktrees à la fois et sans main dans la disposition :
   deux vues des mêmes tableaux ne différaient que par le nombre choisi, et
   une session enregistrée sur elle se relit en focus (`serde(alias)`). Un
-  tableau prend sa part de la largeur, **jamais moins que ses colonnes** —
-  c'est la rangée des tableaux qui défile, jamais un tableau seul — et ce
-  qu'il tient dans l'instant (géométrie, défilements, colonne qu'on élargit)
-  est **rangé par worktree** : une note du dépôt est sur chaque tableau à la
-  fois, et c'est la pression qui dit sur lequel elle bouge (`FocusDrag::board`).
-  Un tableau, ce sont des colonnes de cartes que la main arrange, retenues par
-  worktree. Une carte se **traîne par son en-tête** — celui que
-  chaque nœud a déjà, `grab` — vers une autre colonne, ou à droite de la
-  dernière, ce qui en crée une ; pendant le trajet la carte reste en place,
-  pâlie, une carte miniature suit le pointeur en disant où elle tombera, et
-  **un emplacement en pointillés s'ouvre là**, les cartes d'en dessous
-  s'écartant. La cible se lit sur ce que la frame d'avant a mesuré, **cet
-  emplacement retiré** (`Geometry::closed`) : lu sur les cartes qu'il a
-  poussées, il chassait le pointeur de haut en bas — et avec sa hauteur
-  **peinte**, qu'il mesure lui-même : il s'ouvre en grandissant, la carte
-  déposée se pose d'un glissement et d'un halo qui s'éteint
-  (`with_animation`, un identifiant par dépôt). **Tenue contre un bord de
-  la rangée, la carte la fait défiler** (`focus::edge_push`, le cinquième
-  de la largeur de chaque côté, plus vite près du bord, et seulement plus
-  loin que là où on l'a prise) ; **hors de son tableau, elle reste où elle
-  était** — « à droite de la dernière colonne » voulait dire « nouvelle
-  colonne », et survoler le tableau voisin en ouvrait une. Une colonne se règle par son
-  bord droit, largeur retenue avec le tableau, double-clic pour la rendre à
-  l'espace — jamais sous la largeur des réglages (`terminal.column_min`).
-  Seul ce qui arrive se place par règle — un terminal
-  dans la colonne dont on a pressé « Terminal », sinon dans une colonne à lui.
-  Un terminal n'a pas d'identité qui survive au processus : le magasin garde
-  **qu'un terminal était là**, et ceux qui reviennent reprennent ces places
-  dans l'ordre de lecture. **La carte du worktree porte ses modifications**
-  (`render_changes_section`) : sur ce tableau, c'est une seule carte. **La
-  carte « Revue »** (`Node::Review`, des tableaux seulement — le plan n'a
-  pas de place pour un diff) vient sous elle : la revue de branche de la
-  feuille, sa base au choix, le diff dessous. Elle n'est vivante que sur le
-  worktree regardé et tant qu'aucune feuille ne peint les mêmes panneaux :
-  une liste virtuelle peinte deux fois partagerait son défilement. Un
-  terminal au pied d'une colonne en prend le reste. Ce sont les **mêmes
-  nœuds peints par les mêmes fonctions** que le plan (`column_node`) : ce que
-  le plan retient (replis, masqués, hauteurs) vaut ici. Un terminal y mesure
-  sa propre boîte (`set_canvas(None)`), et agrandir un nœud lui donne le
-  milieu (`overview_zoomed`). Sans liens, c'est le cadre qui dit qu'un agent
-  travaille ou attend — celui de la carte aussi, quand aucun onglet d'agent
-  n'est là. **Chaque ligne de la barre latérale porte le signal sur son
-  bord gauche** (`edge_signal`, `worktree_doing`, `overview::loudest`) — le
-  plus pressant de ses Claude : celui qui attend, puis celui qui travaille —,
-  une pastille du rail aussi, et l'en-tête d'un projet replié pour ce que le
-  repli cache ; un cadre pointillé posé sur un bandeau sélectionné parlait
-  deux langues à la fois. Ne demande des
+  tableau prend sa part de la largeur, **jamais moins que ce qu'il montre**
+  — c'est la rangée des tableaux qui défile, jamais un tableau seul — et ce
+  qu'il tient dans l'instant est **rangé par worktree**.
+  **Un tableau, c'est un accueil et une vue** (`ui::summary_view`,
+  `ui::focus`) : à gauche un résumé du worktree en cinq sections — Git,
+  Revue, note principale, TODO, agents —, à droite **une seule vue**, le
+  détail de la section pressée, qui prend la place de la précédente ; la vue
+  choisie est retenue par worktree (`focus_view`), et à défaut un tableau
+  s'ouvre sur ses terminaux s'il en a, sinon sur sa revue. Il y a eu des
+  colonnes de cartes arrangées à la main, puis une colonne par type ouvrable
+  côte à côte : dans les deux cas un diff, deux terminaux et une note se
+  disputaient la largeur, et un tableau était à ranger avant d'être à lire.
+  **La note principale** est celle qu'on épingle dans la vue des notes
+  (`pinned_note`), à défaut la plus récente (`focus::principal_note`). Ce
+  qui se fait d'un geste se fait dans l'accueil — une tâche cochée, sur le
+  TODO de n'importe quel worktree (`toggle_task_in`) —, le reste dans la
+  vue. **La Revue et le TODO** sont les panneaux de l'éditeur eux-mêmes, un
+  exemplaire de chaque : vivants sur le worktree regardé seulement, et la
+  Revue tant qu'aucune feuille ne peint les mêmes panneaux — une liste
+  virtuelle peinte deux fois partagerait son défilement. Demander un
+  terminal depuis un tableau y montre ses terminaux. **Chaque ligne de la
+  barre latérale porte le signal sur son bord gauche** (`edge_signal`,
+  `worktree_doing`, `overview::loudest`) — le plus pressant de ses Claude :
+  celui qui attend, puis celui qui travaille —, une pastille du rail aussi,
+  et le glyphe des agents de l'accueil replié ; un cadre pointillé posé sur
+  un bandeau sélectionné parlait deux langues à la fois. Ne demande des
   frames que ce qui est à l'écran (`prepare_laid_out`) : les tableaux
   montrés et ces habits.
 - **Les notes sont des fichiers** (`crate::canvas`, `ui::canvas_view`) : un
@@ -756,9 +736,8 @@ worktree.
   terminal est un nœud où on le voit travailler, et **cède la place** au
   résultat une fois le fichier là et le tour de l'agent fini — le `status` que
   Claude écrit pour son pid. Ce terminal n'est pas retenu : rouvert, il
-  relancerait la demande. **Sur un tableau, ce `+` quitte l'en-tête** pour
-  le bouton à droite de la dernière colonne : un shell d'un clic, le reste
-  sous le chevron.
+  relancerait la demande. **Sur un tableau, ce `+` est dans la tête de
+  l'accueil.**
 - **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
   sa branche fusionnée (plus aucun commit d'avance sur sa base) :
   `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de
