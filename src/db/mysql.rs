@@ -12,10 +12,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
-use futures::TryStreamExt as _;
 use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow},
-    Column as _, ConnectOptions as _, Either, Row as _, TypeInfo as _, ValueRef as _,
+    mysql::{MySql, MySqlConnectOptions, MySqlConnection, MySqlRow},
+    Column as _, ConnectOptions as _, Row as _, TypeInfo as _, ValueRef as _,
 };
 
 use super::{bytes_to_string, Cell, Column, Connection, Database, Rows, Table};
@@ -268,66 +267,12 @@ pub async fn query(
         anyhow::bail!("this query is not a plain read, and it is not run a second time");
     }
     let mut db = open(connection, database).await?;
-    // The page is asked of the engine when the query lets itself be wrapped —
-    // see `super::paged`. The wrap can still be refused at run time: MySQL
-    // rejects a derived table whose two columns are named alike, which is the
-    // `SELECT * FROM a JOIN b` of every schema. Reading from the start is
-    // therefore kept as the fallback — a plain read, since `paged` only wraps
-    // one, and running it once more changes nothing.
-    if let Some(paged) = super::paged(sql, offset, limit) {
-        match run(&mut db, &paged, offset, 0, limit).await {
-            Ok(rows) => return Ok(rows),
-            Err(error) => {
-                log::debug!("the paged query was refused, reading from the start: {error}")
-            }
-        }
-    }
-    run(&mut db, sql, offset, offset, limit).await
-}
-
-/// Runs `sql` and keeps `limit` rows, `skip` of them dropped on the way.
-///
-/// `offset` is what the page says of itself; `skip` is how many rows this has
-/// to throw away to get there — zero when the engine was asked for the page.
-async fn run(
-    db: &mut MySqlConnection,
-    sql: &str,
-    offset: usize,
-    skip: usize,
-    limit: usize,
-) -> Result<Rows> {
-    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
-    let mut out = Rows {
-        offset,
-        ..Default::default()
-    };
-    let mut decoders: Vec<Decoder> = Vec::new();
-    let mut skipped = 0;
-    while let Some(item) = stream.try_next().await? {
-        match item {
-            Either::Left(done) => *out.affected.get_or_insert(0) += done.rows_affected(),
-            Either::Right(row) => {
-                if out.columns.is_empty() {
-                    out.columns = row
-                        .columns()
-                        .iter()
-                        .map(|column| column.name().to_string())
-                        .collect();
-                    decoders = self::decoders(&row);
-                }
-                if skipped < skip {
-                    skipped += 1;
-                    continue;
-                }
-                if out.rows.len() >= limit {
-                    out.more = true;
-                    break;
-                }
-                out.rows.push(cells(&row, &decoders));
-            }
-        }
-    }
-    Ok(out)
+    // The wrap `super::read_page` tries can still be refused at run time:
+    // MySQL rejects a derived table whose two columns are named alike, which is
+    // the `SELECT * FROM a JOIN b` of every schema. Its fallback, reading from
+    // the start, is a plain read here, since `paged` only wraps one, and
+    // running it once more changes nothing.
+    super::read_page::<MySql, _>(&mut db, sql, offset, limit, reader).await
 }
 
 /// Writes the whole result as it streams. See `super::export_csv`.
@@ -342,27 +287,14 @@ pub async fn export(
         anyhow::bail!("this query is not a plain read, and exporting it would run it again");
     }
     let mut db = open(connection, database).await?;
-    let mut stream = sqlx::raw_sql(sql).fetch_many(&mut db);
-    let mut written = 0;
-    let mut header = false;
-    let mut decoders: Vec<Decoder> = Vec::new();
-    while let Some(item) = stream.try_next().await? {
-        if let Either::Right(row) = item {
-            if !header {
-                out.write_all(
-                    super::csv_line(row.columns().iter().map(|column| Some(column.name())))
-                        .as_bytes(),
-                )?;
-                header = true;
-                decoders = self::decoders(&row);
-            }
-            out.write_all(
-                super::csv_line(cells(&row, &decoders).iter().map(|c| c.as_deref())).as_bytes(),
-            )?;
-            written += 1;
-        }
-    }
-    Ok(written)
+    super::write_csv::<MySql, _>(&mut db, sql, out, reader).await
+}
+
+/// What turns a result's rows into cells, decided on its first row: one
+/// decoder per column. See `super::read_page`.
+fn reader(first: &MySqlRow) -> impl FnMut(&MySqlRow) -> Vec<Cell> {
+    let decoders = decoders(first);
+    move |row: &MySqlRow| cells(row, &decoders)
 }
 
 /// How a column's values are read, decided once per column from the type name
@@ -429,12 +361,13 @@ fn cells(row: &MySqlRow, decoders: &[Decoder]) -> Vec<Cell> {
                 index,
                 decoders.get(index).copied().unwrap_or(Decoder::Any),
             )
+            .map(Into::into)
         })
         .collect()
 }
 
 /// A column value, as text.
-fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Cell {
+fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Option<String> {
     match row.try_get_raw(index) {
         Ok(value) if value.is_null() => return None,
         Ok(_) => {}
@@ -511,7 +444,7 @@ fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Cell {
 /// The order of attempts goes from the most precise to the most general, and
 /// text comes first: a `DECIMAL(20,4)` arrives as a string, and putting it
 /// through an `f64` would round it.
-fn cascade(row: &MySqlRow, index: usize) -> Cell {
+fn cascade(row: &MySqlRow, index: usize) -> Option<String> {
     if let Ok(value) = row.try_get::<String, _>(index) {
         return Some(value);
     }
@@ -560,7 +493,7 @@ fn cascade(row: &MySqlRow, index: usize) -> Cell {
 /// screen and in the exported CSV, where the server's own text is exact.
 ///
 /// `<?>` is left for bytes that are not even text.
-fn as_sent(row: &MySqlRow, index: usize) -> Cell {
+fn as_sent(row: &MySqlRow, index: usize) -> Option<String> {
     if let Ok(value) = row.try_get_unchecked::<String, _>(index) {
         return Some(value);
     }

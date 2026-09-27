@@ -104,8 +104,15 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     let display_offset = content.display_offset;
     let selection = content.selection;
 
-    let mut lines: Vec<Line> = Vec::new();
-    let mut line = Line::default();
+    // A line's text is sized for the grid's width up front — one byte a
+    // column, which is what most cells hold — instead of growing through half
+    // a dozen reallocations on every line of every capture.
+    let columns = term.columns();
+    let mut lines: Vec<Line> = Vec::with_capacity(term.screen_lines());
+    let mut line = Line {
+        text: String::with_capacity(columns),
+        ..Line::default()
+    };
     let mut pending: Option<Segment> = None;
     let mut line_index: Option<usize> = None;
     let mut column = 0usize;
@@ -123,6 +130,7 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
         if line_index != Some(index) {
             if line_index.is_some() {
                 flush(&mut lines, &mut line, &mut pending);
+                line.text.reserve(columns);
             }
             line_index = Some(index);
             column = 0;

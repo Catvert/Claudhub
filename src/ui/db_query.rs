@@ -443,7 +443,7 @@ impl Results {
         let selection = self.selection?;
         if !headers && selection.count() == 1 {
             let (row, column) = selection.anchor;
-            return Some(self.cell(row, column).cloned().unwrap_or_default());
+            return Some(self.cell(row, column).unwrap_or_default().to_string());
         }
         let mut out = String::new();
         if headers {
@@ -453,9 +453,7 @@ impl Results {
         }
         for row in selection.rows() {
             out.push_str(&db::tsv_line(
-                selection
-                    .columns()
-                    .map(|column| self.cell(row, column).map(|value| value.as_str())),
+                selection.columns().map(|column| self.cell(row, column)),
             ));
         }
         Some(out)
@@ -484,13 +482,13 @@ impl Results {
     /// A `NULL` names nothing, and a column that is not a key names nothing
     /// either — in both cases there is no entry to offer rather than one that
     /// would answer with an empty result.
-    fn link(&self, row: usize, column: usize) -> Option<(&db::link::Target, &String)> {
+    fn link(&self, row: usize, column: usize) -> Option<(&db::link::Target, &str)> {
         let target = self.links.get(column)?.as_ref()?;
         Some((target, self.cell(row, column)?))
     }
 
-    fn cell(&self, row: usize, column: usize) -> Option<&String> {
-        self.rows.rows.get(row)?.get(column)?.as_ref()
+    fn cell(&self, row: usize, column: usize) -> Option<&str> {
+        self.rows.rows.get(row)?.get(column)?.as_deref()
     }
 
     /// Reports a table gesture to the application.
@@ -611,7 +609,8 @@ impl TableDelegate for Results {
         // string "NULL" a column may contain, and the result really does carry
         // two different things.
         let (text, null) = match cell {
-            Some(Some(value)) => (SharedString::from(value.clone()), false),
+            // A count, not a copy: see `db::Cell`.
+            Some(Some(value)) => (SharedString::from(value), false),
             _ => (SharedString::new_static("NULL"), true),
         };
         let selected = self
@@ -821,9 +820,9 @@ impl TableDelegate for Results {
             .rows
             .get(row)
             .and_then(|row| row.get(column))
-            .cloned()
-            .flatten()
+            .and_then(|cell| cell.as_deref())
             .unwrap_or_default()
+            .to_string()
     }
 
     /// Scrolling can ask for more as long as there is some left.

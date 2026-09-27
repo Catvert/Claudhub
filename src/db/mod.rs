@@ -297,7 +297,12 @@ pub struct Column {
 /// rather than a typed value is still the right level — the view does not know
 /// the engine's types, and making them cross would mean one value enum per
 /// driver.
-pub type Cell = Option<String>;
+///
+/// **Shared, not owned**: the table paints every visible cell on every frame,
+/// and a `TEXT` or `JSON` value of several kilobytes was copied each time only
+/// to be truncated; an `Arc<str>` becomes the painted string by a count. It
+/// travels over the wire exactly as a `String` would (serde's `rc`).
+pub type Cell = Option<std::sync::Arc<str>>;
 
 /// A query's result, one page at a time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -653,8 +658,160 @@ pub async fn export_csv(
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("l'export n'a pas abouti en {} s", EXPORT_TIMEOUT.as_secs()))??;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "the export did not finish in {} s",
+            EXPORT_TIMEOUT.as_secs()
+        )
+    })??;
     std::io::Write::flush(&mut out)?;
+    Ok(written)
+}
+
+/// What the shared reading below needs of an engine's write report, which
+/// `sqlx::Database` leaves to each driver.
+pub(crate) trait RowsAffected {
+    fn rows_affected(&self) -> u64;
+}
+
+impl RowsAffected for sqlx::sqlite::SqliteQueryResult {
+    fn rows_affected(&self) -> u64 {
+        self.rows_affected()
+    }
+}
+
+impl RowsAffected for sqlx::mysql::MySqlQueryResult {
+    fn rows_affected(&self) -> u64 {
+        self.rows_affected()
+    }
+}
+
+/// The page of `limit` rows starting at `offset`, for either engine.
+///
+/// **What differs between the engines is the decoding of a value, and only
+/// that**: `reader` is handed the first row of a result and returns what turns
+/// each row into cells — MySQL decides its decoders there, once per column.
+///
+/// The page is asked of the engine when the query lets itself be wrapped — see
+/// `paged`. Reading from the start stays as the fallback, for what does not
+/// let itself be wrapped and for a wrap the engine refuses.
+pub(crate) async fn read_page<DB, D>(
+    db: &mut DB::Connection,
+    sql: &str,
+    offset: usize,
+    limit: usize,
+    mut reader: impl FnMut(&DB::Row) -> D,
+) -> Result<Rows>
+where
+    DB: sqlx::Database,
+    DB::QueryResult: RowsAffected,
+    for<'c> &'c mut DB::Connection: sqlx::Executor<'c, Database = DB>,
+    D: FnMut(&DB::Row) -> Vec<Cell>,
+{
+    if let Some(paged) = paged(sql, offset, limit) {
+        match run_page::<DB, D>(db, &paged, offset, 0, limit, &mut reader).await {
+            Ok(rows) => return Ok(rows),
+            Err(error) => {
+                log::debug!("the paged query was refused, reading from the start: {error}")
+            }
+        }
+    }
+    run_page::<DB, D>(db, sql, offset, offset, limit, &mut reader).await
+}
+
+/// Runs `sql` and keeps `limit` rows, `skip` of them dropped on the way.
+///
+/// `offset` is what the page says of itself; `skip` is how many rows this has
+/// to throw away to get there — zero when the engine was asked for the page.
+async fn run_page<DB, D>(
+    db: &mut DB::Connection,
+    sql: &str,
+    offset: usize,
+    skip: usize,
+    limit: usize,
+    reader: &mut impl FnMut(&DB::Row) -> D,
+) -> Result<Rows>
+where
+    DB: sqlx::Database,
+    DB::QueryResult: RowsAffected,
+    for<'c> &'c mut DB::Connection: sqlx::Executor<'c, Database = DB>,
+    D: FnMut(&DB::Row) -> Vec<Cell>,
+{
+    use futures::TryStreamExt as _;
+    use sqlx::{Column as _, Row as _};
+    // `raw_sql` accepts several statements — that is what one pastes from a
+    // migration file — and `fetch_many` streams what each produces: a count of
+    // affected rows for a write, rows for a read.
+    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
+    let mut out = Rows {
+        offset,
+        ..Default::default()
+    };
+    let mut cells: Option<D> = None;
+    let mut skipped = 0;
+    while let Some(item) = stream.try_next().await? {
+        match item {
+            sqlx::Either::Left(done) => *out.affected.get_or_insert(0) += done.rows_affected(),
+            sqlx::Either::Right(row) => {
+                if out.columns.is_empty() {
+                    out.columns = row
+                        .columns()
+                        .iter()
+                        .map(|column| column.name().to_string())
+                        .collect();
+                    cells = Some(reader(&row));
+                }
+                if skipped < skip {
+                    skipped += 1;
+                    continue;
+                }
+                if out.rows.len() >= limit {
+                    out.more = true;
+                    break;
+                }
+                if let Some(cells) = cells.as_mut() {
+                    out.rows.push(cells(&row));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Writes the whole result as it streams, for either engine. See `export_csv`,
+/// and `read_page` for `reader`.
+pub(crate) async fn write_csv<DB, D>(
+    db: &mut DB::Connection,
+    sql: &str,
+    out: &mut dyn std::io::Write,
+    reader: impl FnOnce(&DB::Row) -> D,
+) -> Result<u64>
+where
+    DB: sqlx::Database,
+    for<'c> &'c mut DB::Connection: sqlx::Executor<'c, Database = DB>,
+    D: FnMut(&DB::Row) -> Vec<Cell>,
+{
+    use futures::TryStreamExt as _;
+    use sqlx::{Column as _, Row as _};
+    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
+    let mut written = 0;
+    let mut reader = Some(reader);
+    let mut cells: Option<D> = None;
+    while let Some(item) = stream.try_next().await? {
+        let sqlx::Either::Right(row) = item else {
+            continue;
+        };
+        if let Some(reader) = reader.take() {
+            out.write_all(
+                csv_line(row.columns().iter().map(|column| Some(column.name()))).as_bytes(),
+            )?;
+            cells = Some(reader(&row));
+        }
+        if let Some(cells) = cells.as_mut() {
+            out.write_all(csv_line(cells(&row).iter().map(|c| c.as_deref())).as_bytes())?;
+            written += 1;
+        }
+    }
     Ok(written)
 }
 

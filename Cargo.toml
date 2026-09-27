@@ -161,8 +161,8 @@ lsp-types = { version = "0.97", optional = true, features = ["proposed"] }
 # cœur évite du même coup une dépendance D-Bus dans un binaire statique.
 keyring = { version = "4", optional = true }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["raw_value"] }
 base64 = "0.22"
 # Le format du fil entre l'interface et `claudhub-server` (runtime::wire).
 # Binaire et non JSON : `Evt::Agents` porte une `HashMap<PathBuf, …>` que JSON

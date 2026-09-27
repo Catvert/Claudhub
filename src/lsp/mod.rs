@@ -40,7 +40,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, value::RawValue, Value};
 
 use crate::runtime::protocol::{Evt, WorktreeId};
 
@@ -498,6 +498,52 @@ fn read_pipes(child: &mut Child, server: &Server, self_tx: Sender<Message>) {
     }
 }
 
+/// A message from the server, read no deeper than its envelope.
+///
+/// What a view asked for — a completion list, a hover, a file's diagnostics —
+/// is the largest thing the session carries, and it is kept as the text it
+/// came in (`RawValue`) and handed over as is: the view parses it into its own
+/// types anyway, and reading it here into a `Value` tree, cloning the branch
+/// and writing it back out was three passes over it for nothing.
+#[derive(Deserialize)]
+struct Incoming<'a> {
+    /// Kept as it came: `"1"` is as much an id as `1` — lsp4j writes them as
+    /// strings. A `null` id reads as none.
+    #[serde(default)]
+    id: Option<Value>,
+    #[serde(default)]
+    method: Option<String>,
+    /// `null` and absent read alike, as `None`: both are an empty answer.
+    #[serde(default, borrow)]
+    result: Option<&'a RawValue>,
+    #[serde(default)]
+    error: Option<Value>,
+    #[serde(default, borrow)]
+    params: Option<&'a RawValue>,
+}
+
+impl Incoming<'_> {
+    /// The params as a tree, for the few small ones read here field by field.
+    fn params(&self) -> Value {
+        self.params
+            .and_then(|params| serde_json::from_str(params.get()).ok())
+            .unwrap_or(Value::Null)
+    }
+}
+
+/// A request or a notification of ours, as it goes out.
+///
+/// The params are whatever serializes: a `Value` built here, or the
+/// `RawValue` a view wrote, which lands in the frame as it came.
+#[derive(Serialize)]
+struct Outgoing<'a, P: ?Sized> {
+    jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
+    method: &'a str,
+    params: &'a P,
+}
+
 struct Session {
     worktree: WorktreeId,
     server: Server,
@@ -595,7 +641,7 @@ impl Session {
         let id = self.request(
             stdin,
             "initialize",
-            initialize_params(&self.worktree),
+            &initialize_params(&self.worktree),
             Origin::Handshake,
             Instant::now() + HANDSHAKE_TIMEOUT,
         )?;
@@ -608,18 +654,23 @@ impl Session {
     }
 
     /// Sends a request and remembers what is waiting for it.
-    fn request(
+    fn request<P: Serialize + ?Sized>(
         &mut self,
         stdin: &mut impl std::io::Write,
         method: &str,
-        params: Value,
+        params: &P,
         origin: Origin,
         deadline: Instant,
     ) -> anyhow::Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
-        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        frame::write(stdin, &message.to_string())?;
+        let message = Outgoing {
+            jsonrpc: "2.0",
+            id: Some(id),
+            method,
+            params,
+        };
+        frame::write(stdin, &serde_json::to_string(&message)?)?;
         // Filed once it has left: a request that could not be written is
         // answered by the caller at once, and must not be answered a second
         // time by the timeout.
@@ -628,8 +679,16 @@ impl Session {
     }
 
     fn notify(&self, stdin: &mut impl std::io::Write, method: &str, params: Value) {
-        let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
-        if let Err(e) = frame::write(stdin, &message.to_string()) {
+        let message = Outgoing {
+            jsonrpc: "2.0",
+            id: None,
+            method,
+            params: &params,
+        };
+        let written = serde_json::to_string(&message)
+            .map_err(anyhow::Error::from)
+            .and_then(|message| frame::write(stdin, &message));
+        if let Err(e) = written {
             log::warn!("writing {method} to the language server: {e:#}");
         }
     }
@@ -736,11 +795,14 @@ impl Session {
                 }
             }
             Ask::Request { id, method, params } => {
-                let params: Value = serde_json::from_str(&params).unwrap_or(Value::Null);
+                // Checked, not parsed: the view wrote the params, and they go
+                // into the frame as they are.
+                let params =
+                    RawValue::from_string(params).unwrap_or_else(|_| RawValue::NULL.to_owned());
                 if let Err(e) = self.request(
                     stdin,
-                    &method.clone(),
-                    params,
+                    &method,
+                    &*params,
                     Origin::View(id),
                     asked + REQUEST_TIMEOUT,
                 ) {
@@ -781,15 +843,15 @@ impl Session {
     /// One message from the server: an answer, a notification, or a request of
     /// its own.
     fn incoming(&mut self, stdin: &mut impl std::io::Write, payload: &str) {
-        let Ok(message) = serde_json::from_str::<Value>(payload) else {
+        let Ok(message) = serde_json::from_str::<Incoming>(payload) else {
             log::warn!("unreadable message from the language server");
             return;
         };
         // Kept as it came: `"1"` is as much an id as `1` — lsp4j writes them
         // as strings — and reading only numbers took every request of such a
         // server for a notification, which nobody answered.
-        let id = message.get("id").filter(|id| !id.is_null()).cloned();
-        let method = message.get("method").and_then(Value::as_str);
+        let id = message.id.clone();
+        let method = message.method.as_deref();
         match (id, method) {
             // An answer to one of ours. We only ever send numbers, but a
             // server that stringifies them on the way back is still answering.
@@ -808,12 +870,12 @@ impl Session {
         }
     }
 
-    fn answer(&mut self, stdin: &mut impl std::io::Write, id: u64, message: &Value) {
+    fn answer(&mut self, stdin: &mut impl std::io::Write, id: u64, message: &Incoming) {
         let Some(pending) = self.pending.remove(&id) else {
             // A cancelled request whose answer arrived anyway.
             return;
         };
-        let error = message.get("error").map(|e| {
+        let error = message.error.as_ref().map(|e| {
             e.get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("the language server refused")
@@ -830,12 +892,20 @@ impl Session {
                     self.ended = Some(format!("initialize refused: {error}"));
                     return;
                 }
+                // Read once, as a tree for the sync kind and as the text it
+                // came in for the view.
+                #[derive(Deserialize)]
+                struct Initialized<'a> {
+                    #[serde(default, borrow)]
+                    capabilities: Option<&'a RawValue>,
+                }
                 let capabilities = message
-                    .get("result")
-                    .and_then(|r| r.get("capabilities"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                self.sync = sync_kind(&capabilities);
+                    .result
+                    .and_then(|r| serde_json::from_str::<Initialized>(r.get()).ok())
+                    .and_then(|r| r.capabilities)
+                    .unwrap_or(RawValue::NULL);
+                self.sync =
+                    sync_kind(&serde_json::from_str(capabilities.get()).unwrap_or(Value::Null));
                 self.notify(stdin, "initialized", json!({}));
                 self.ready = true;
                 log::info!(
@@ -846,7 +916,7 @@ impl Session {
                 self.emit(Evt::LspReady {
                     worktree: self.worktree.clone(),
                     name: self.server.name.clone(),
-                    capabilities: capabilities.to_string(),
+                    capabilities: capabilities.get().to_string(),
                 });
                 for (ask, asked) in std::mem::take(&mut self.queued) {
                     self.perform(stdin, ask, asked);
@@ -855,7 +925,7 @@ impl Session {
             Origin::View(view_id) => {
                 let result = match error {
                     Some(error) => Err(error),
-                    None => Ok(message.get("result").unwrap_or(&Value::Null).to_string()),
+                    None => Ok(message.result.unwrap_or(RawValue::NULL).get().to_string()),
                 };
                 self.emit(Evt::LspAnswer {
                     worktree: self.worktree.clone(),
@@ -872,24 +942,35 @@ impl Session {
     /// everything else gets the error the specification defines. Saying nothing
     /// is the one thing that must not happen: a server that registers a
     /// capability and waits for the acknowledgement stops there.
-    fn serve(&mut self, stdin: &mut impl std::io::Write, id: Value, method: &str, message: &Value) {
+    fn serve(
+        &mut self,
+        stdin: &mut impl std::io::Write,
+        id: Value,
+        method: &str,
+        message: &Incoming,
+    ) {
         // The one request we cannot answer from here: applying an edit is the
         // view's to do — it holds the buffer, and it is the only one that knows
         // whether the file is open. The answer comes back as `Ask::Applied`,
         // under the stand-in the view was given for the server's id.
         if method == "workspace/applyEdit" {
+            #[derive(Deserialize)]
+            struct ApplyEdit<'a> {
+                #[serde(default, borrow)]
+                edit: Option<&'a RawValue>,
+            }
             let edit = message
-                .get("params")
-                .and_then(|p| p.get("edit"))
-                .cloned()
-                .unwrap_or(Value::Null);
+                .params
+                .and_then(|p| serde_json::from_str::<ApplyEdit>(p.get()).ok())
+                .and_then(|p| p.edit)
+                .unwrap_or(RawValue::NULL);
             let token = self.next_ask;
             self.next_ask += 1;
             self.server_asks.insert(token, id);
             self.emit(Evt::LspApplyEdit {
                 worktree: self.worktree.clone(),
                 id: token,
-                edit: edit.to_string(),
+                edit: edit.get().to_string(),
             });
             return;
         }
@@ -900,8 +981,8 @@ impl Session {
             // is how a client says "take your defaults".
             "workspace/configuration" => {
                 let items = message
-                    .get("params")
-                    .and_then(|p| p.get("items"))
+                    .params()
+                    .get("items")
                     .and_then(Value::as_array)
                     .map(Vec::len)
                     .unwrap_or(0);
@@ -925,19 +1006,27 @@ impl Session {
         }
     }
 
-    fn notification(&self, method: &str, message: &Value) {
-        let params = message.get("params");
+    fn notification(&self, method: &str, message: &Incoming) {
         match method {
+            // The largest of them, pushed after every change: the diagnostics
+            // go to the view as the text they came in.
             "textDocument/publishDiagnostics" => {
-                let Some(params) = params else { return };
-                let Some(path) = params
-                    .get("uri")
-                    .and_then(Value::as_str)
-                    .and_then(uri::path)
+                #[derive(Deserialize)]
+                struct Published<'a> {
+                    uri: String,
+                    #[serde(default, borrow)]
+                    diagnostics: Option<&'a RawValue>,
+                }
+                let Some(published) = message
+                    .params
+                    .and_then(|p| serde_json::from_str::<Published>(p.get()).ok())
                 else {
                     return;
                 };
-                let diagnostics = params.get("diagnostics").cloned().unwrap_or(json!([]));
+                let Some(path) = uri::path(&published.uri) else {
+                    return;
+                };
+                let diagnostics = published.diagnostics.map_or("[]", RawValue::get);
                 self.emit(Evt::LspDiagnostics {
                     worktree: self.worktree.clone(),
                     path,
@@ -948,7 +1037,8 @@ impl Session {
             // completion thin for the first ten seconds": PHPantom builds its
             // index in layers, and says so here.
             "$/progress" => {
-                let value = params.and_then(|p| p.get("value"));
+                let params = message.params();
+                let value = params.get("value");
                 let kind = value.and_then(|v| v.get("kind")).and_then(Value::as_str);
                 let message = match kind {
                     Some("end") => None,
@@ -960,10 +1050,7 @@ impl Session {
                 });
             }
             "window/logMessage" | "window/showMessage" => {
-                if let Some(text) = params
-                    .and_then(|p| p.get("message"))
-                    .and_then(Value::as_str)
-                {
+                if let Some(text) = message.params().get("message").and_then(Value::as_str) {
                     log::debug!(target: "lsp", "{}: {text}", self.server.name);
                 }
             }
@@ -1601,5 +1688,100 @@ mod tests {
             "vendor"
         );
         assert!(progress_text(&json!({"kind": "end"})).is_none());
+    }
+
+    /// The envelope reads what decides, and leaves the rest as it came.
+    #[test]
+    fn the_envelope_reads_answers_notifications_and_errors() {
+        let answer: Incoming =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":4,"result":{ "items" : [1, 2] }}"#)
+                .unwrap();
+        assert_eq!(answer.id, Some(json!(4)));
+        assert_eq!(answer.method, None);
+        // Byte for byte, spaces included: nothing was parsed into a tree.
+        assert_eq!(answer.result.unwrap().get(), r#"{ "items" : [1, 2] }"#);
+
+        let empty: Incoming =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":"4","result":null}"#).unwrap();
+        assert_eq!(empty.id, Some(json!("4")));
+        assert!(empty.result.is_none());
+
+        let refused: Incoming = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32603,"message":"no"}}"#,
+        )
+        .unwrap();
+        assert_eq!(refused.error.unwrap()["message"], "no");
+        assert!(refused.result.is_none());
+
+        let pushed: Incoming = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":null,"method":"$/progress","params":{"token":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(pushed.id, None, "a null id is no id");
+        assert_eq!(pushed.method.as_deref(), Some("$/progress"));
+        assert_eq!(pushed.params(), json!({"token": 1}));
+    }
+
+    /// An answer and the diagnostics reach the view as the server wrote them,
+    /// a `null` or absent result as `null`, a refusal as its message — and
+    /// the view's params reach the server as the view wrote them.
+    #[test]
+    fn raw_json_crosses_the_session_untouched() {
+        let request = |id| {
+            Message::Ask(Ask::Request {
+                id,
+                method: "textDocument/hover".into(),
+                params: r#"{ "position" : {"line": 1, "character": 7} }"#.into(),
+            })
+        };
+        let (written, events) = drive(vec![
+            answer(1, json!({"capabilities": {"hoverProvider": true}})),
+            request(10),
+            request(11),
+            request(12),
+            request(13),
+            Message::Incoming(r#"{"jsonrpc":"2.0","id":2,"result":{ "contents" : "x" }}"#.into()),
+            Message::Incoming(r#"{"jsonrpc":"2.0","id":3,"result":null}"#.into()),
+            Message::Incoming(r#"{"jsonrpc":"2.0","id":4}"#.into()),
+            Message::Incoming(
+                r#"{"jsonrpc":"2.0","id":5,"error":{"code":-32603,"message":"no index"}}"#.into(),
+            ),
+            Message::Incoming(
+                r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics",
+                    "params":{"uri":"file:///p/site/a.php","diagnostics":[ {"message":"m"} ]}}"#
+                    .into(),
+            ),
+        ]);
+        assert!(written.contains(r#""params":{ "position" : {"line": 1, "character": 7} }"#));
+        let answers: Vec<(u64, Result<String, String>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Evt::LspAnswer { id, result, .. } => Some((*id, result.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answers,
+            [
+                (10, Ok(r#"{ "contents" : "x" }"#.to_string())),
+                (11, Ok("null".to_string())),
+                (12, Ok("null".to_string())),
+                (13, Err("no index".to_string())),
+            ]
+        );
+        let diagnostics = events.iter().find_map(|event| match event {
+            Evt::LspDiagnostics { diagnostics, .. } => Some(diagnostics.as_str()),
+            _ => None,
+        });
+        assert_eq!(diagnostics, Some(r#"[ {"message":"m"} ]"#));
+        match &events[0] {
+            Evt::LspReady { capabilities, .. } => {
+                assert_eq!(
+                    serde_json::from_str::<Value>(capabilities).unwrap(),
+                    json!({"hoverProvider": true})
+                )
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
