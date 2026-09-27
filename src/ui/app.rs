@@ -1138,6 +1138,10 @@ pub struct ClaudhubApp {
     pub(super) home_terminal: HashMap<PathBuf, u64>,
     /// The boards whose git tab shows the history rather than the changes.
     pub(super) git_history: std::collections::HashSet<PathBuf>,
+    /// The dividers of each board's two-sided views, by board and view —
+    /// see `focus_view::two_sides`.
+    pub(super) board_splits:
+        HashMap<(PathBuf, &'static str), Entity<gpui_kit::component::resizable::ResizableState>>,
     /// The PR tab's form, for the worktree it was made for — see
     /// `ui::pr_view`.
     pub(super) pr_form: Option<crate::ui::pr_view::PrForm>,
@@ -1642,6 +1646,7 @@ impl ClaudhubApp {
             focus_note_shown: HashMap::new(),
             home_terminal: HashMap::new(),
             git_history: Default::default(),
+            board_splits: HashMap::new(),
             pr_form: None,
             pr_reply: None,
             focus_chosen: crate::ui::store::Store::global(cx)

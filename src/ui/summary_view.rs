@@ -36,6 +36,8 @@ use crate::ui::overview::{self, Doing, Node};
 pub(super) const HOME_LEAST: f32 = HOME_LEFT_MIN + 12. + HOME_RIGHT_MIN;
 const HOME_LEFT_MIN: f32 = 300.;
 const HOME_RIGHT_MIN: f32 = 360.;
+/// Where the divider between the cards and the terminals starts.
+const HOME_START: f32 = 460.;
 /// The open tasks the home lists; the tab has the rest.
 const HOME_TASKS: usize = 12;
 /// The lines of the principal note the home shows.
@@ -255,10 +257,7 @@ impl ClaudhubApp {
         }
         let left = v_flex()
             .id("focus-home-left")
-            .flex_grow(2.)
-            .flex_basis(px(0.))
-            .min_w(px(HOME_LEFT_MIN))
-            .h_full()
+            .size_full()
             .gap_3()
             .overflow_y_scroll()
             .child(self.home_branch(path, cx))
@@ -267,25 +266,15 @@ impl ClaudhubApp {
             .child(self.home_review(path, cx))
             .child(self.home_tasks(path, cx))
             .child(self.home_note(path, cx))
-            .children(self.home_run(path, cx));
-        let right = v_flex()
-            .flex_grow(3.)
-            .flex_basis(px(0.))
-            .min_w(px(HOME_RIGHT_MIN))
-            .h_full()
-            .child(self.home_terminals(path, at_work, window, cx));
-        v_flex()
+            .children(self.home_run(path, cx))
+            .into_any_element();
+        let right = self.home_terminals(path, at_work, window, cx);
+        // The divider between the cards and the terminals is the hand's.
+        let sides = self.two_sides(path, "home", HOME_START, left, right, cx);
+        div()
             .id(SharedString::from(format!("focus-home-{}", path.display())))
             .size_full()
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .gap_3()
-                    .child(left)
-                    .child(right),
-            )
+            .child(sides)
             .into_any_element()
     }
 

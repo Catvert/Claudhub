@@ -35,6 +35,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenu},
+    resizable::{h_resizable, resizable_panel, ResizableState},
     v_flex, ActiveTheme, Selectable as _, Sizable as _,
 };
 use gpui_kit::{
@@ -1306,12 +1307,11 @@ impl ClaudhubApp {
                 .border_color(theme.border)
                 .bg(theme.background)
         };
-        h_flex()
-            .size_full()
-            .gap_2()
-            .child(boxed(v_flex().flex_grow(3.).flex_basis(px(0.)).min_w(px(420.))).child(history))
-            .child(boxed(v_flex().flex_grow(2.).flex_basis(px(0.)).min_w_0()).child(diff))
-            .into_any_element()
+        let start = boxed(v_flex().size_full())
+            .child(history)
+            .into_any_element();
+        let end = boxed(v_flex().size_full()).child(diff).into_any_element();
+        self.two_sides(path, "history", 640., start, end, cx)
     }
 
     /// The git view's changes: the commit sheet laid in the board.
@@ -1429,42 +1429,33 @@ impl ClaudhubApp {
             (list, diff)
         };
         let border = theme.border;
-        h_flex()
+        let start = v_flex()
             .size_full()
             .gap_2()
+            .child(facts)
             .child(
                 v_flex()
-                    .flex_none()
-                    .w(px(GIT_LIST_WIDTH))
-                    .h_full()
-                    .gap_2()
-                    .child(facts)
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .overflow_hidden()
-                            .rounded(theme.radius_lg)
-                            .border_1()
-                            .border_color(border)
-                            .bg(theme.background)
-                            .child(list),
-                    ),
-            )
-            .child(
-                div()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
+                    .min_h_0()
+                    .w_full()
                     .overflow_hidden()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(border)
                     .bg(theme.background)
-                    .child(diff),
+                    .child(list),
             )
-            .into_any_element()
+            .into_any_element();
+        let end = div()
+            .size_full()
+            .overflow_hidden()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(border)
+            .bg(theme.background)
+            .child(diff)
+            .into_any_element();
+        self.two_sides(path, "git", GIT_LIST_WIDTH, start, end, cx)
     }
 
     /// Brings the diff to the changes in progress for the git view — the
@@ -1498,7 +1489,7 @@ impl ClaudhubApp {
     /// The notes view: the list on the left — each with its pin, the
     /// principal one first — and the note chosen on the right, the
     /// principal one until another is pressed.
-    fn render_notes_view(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    fn render_notes_view(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let principal = self.principal_note(path, cx);
         let pinned = super::store::Store::global(cx)
@@ -1569,31 +1560,19 @@ impl ClaudhubApp {
                     .into_any_element()
             })
             .collect();
-        h_flex()
+        let start = v_flex()
+            .id("focus-notes-list")
             .size_full()
-            .gap_2()
-            .child(
-                v_flex()
-                    .id("focus-notes-list")
-                    .flex_none()
-                    .w(px(NOTES_LIST_WIDTH))
-                    .h_full()
-                    .py_1()
-                    .overflow_y_scroll()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .children(rows),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.render_home_note(&shown, 1., cx)),
-            )
-            .into_any_element()
+            .py_1()
+            .overflow_y_scroll()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .children(rows)
+            .into_any_element();
+        let end = self.render_home_note(&shown, 1., cx);
+        self.two_sides(path, "notes", NOTES_LIST_WIDTH, start, end, cx)
     }
 
     /// The tests view — the editor's two panels side by side: the tree of
@@ -1619,12 +1598,9 @@ impl ClaudhubApp {
                 .border_color(theme.border)
                 .bg(theme.background)
         };
-        h_flex()
-            .size_full()
-            .gap_2()
-            .child(boxed(v_flex().flex_none().w(px(TESTS_LIST_WIDTH))).child(tree))
-            .child(boxed(v_flex().flex_1().min_w_0()).child(run))
-            .into_any_element()
+        let start = boxed(v_flex().size_full()).child(tree).into_any_element();
+        let end = boxed(v_flex().size_full()).child(run).into_any_element();
+        self.two_sides(path, "tests", TESTS_LIST_WIDTH, start, end, cx)
     }
 
     /// The to-do view: the notes panel's list — ticked, edited, added to in
@@ -1759,6 +1735,37 @@ impl ClaudhubApp {
         if let Some(view) = self.terminals.last().map(|terminal| terminal.view.clone()) {
             super::dialogs::focus_field(&view, window, cx);
         }
+    }
+
+    /// A view's two sides with the divider between them that the hand drags:
+    /// `start` given `start_width` to begin with, `end` the rest. Its sizes
+    /// are the board's own — two boards side by side, one divider each.
+    pub(super) fn two_sides(
+        &mut self,
+        path: &Path,
+        key: &'static str,
+        start_width: f32,
+        start: AnyElement,
+        end: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self
+            .board_splits
+            .entry((path.to_path_buf(), key))
+            .or_insert_with(|| cx.new(|_| ResizableState::default()))
+            .clone();
+        h_resizable(SharedString::from(format!(
+            "board-split-{key}-{}",
+            path.display()
+        )))
+        .with_state(&state)
+        .child(
+            resizable_panel()
+                .size(px(start_width))
+                .child(div().size_full().pr_1().child(start)),
+        )
+        .child(resizable_panel().child(div().size_full().pl_1().child(end)))
+        .into_any_element()
     }
 
     /// What a thing is called, with its glyph.

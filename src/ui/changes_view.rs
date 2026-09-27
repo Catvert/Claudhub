@@ -42,7 +42,7 @@ use crate::ui::overview::{self, Node};
 const MAX_WIDTH: gpui_kit::Pixels = px(1440.);
 const MAX_HEIGHT: gpui_kit::Pixels = px(900.);
 /// The list's column in the review; the diff takes the rest.
-const LIST_WIDTH: gpui_kit::Pixels = px(380.);
+const LIST_WIDTH: gpui_kit::Pixels = px(REVIEW_LIST_WIDTH);
 /// The same, as a board lays it out.
 pub(super) const REVIEW_LIST_WIDTH: f32 = 380.;
 /// The list's height in the review card; the diff takes the rest.
@@ -512,21 +512,20 @@ impl ClaudhubApp {
             };
             let border = theme.border;
             if wide {
-                h_flex()
+                // The divider between them is the board's to drag.
+                let start = v_flex()
+                    .size_full()
+                    .overflow_hidden()
+                    .border_r_1()
+                    .border_color(border)
+                    .child(list)
+                    .into_any_element();
+                let end = div().size_full().child(diff).into_any_element();
+                div()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(
-                        v_flex()
-                            .flex_none()
-                            .w(LIST_WIDTH)
-                            .h_full()
-                            .overflow_hidden()
-                            .border_r_1()
-                            .border_color(border)
-                            .child(list),
-                    )
-                    .child(div().flex_1().min_w_0().h_full().child(diff))
+                    .child(self.two_sides(path, "review", REVIEW_LIST_WIDTH, start, end, cx))
                     .into_any_element()
             } else {
                 v_flex()
