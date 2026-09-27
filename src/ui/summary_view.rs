@@ -85,15 +85,6 @@ impl ClaudhubApp {
                         .map(|todo| todo.tasks.len() - todo.done())
                         .filter(|open| *open > 0),
                     View::Terminals => Some(self.board_terminals(path).len()).filter(|n| *n > 0),
-                    // The threads still open, once read for the branch's PR.
-                    View::Pr => self
-                        .branch_pr()
-                        .filter(|pr| {
-                            self.active.as_deref() == Some(path)
-                                && self.github.view_threads_for == Some(pr.number)
-                        })
-                        .map(|_| crate::github::unresolved(&self.github.view_threads).len())
-                        .filter(|open| *open > 0),
                     // The tests in red, as the last run left them.
                     View::Tests => self
                         .pest
@@ -106,7 +97,8 @@ impl ClaudhubApp {
                                 .count()
                         })
                         .filter(|failed| *failed > 0),
-                    View::Home | View::Review | View::Notes => None,
+                    // The review and the PR are faces of the git tab.
+                    View::Home | View::Review | View::Pr | View::Notes => None,
                 };
                 // The agents' tab wears the loudest of them.
                 let signal = (tab == View::Terminals)

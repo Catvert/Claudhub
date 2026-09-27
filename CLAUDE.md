@@ -403,7 +403,7 @@ bord. **Le titre d'un tableau est à lui et défile avec lui** (`board_title`) :
 placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
 
 - **Des onglets et une seule vue** (`focus::View`, retenue par worktree) :
-  Accueil, Git, Revue, PR, Tests, note principale, TODO, Terminaux. Des vues de types
+  Accueil, Git, Tests, note principale, TODO, Terminaux. Des vues de types
   différents côte à côte ont été essayées et refusées.
 - **L'Accueil** (`ui::summary_view`) : à gauche l'état en cartes (branche, PR
   et CI, ce qui attend un commit, revue, tâches, note principale, ce qui
@@ -416,7 +416,7 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
   qu'aucune feuille ne peint les mêmes panneaux — une liste virtuelle peinte
   deux fois partagerait son défilement. La PR et la CI ne sont lues que pour le
   worktree regardé : l'état GitHub n'en suit qu'un.
-- **L'onglet PR** (`ui::pr_view`) : sans PR, le formulaire est l'onglet (titre
+- **La PR** (`ui::pr_view`, une face de Git) : sans PR, le formulaire est l'onglet (titre
   et corps d'après les commits, base de la revue) ; avec une PR, son état, ses
   vérifications, ses fils de revue — répondus et résolus d'ici par GraphQL,
   le corps en variable et jamais dans la requête — et prête / brouillon /
@@ -424,9 +424,11 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
 - **Une vue à deux côtés a son séparateur** (`two_sides`), dont l'état est
   rangé par tableau et par vue : un même séparateur peint dans deux tableaux
   à la fois se disputerait sa mesure.
-- **L'onglet Git** a deux faces : les modifications (la feuille de validation
-  posée dans le tableau) et l'historique (le panneau de l'éditeur — graphe,
-  recherche, fichiers du commit — à côté du diff du commit choisi).
+- **L'onglet Git a quatre faces** (`focus::GitFace`) : les modifications (la
+  feuille de validation posée dans le tableau), l'historique (le panneau de
+  l'éditeur à côté du diff du commit choisi), la revue et la PR. `View::Review`
+  et `View::Pr` restent des vues — le magasin peut les tenir, les cartes les
+  ouvrent — et atterrissent sur leur face (`focus::landing`).
 - **L'onglet Tests** montre par défaut les seuls tests écrits dans un fichier
   que la branche a touché — depuis sa base ou en cours (`branch_touched`,
   `tests_view::rows_among`) ; le même filtre existe, éteint, dans l'éditeur.

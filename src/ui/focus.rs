@@ -19,9 +19,12 @@ pub enum View {
     /// The branch, how far it is from its remote and its base, and what
     /// waits for a commit.
     Git,
-    /// What the branch has written since its base.
+    /// What the branch has written since its base — a face of the git tab
+    /// (`GitFace::Review`), kept as a view for the store, which may hold it,
+    /// and for the home's cards, which open it.
     Review,
-    /// The branch's pull request, or the form that opens one.
+    /// The branch's pull request, or the form that opens one — a face of
+    /// the git tab too (`GitFace::Pr`), for the same reasons.
     Pr,
     /// Its tests — the ones the branch touched, by default — and the run
     /// being followed.
@@ -36,11 +39,9 @@ pub enum View {
 
 impl View {
     /// In the tabs' order.
-    pub const ALL: [View; 8] = [
+    pub const ALL: [View; 6] = [
         View::Home,
         View::Git,
-        View::Review,
-        View::Pr,
         View::Tests,
         View::Notes,
         View::Todo,
@@ -48,9 +49,42 @@ impl View {
     ];
 }
 
-/// The view a board shows: the one chosen, else its home.
+/// A face of the git tab: what waits for a commit, the history, what the
+/// branch has written since its base, its pull request. Everything the
+/// branch is, under one tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GitFace {
+    #[default]
+    Changes,
+    History,
+    Review,
+    Pr,
+}
+
+impl GitFace {
+    /// In the git tab's order.
+    pub const ALL: [GitFace; 4] = [
+        GitFace::Changes,
+        GitFace::History,
+        GitFace::Review,
+        GitFace::Pr,
+    ];
+}
+
+/// Where asking for a view lands: the review and the pull request are faces
+/// of the git tab, which is the tab shown, on that face.
+pub fn landing(view: View) -> (View, Option<GitFace>) {
+    match view {
+        View::Review => (View::Git, Some(GitFace::Review)),
+        View::Pr => (View::Git, Some(GitFace::Pr)),
+        other => (other, None),
+    }
+}
+
+/// The view a board shows: the one chosen — the git tab for one of its
+/// faces —, else its home.
 pub fn view_of(chosen: Option<View>) -> View {
-    chosen.unwrap_or(View::Home)
+    landing(chosen.unwrap_or(View::Home)).0
 }
 
 /// The principal note among a worktree's — `(path, created)` —: the one
@@ -308,11 +342,15 @@ mod tests {
         assert_eq!(principal_note(None, &[]), None);
     }
 
-    /// A board opens on its home; on what was chosen, once chosen.
+    /// A board opens on its home; on what was chosen, once chosen — the
+    /// review and the pull request being the git tab's.
     #[test]
     fn a_board_opens_on_its_home() {
         assert_eq!(view_of(None), View::Home);
         assert_eq!(view_of(Some(View::Todo)), View::Todo);
+        assert_eq!(view_of(Some(View::Pr)), View::Git);
+        assert_eq!(landing(View::Review), (View::Git, Some(GitFace::Review)));
+        assert!(!View::ALL.contains(&View::Pr));
     }
 
     /// The heaviest first, each against the heaviest.

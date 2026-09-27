@@ -44,7 +44,7 @@ use gpui_kit::{
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use crate::ui::focus::{self, View};
+use crate::ui::focus::{self, GitFace, View};
 use crate::ui::icons::icon;
 use crate::ui::motion::Axes;
 use crate::ui::overview::{self, Doing, HomeMode, Node};
@@ -64,6 +64,8 @@ const GIT_COMMITS: usize = 5;
 /// The git view's left column — the branch and the Changes panel —, the
 /// diff taking the rest.
 const GIT_LIST_WIDTH: f32 = 380.;
+/// The git tab's history, left of the commit's diff.
+const HISTORY_WIDTH: f32 = 640.;
 /// The tests view's tree, left of the run it follows.
 const TESTS_LIST_WIDTH: f32 = 420.;
 /// The notes view's list, left of the note it shows.
@@ -1060,8 +1062,13 @@ impl ClaudhubApp {
         focus::view_of(chosen)
     }
 
-    /// Puts a view on a board, in the place of the one there.
+    /// Puts a view on a board, in the place of the one there — the git tab,
+    /// on its face, for the review or the pull request.
     pub(super) fn show_board_view(&mut self, path: &Path, view: View, cx: &mut Context<Self>) {
+        let (view, face) = focus::landing(view);
+        if let Some(face) = face {
+            self.git_face.insert(path.to_path_buf(), face);
+        }
         super::store::Store::update_global(cx, |store| {
             store
                 .worktrees
@@ -1095,10 +1102,16 @@ impl ClaudhubApp {
         // terminals, not the board.
         let least_width = match view {
             View::Home => super::summary_view::HOME_LEAST,
-            View::Git => GIT_LIST_WIDTH.max(420.) + 8. + column_min,
+            View::Git | View::Review | View::Pr => {
+                match self.git_face.get(path).copied().unwrap_or_default() {
+                    GitFace::Changes => GIT_LIST_WIDTH + 8. + column_min,
+                    GitFace::History => HISTORY_WIDTH + 8. + column_min,
+                    GitFace::Review => super::changes_view::REVIEW_LIST_WIDTH + column_min,
+                    GitFace::Pr => column_min,
+                }
+            }
             View::Notes => NOTES_LIST_WIDTH + 8. + column_min,
-            View::Review => super::changes_view::REVIEW_LIST_WIDTH + column_min,
-            View::Todo | View::Terminals | View::Pr => column_min,
+            View::Todo | View::Terminals => column_min,
             View::Tests => TESTS_LIST_WIDTH + 8. + column_min,
         };
         let open = path.to_path_buf();
@@ -1158,9 +1171,7 @@ impl ClaudhubApp {
     ) -> AnyElement {
         match view {
             View::Home => self.render_home_view(path, at_work, window, cx),
-            View::Git => self.render_git_view(path, window, cx),
-            View::Review => self.render_review_card(path, true, false, window, cx),
-            View::Pr => self.render_pr_view(path, window, cx),
+            View::Git | View::Review | View::Pr => self.render_git_view(path, window, cx),
             View::Tests => self.render_tests_view(path, window, cx),
             View::Notes => self.render_notes_view(path, cx),
             View::Todo => self.render_todo_view(path, cx),
@@ -1227,43 +1238,55 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let history = self.git_history.contains(path);
-        let switch = |id: &'static str, label: SharedString, glyph: &'static str, on: bool| {
-            let board = path.to_path_buf();
-            Button::new(id)
-                .ghost()
-                .small()
-                .icon(icon(glyph))
-                .label(label)
-                .selected(on)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if id == "focus-git-history" {
-                        this.git_history.insert(board.clone());
-                    } else {
-                        this.git_history.remove(&board);
-                    }
-                    cx.notify();
-                }))
-        };
-        let bar = h_flex()
-            .flex_none()
-            .gap_1()
-            .child(switch(
-                "focus-git-changes",
-                tr!("focus-git-changes"),
-                "git-commit-horizontal",
-                !history,
-            ))
-            .child(switch(
-                "focus-git-history",
-                tr!("focus-git-history"),
-                "history",
-                history,
-            ));
-        let body = if history {
-            self.render_git_history(path, window, cx)
-        } else {
-            self.render_git_changes(path, window, cx)
+        let face = self.git_face.get(path).copied().unwrap_or_default();
+        // What waits in a face, beside its name: the files to commit, the
+        // pull request's threads still open.
+        let files = self
+            .summaries
+            .get(path)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| summary.files);
+        let threads = self
+            .branch_pr()
+            .filter(|pr| {
+                self.active.as_deref() == Some(path)
+                    && self.github.view_threads_for == Some(pr.number)
+            })
+            .map(|_| crate::github::unresolved(&self.github.view_threads).len())
+            .filter(|open| *open > 0);
+        let buttons: Vec<AnyElement> = GitFace::ALL
+            .into_iter()
+            .map(|each| {
+                let (glyph, name) = git_face_name(each);
+                let count = match each {
+                    GitFace::Changes => files,
+                    GitFace::Pr => threads,
+                    GitFace::History | GitFace::Review => None,
+                };
+                let label = match count {
+                    Some(count) => SharedString::from(format!("{name} {count}")),
+                    None => name,
+                };
+                let board = path.to_path_buf();
+                Button::new(SharedString::from(format!("focus-git-{each:?}")))
+                    .ghost()
+                    .small()
+                    .icon(icon(glyph))
+                    .label(label)
+                    .selected(each == face)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.git_face.insert(board.clone(), each);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let bar = h_flex().flex_none().gap_1().children(buttons);
+        let body = match face {
+            GitFace::Changes => self.render_git_changes(path, window, cx),
+            GitFace::History => self.render_git_history(path, window, cx),
+            GitFace::Review => self.render_review_card(path, true, false, window, cx),
+            GitFace::Pr => self.render_pr_view(path, window, cx),
         };
         v_flex()
             .size_full()
@@ -1311,7 +1334,7 @@ impl ClaudhubApp {
             .child(history)
             .into_any_element();
         let end = boxed(v_flex().size_full()).child(diff).into_any_element();
-        self.two_sides(path, "history", 640., start, end, cx)
+        self.two_sides(path, "history", HISTORY_WIDTH, start, end, cx)
     }
 
     /// The git view's changes: the commit sheet laid in the board.
@@ -1799,6 +1822,16 @@ impl ClaudhubApp {
             Node::Git(_) | Node::Changes(_) => view_name(View::Git),
             Node::Review(_) => view_name(View::Review),
         }
+    }
+}
+
+/// A face of the git tab's glyph and name.
+fn git_face_name(face: GitFace) -> (&'static str, SharedString) {
+    match face {
+        GitFace::Changes => ("git-commit-horizontal", tr!("focus-git-changes")),
+        GitFace::History => ("history", tr!("focus-git-history")),
+        GitFace::Review => ("file-diff", tr!("focus-review")),
+        GitFace::Pr => ("git-pull-request", tr!("focus-view-pr")),
     }
 }
 
