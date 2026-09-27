@@ -521,11 +521,7 @@ impl Drop for Screencast {
 fn pump_steps(path: &Path, going: &std::sync::atomic::AtomicBool, steps: &(dyn Fn(Step) + Sync)) {
     const POLL: Duration = Duration::from_millis(150);
     let mut read = 0u64;
-    let mut carry = String::new();
-    let mut class = String::new();
-    // TeamCity says `testFailed` **before** `testFinished`; the fate is held
-    // until the line that ends the test.
-    let mut fate: Option<Status> = None;
+    let mut log = Teamcity::default();
     loop {
         let still = going.load(std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut file) = std::fs::File::open(path) {
@@ -534,40 +530,75 @@ fn pump_steps(path: &Path, going: &std::sync::atomic::AtomicBool, steps: &(dyn F
                 let mut fresh = Vec::new();
                 if let Ok(got) = file.read_to_end(&mut fresh) {
                     read += got as u64;
-                    carry.push_str(&String::from_utf8_lossy(&fresh));
+                    log.feed(&fresh, steps);
                 }
-            }
-        }
-        while let Some(at) = carry.find('\n') {
-            let line = carry[..at].to_string();
-            carry.drain(..=at);
-            let Some((kind, rest)) = teamcity(&line) else {
-                continue;
-            };
-            let Some(name) = teamcity_name(rest) else {
-                continue;
-            };
-            match kind {
-                "testSuiteStarted" => class = name.strip_prefix("P\\").unwrap_or(&name).to_string(),
-                "testStarted" => steps(Step {
-                    class: class.clone(),
-                    method: method_key(&name).to_string(),
-                    status: None,
-                }),
-                "testFailed" => fate = Some(Status::Failed),
-                "testIgnored" => fate = Some(Status::Skipped),
-                "testFinished" => steps(Step {
-                    class: class.clone(),
-                    method: method_key(&name).to_string(),
-                    status: Some(fate.take().unwrap_or(Status::Passed)),
-                }),
-                _ => {}
             }
         }
         if !still {
             break;
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// What the TeamCity log has said so far: the bytes of a line not yet ended,
+/// the class being run, the fate of the test not yet finished.
+#[derive(Default)]
+struct Teamcity {
+    carry: Vec<u8>,
+    class: String,
+    /// TeamCity says `testFailed` **before** `testFinished`; the fate is held
+    /// until the line that ends the test.
+    fate: Option<Status>,
+}
+
+impl Teamcity {
+    /// Takes what the file grew by since the last look.
+    ///
+    /// **Bytes, not text, until a line is whole.** A read ends wherever the
+    /// writer was, which may be inside a character: decoded at once, the two
+    /// halves of an `é` became two U+FFFD in a test's name, and the row it
+    /// named was never found. Only complete lines are decoded — and the
+    /// buffer is drained once per read, where a drain per line made a long
+    /// read quadratic.
+    fn feed(&mut self, fresh: &[u8], steps: &dyn Fn(Step)) {
+        let mut carry = std::mem::take(&mut self.carry);
+        carry.extend_from_slice(fresh);
+        let mut start = 0;
+        while let Some(at) = carry[start..].iter().position(|&byte| byte == b'\n') {
+            let end = start + at;
+            self.line(&String::from_utf8_lossy(&carry[start..end]), steps);
+            start = end + 1;
+        }
+        carry.drain(..start);
+        self.carry = carry;
+    }
+
+    fn line(&mut self, line: &str, steps: &dyn Fn(Step)) {
+        let Some((kind, rest)) = teamcity(line) else {
+            return;
+        };
+        let Some(name) = teamcity_name(rest) else {
+            return;
+        };
+        match kind {
+            "testSuiteStarted" => {
+                self.class = name.strip_prefix("P\\").unwrap_or(&name).to_string()
+            }
+            "testStarted" => steps(Step {
+                class: self.class.clone(),
+                method: method_key(&name).to_string(),
+                status: None,
+            }),
+            "testFailed" => self.fate = Some(Status::Failed),
+            "testIgnored" => self.fate = Some(Status::Skipped),
+            "testFinished" => steps(Step {
+                class: self.class.clone(),
+                method: method_key(&name).to_string(),
+                status: Some(self.fate.take().unwrap_or(Status::Passed)),
+            }),
+            _ => {}
+        }
     }
 }
 
@@ -2366,6 +2397,34 @@ mod tests {
             method_key("__pest_evaluable_it_builds\"('App\\Exceptions\\Other')\""),
             "__pest_evaluable_it_builds"
         );
+    }
+
+    /// A read may end inside a character, and inside a line: neither is
+    /// decoded before the next read completes it.
+    #[test]
+    fn a_character_cut_between_two_reads_arrives_whole() {
+        let log = "##teamcity[testSuiteStarted name='P\\Tests\\Unit\\ÉtéTest' flowId='1']\n\
+                   ##teamcity[testStarted name='__pest_evaluable_it_fête_l_été' flowId='1']\n";
+        let bytes = log.as_bytes();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let collect = |step: Step| seen.borrow_mut().push(step);
+        // Every cut, the ones inside `É` and `ê` included.
+        for cut in 0..=bytes.len() {
+            seen.borrow_mut().clear();
+            let mut teamcity = Teamcity::default();
+            teamcity.feed(&bytes[..cut], &collect);
+            teamcity.feed(&bytes[cut..], &collect);
+            assert_eq!(
+                *seen.borrow(),
+                [Step {
+                    class: "Tests\\Unit\\ÉtéTest".into(),
+                    method: "__pest_evaluable_it_fête_l_été".into(),
+                    status: None,
+                }],
+                "cut at byte {cut}"
+            );
+            assert!(teamcity.carry.is_empty());
+        }
     }
 
     /// Reads a whole log as the reader would, the run already over: one last
