@@ -2105,10 +2105,13 @@ fn step_index(current: Option<usize>, delta: isize, len: usize) -> Option<usize>
 /// change, so the command is a no-op on it, and dropping it on a status that has
 /// gone stale — a file written a moment ago — would be a click that did nothing.
 fn worth_sending(status: &Status, paths: Vec<PathBuf>, staged: bool) -> Vec<PathBuf> {
+    // Filed once for the lot: a folder of thousands of files looked each one
+    // up by a walk of the whole status.
+    let index = status.file_index();
     paths
         .into_iter()
         .filter(|path| {
-            match status.file(path) {
+            match index.get(path.as_path()) {
                 // Staging wants something outside the index; unstaging wants
                 // something in it.
                 Some(file) => match staged {

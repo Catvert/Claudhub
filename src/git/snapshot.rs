@@ -401,6 +401,40 @@ mod tests {
             .all(|path| path != "later.txt"));
     }
 
+    /// The tree the list was read against answers each file opened from it,
+    /// and it is that tree — not the disk as it has become since — that the
+    /// file is compared with: the diff agrees with the list it came from.
+    #[test]
+    fn a_file_diffs_against_the_tree_its_list_was_read_against() {
+        let dir = worked_on("since-tree");
+        let point = mark(&dir).unwrap();
+        let range = Range::Since {
+            point: point.commit.clone(),
+        };
+        assert_eq!(Range::Working.disk_tree(&dir).unwrap(), None);
+        std::fs::write(dir.join("tree.txt"), "one\nTWO\nthree\n").unwrap();
+        let tree = range.disk_tree(&dir).unwrap().unwrap();
+        let listed = diff::files_against(&dir, &range, Some(&tree)).unwrap();
+        assert_eq!(listed, diff::files(&dir, &range).unwrap());
+        let given = diff::file_against(&dir, &range, Some(&tree), Path::new("tree.txt"), None, 3);
+        assert_eq!(
+            given.unwrap(),
+            diff::file(&dir, &range, Path::new("tree.txt"), None, 3).unwrap()
+        );
+
+        std::fs::write(dir.join("tree.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        let held = diff::file_against(&dir, &range, Some(&tree), Path::new("tree.txt"), None, 3);
+        let fresh = diff::file(&dir, &range, Path::new("tree.txt"), None, 3).unwrap();
+        let added = |diff: &crate::git::FileDiff| {
+            diff.hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .filter(|line| line.kind == crate::git::DiffLineKind::Added)
+                .count()
+        };
+        assert_eq!((added(&held.unwrap()), added(&fresh)), (1, 2));
+    }
+
     #[test]
     fn a_point_whose_worktree_is_gone_is_pruned_by_the_next_one() {
         let dir = worked_on("prune");

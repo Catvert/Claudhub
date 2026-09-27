@@ -57,12 +57,30 @@ pub enum Range {
 }
 
 impl Range {
+    /// The tree of the state on disk, for the one range compared against it —
+    /// `Since` — and `None` for every other.
+    ///
+    /// Built once when the list is read and handed back with it: each file
+    /// opened from that list then diffs against the same tree, where it used
+    /// to build its own — a copy of the index, an `add -A` and a `write-tree`
+    /// per click.
+    pub fn disk_tree(&self, dir: &Path) -> Result<Option<String>> {
+        match self {
+            Self::Since { .. } => super::snapshot::working_tree(dir).map(Some),
+            _ => Ok(None),
+        }
+    }
+
     /// The revisions handed to `git diff`, once whatever has to be computed
     /// has been. Only `Since` computes something: the tree of the state on
-    /// disk, which is a command of its own.
-    fn resolve(&self, dir: &Path) -> Result<Vec<String>> {
-        match self {
-            Self::Since { point } => Ok(vec![point.clone(), super::snapshot::working_tree(dir)?]),
+    /// disk, which is a command of its own — unless `tree` already is that
+    /// tree (`disk_tree`).
+    fn resolve(&self, dir: &Path, tree: Option<&str>) -> Result<Vec<String>> {
+        match (self, tree) {
+            (Self::Since { point }, Some(tree)) => Ok(vec![point.clone(), tree.to_string()]),
+            (Self::Since { point }, None) => {
+                Ok(vec![point.clone(), super::snapshot::working_tree(dir)?])
+            }
             _ => Ok(self.args()),
         }
     }
@@ -144,12 +162,18 @@ pub struct FileDiff {
 
 /// Lists the review range's files with their volume.
 pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
-    files_in(dir, range, &mut std::collections::HashSet::new())
+    files_against(dir, range, None)
+}
+
+/// `files`, with the disk's tree already built (`Range::disk_tree`).
+pub fn files_against(dir: &Path, range: &Range, tree: Option<&str>) -> Result<Vec<DiffFile>> {
+    files_in(dir, range, tree, &mut std::collections::HashSet::new())
 }
 
 fn files_in(
     dir: &Path,
     range: &Range,
+    tree: Option<&str>,
     seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<Vec<DiffFile>> {
     if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
@@ -163,7 +187,7 @@ fn files_in(
         "--ignore-submodules=none".into(),
         "--submodule=short".into(),
     ];
-    args.extend(range.resolve(dir)?);
+    args.extend(range.resolve(dir, tree)?);
     // The revision list is closed, as it is under `file` — which closes it
     // because it has a path to add. A base named like a directory is refused
     // outright otherwise: `ambiguous argument 'dev': both revision and
@@ -178,7 +202,7 @@ fn files_in(
             .map(|file| file.path.clone())
             .collect();
         for path in submodules {
-            for mut file in files_in(&dir.join(&path), range, seen)? {
+            for mut file in files_in(&dir.join(&path), range, tree, seen)? {
                 file.path = path.join(file.path);
                 file.original = file.original.map(|original| path.join(original));
                 files.push(file);
@@ -205,6 +229,19 @@ pub fn file(
     original: Option<&Path>,
     context: usize,
 ) -> Result<FileDiff> {
+    file_against(dir, range, None, path, original, context)
+}
+
+/// `file`, with the disk's tree already built — the one the list it was
+/// opened from was read against (`Range::disk_tree`).
+pub fn file_against(
+    dir: &Path,
+    range: &Range,
+    tree: Option<&str>,
+    path: &Path,
+    original: Option<&Path>,
+    context: usize,
+) -> Result<FileDiff> {
     let (owner, local) = if matches!(range, Range::Working) {
         super::repo::file_repository(dir, path)
     } else {
@@ -222,8 +259,9 @@ pub fn file(
         (from == owner).then_some(local)
     });
     let (dir, path) = (owner.as_path(), local.as_path());
-    // Once, before the two reads below: under `Since` it builds a tree.
-    let revisions = range.resolve(dir)?;
+    // Once, before the two reads below: under `Since` it builds a tree, unless
+    // the list's is given.
+    let revisions = range.resolve(dir, tree)?;
     let read = |original: Option<&Path>| -> Result<String> {
         let mut args: Vec<String> = vec![
             super::LITERAL_PATHS.into(),

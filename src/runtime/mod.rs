@@ -682,14 +682,24 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             Ok(status) => vec![Evt::Status { worktree, status }],
             Err(e) => vec![fail(Some(worktree), Action::Refresh, e)],
         },
-        Cmd::LoadDiffFiles { worktree, range } => match diff::files(&worktree, &range) {
-            Ok(files) => vec![Evt::DiffFiles {
-                worktree,
-                range,
-                files,
-            }],
-            Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
-        },
+        // Under `Since`, the disk's tree is built once here and travels with
+        // the list, for the files opened from it to diff against.
+        Cmd::LoadDiffFiles { worktree, range } => {
+            match range.disk_tree(&worktree).and_then(|tree| {
+                Ok((
+                    diff::files_against(&worktree, &range, tree.as_deref())?,
+                    tree,
+                ))
+            }) {
+                Ok((files, tree)) => vec![Evt::DiffFiles {
+                    worktree,
+                    range,
+                    files,
+                    tree,
+                }],
+                Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
+            }
+        }
         Cmd::LoadUnstagedDiff {
             worktree,
             path,
@@ -709,7 +719,8 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             original,
             context,
             untracked,
-        } => file_diff(worktree, range, path, original, context, untracked),
+            tree,
+        } => file_diff(worktree, range, path, original, context, untracked, tree),
         Cmd::LoadHistory {
             worktree,
             range,
@@ -768,7 +779,7 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
         },
         Cmd::LoadBranches { main } => match branch::list(&main) {
-            Ok(branches) => vec![branches_evt(main, branches)],
+            Ok(listing) => vec![branches_evt(main, listing)],
             Err(e) => vec![fail(None, Action::Branch, e)],
         },
         Cmd::LoadTags { main } => match tags::list(&main) {
@@ -1531,11 +1542,19 @@ fn file_diff(
     original: Option<PathBuf>,
     context: usize,
     untracked: bool,
+    tree: Option<String>,
 ) -> Vec<Evt> {
     let result = if untracked {
         diff::untracked_file(&worktree, &path)
     } else {
-        diff::file(&worktree, &range, &path, original.as_deref(), context)
+        diff::file_against(
+            &worktree,
+            &range,
+            tree.as_deref(),
+            &path,
+            original.as_deref(),
+            context,
+        )
     };
     match result {
         Ok(diff) => vec![Evt::FileDiff {
@@ -1632,8 +1651,12 @@ fn in_lanes<T: Send>(
     })
 }
 
-fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
-    let integration = branch::start_point(&main);
+/// The list and where new work starts, both read by `branch::list` off the
+/// same references.
+fn branches_evt(
+    main: PathBuf,
+    (branches, integration): (Vec<crate::git::Branch>, Option<String>),
+) -> Evt {
     Evt::Branches {
         main,
         branches,

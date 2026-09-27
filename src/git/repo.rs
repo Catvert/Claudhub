@@ -186,12 +186,26 @@ pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
 /// A nested file belongs to the innermost initialized repository above it.
 /// Stop before the final component: staging a gitlink updates its parent.
 pub(crate) fn file_repository(dir: &Path, path: &Path) -> (PathBuf, PathBuf) {
+    file_repository_among(dir, path, &mut std::collections::HashMap::new())
+}
+
+/// `file_repository`, with the prefixes already tested remembered in `seen`:
+/// a thousand files of one folder asked a `stat` of `.git` per component and
+/// per file, for the same handful of folders.
+fn file_repository_among(
+    dir: &Path,
+    path: &Path,
+    seen: &mut std::collections::HashMap<PathBuf, bool>,
+) -> (PathBuf, PathBuf) {
     let mut prefix = PathBuf::new();
     let mut owner = PathBuf::new();
     if let Some(parent) = path.parent() {
         for part in parent.components() {
             prefix.push(part);
-            if dir.join(&prefix).join(".git").exists() {
+            let nested = *seen
+                .entry(prefix.clone())
+                .or_insert_with(|| dir.join(&prefix).join(".git").exists());
+            if nested {
                 owner = prefix.clone();
             }
         }
@@ -204,8 +218,9 @@ pub(crate) fn file_repository(dir: &Path, path: &Path) -> (PathBuf, PathBuf) {
 
 fn on_file_repositories(dir: &Path, paths: &[PathBuf], command: &[&str]) -> Result<()> {
     let mut grouped = std::collections::BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    let mut seen = std::collections::HashMap::new();
     for path in paths {
-        let (owner, local) = file_repository(dir, path);
+        let (owner, local) = file_repository_among(dir, path, &mut seen);
         grouped.entry(owner).or_default().push(local);
     }
     for (owner, paths) in grouped {
