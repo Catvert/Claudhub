@@ -48,6 +48,20 @@ const HOME_COMMITS: usize = 5;
 const HOME_FILES: usize = 8;
 /// The height the review's list of files scrolls within.
 const HOME_REVIEW_HEIGHT: f32 = 240.;
+
+/// The review card's tree, for the range and the folds it was built under.
+/// Built once per file list — `ReviewState::rows_changed` drops it — and per
+/// fold: every board's card copied the list out and sorted it into a tree at
+/// every frame, thirty a second while an agent works.
+pub(crate) struct ReviewCard {
+    range: crate::git::DiffRange,
+    toggled: std::collections::HashSet<std::path::PathBuf>,
+    rows: std::rc::Rc<Vec<focus::ReviewRow>>,
+    files: usize,
+    added: usize,
+    removed: usize,
+}
+
 impl ClaudhubApp {
     /// A board's tabs — the home first —, each saying what waits in it,
     /// and at the right what adds one more.
@@ -1066,13 +1080,11 @@ impl ClaudhubApp {
     /// the git tab where it is committed.
     fn home_to_commit(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let files: Vec<crate::git::FileStatus> = if self.has_changes(path) {
-            self.review
-                .get(path)
-                .map(|state| state.status.files.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        // Borrowed: the card shows a handful, and the status can list
+        // thousands.
+        let files: &[crate::git::FileStatus] = match self.review.get(path) {
+            Some(state) if self.has_changes(path) => &state.status.files,
+            _ => &[],
         };
         let body = if files.is_empty() {
             div()
@@ -1083,7 +1095,7 @@ impl ClaudhubApp {
         } else {
             let more = files.len().saturating_sub(HOME_FILES);
             let rows: Vec<AnyElement> = files
-                .into_iter()
+                .iter()
                 .take(HOME_FILES)
                 .enumerate()
                 .map(|(index, file)| {
@@ -1167,41 +1179,27 @@ impl ClaudhubApp {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let diff = super::theme::DiffColors::of(cx);
-        let files: Option<Vec<(std::path::PathBuf, usize, usize)>> =
-            self.review.get(path).and_then(|state| {
-                let range = super::review::branch_panel_range(
-                    state.base.as_deref(),
-                    state.review_point.as_ref(),
-                    state.since_review,
-                )?;
-                state.files.get(&range).map(|files| {
-                    files
-                        .iter()
-                        .map(|file| (file.path.clone(), file.added, file.removed))
-                        .collect()
-                })
-            });
+        let card = self.review_card(path);
         let point = self
             .review
             .get(path)
             .and_then(|state| state.review_point.as_ref().map(|point| point.at));
         let open = self.open_findings(path).len();
         let mut rows: Vec<AnyElement> = Vec::new();
-        match &files {
-            Some(files) if files.is_empty() => rows.push(
+        match card {
+            Some((_, 0, _, _)) => rows.push(
                 div()
                     .text_xs()
                     .text_color(muted)
                     .child(tr!("review-clean"))
                     .into_any_element(),
             ),
-            Some(files) => {
-                let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.1, r + f.2));
+            Some((listed, files, added, removed)) => {
                 rows.push(
                     h_flex()
                         .gap_1p5()
                         .text_xs()
-                        .child(tr!("home-files", { count: files.len() }))
+                        .child(tr!("home-files", { count: files }))
                         .child(div().text_color(diff.added_fg).child(format!("+{added}")))
                         .child(
                             div()
@@ -1215,9 +1213,6 @@ impl ClaudhubApp {
                 // a folder folds it. **Virtual**: a branch can carry well over
                 // a thousand files, and every one of them laid out on every
                 // frame slowed the whole window.
-                let empty = std::collections::HashSet::new();
-                let toggled = self.home_review_toggled.get(path).unwrap_or(&empty);
-                let listed = std::rc::Rc::new(focus::review_rows(files, toggled));
                 let count = listed.len();
                 let row = super::theme::row_height(cx);
                 let guide = super::theme::indent_guide(cx);
@@ -1400,6 +1395,44 @@ impl ClaudhubApp {
             body,
             cx,
         )
+    }
+
+    /// The review card's tree and its totals — files, lines added and
+    /// removed —, from its cache: see `ReviewCard`. `None` while the
+    /// branch's list is not in hand.
+    fn review_card(
+        &mut self,
+        path: &Path,
+    ) -> Option<(std::rc::Rc<Vec<focus::ReviewRow>>, usize, usize, usize)> {
+        let state = self.review.get_mut(path)?;
+        let range = super::review::branch_panel_range(
+            state.base.as_deref(),
+            state.review_point.as_ref(),
+            state.since_review,
+        )?;
+        let files = state.files.get(&range)?;
+        let empty = std::collections::HashSet::new();
+        let toggled = self.home_review_toggled.get(path).unwrap_or(&empty);
+        let fresh = state
+            .home_review
+            .as_ref()
+            .is_some_and(|card| card.range == range && card.toggled == *toggled);
+        if !fresh {
+            let listed: Vec<(std::path::PathBuf, usize, usize)> = files
+                .iter()
+                .map(|file| (file.path.clone(), file.added, file.removed))
+                .collect();
+            state.home_review = Some(ReviewCard {
+                rows: std::rc::Rc::new(focus::review_rows(&listed, toggled)),
+                files: listed.len(),
+                added: listed.iter().map(|file| file.1).sum(),
+                removed: listed.iter().map(|file| file.2).sum(),
+                toggled: toggled.clone(),
+                range,
+            });
+        }
+        let card = state.home_review.as_ref()?;
+        Some((card.rows.clone(), card.files, card.added, card.removed))
     }
 
     /// What runs: the environment and the recipes running now, each with

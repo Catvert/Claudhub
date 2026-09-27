@@ -427,6 +427,11 @@ pub struct ReviewState {
     /// lists, the reviews, the collapses. A cache built under an older number
     /// is thrown away.
     pub rows_epoch: u64,
+    /// The home screen's lists of this worktree, built once and dropped with
+    /// `row_cache`: the changes node's files, and the review card's tree —
+    /// each copied out of the state at every frame, per board, before.
+    pub home_changes: Option<crate::ui::changes_view::ChangesList>,
+    pub home_review: Option<crate::ui::summary_view::ReviewCard>,
 }
 
 impl ReviewState {
@@ -437,6 +442,8 @@ impl ReviewState {
     pub fn rows_changed(&mut self) {
         self.rows_epoch += 1;
         self.row_cache.clear();
+        self.home_changes = None;
+        self.home_review = None;
     }
 }
 
@@ -531,6 +538,8 @@ impl Default for ReviewState {
             pending_note: None,
             row_cache: HashMap::new(),
             rows_epoch: 0,
+            home_changes: None,
+            home_review: None,
         }
     }
 }
