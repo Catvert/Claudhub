@@ -224,9 +224,9 @@ src/
                     testé
     focus_view.rs   la vue par défaut de l'accueil : la barre latérale des
                     worktrees (ou son rail), et ceux choisis côte à côte,
-                    chacun sur son tableau, et les vues d'un tableau
-    summary_view.rs l'accueil d'un tableau, sa première colonne : Git, Revue,
-                    note principale, TODO, agents, en résumé
+                    chacun sur son tableau, et les vues sous ses onglets
+    summary_view.rs les onglets d'un tableau, et son Accueil : Git, Revue,
+                    note principale, TODO, agents, en cartes
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes
     revive.rs       les terminaux qui survivent à la fenêtre : quelle session
                     Claude un onglet porte, la commande qui la reprend — pur
@@ -688,20 +688,19 @@ worktree.
   tableau prend sa part de la largeur, **jamais moins que ce qu'il montre**
   — c'est la rangée des tableaux qui défile, jamais un tableau seul — et ce
   qu'il tient dans l'instant est **rangé par worktree**.
-  **Un tableau, c'est un accueil et une vue** (`ui::summary_view`,
-  `ui::focus`) : à gauche un résumé du worktree en cinq sections — Git,
-  Revue, note principale, TODO, agents —, à droite **une seule vue**, le
-  détail de la section pressée, qui prend la place de la précédente ; la vue
-  choisie est retenue par worktree (`focus_view`), et à défaut un tableau
-  s'ouvre sur ses terminaux s'il en a, sinon sur sa revue. Il y a eu des
-  colonnes de cartes arrangées à la main, puis une colonne par type ouvrable
-  côte à côte : dans les deux cas un diff, deux terminaux et une note se
-  disputaient la largeur, et un tableau était à ranger avant d'être à lire.
-  **La note principale** est celle qu'on épingle dans la vue des notes
-  (`pinned_note`), à défaut la plus récente (`focus::principal_note`). Ce
-  qui se fait d'un geste se fait dans l'accueil — une tâche cochée, sur le
-  TODO de n'importe quel worktree (`toggle_task_in`) —, le reste dans la
-  vue. **La Revue et le TODO** sont les panneaux de l'éditeur eux-mêmes, un
+  **Un tableau, ce sont des onglets et une seule vue** (`ui::summary_view`,
+  `ui::focus`) : **Accueil**, Git, Revue, note principale, TODO, agents.
+  L'Accueil est le résumé du worktree en un écran, une carte par section,
+  et une carte pressée ouvre son onglet ; l'onglet choisi est retenu par
+  worktree (`focus_view`), l'Accueil à défaut. Il y a eu des colonnes de
+  cartes arrangées à la main, puis une colonne par type ouvrable côte à
+  côte, puis un résumé en colonne et une vue à côté : un diff, deux
+  terminaux et une note se disputaient la largeur, et le résumé laissait à
+  chaque vue une bande. **La note principale** est celle qu'on épingle dans
+  l'onglet des notes (`pinned_note`), à défaut la plus récente
+  (`focus::principal_note`). Ce qui se fait d'un geste se fait sur la carte
+  — une tâche cochée, sur le TODO de n'importe quel worktree
+  (`toggle_task_in`) —, le reste dans l'onglet. **La Revue et le TODO** sont les panneaux de l'éditeur eux-mêmes, un
   exemplaire de chaque : vivants sur le worktree regardé seulement, et la
   Revue tant qu'aucune feuille ne peint les mêmes panneaux — une liste
   virtuelle peinte deux fois partagerait son défilement. Demander un
@@ -709,7 +708,7 @@ worktree.
   barre latérale porte le signal sur son bord gauche** (`edge_signal`,
   `worktree_doing`, `overview::loudest`) — le plus pressant de ses Claude :
   celui qui attend, puis celui qui travaille —, une pastille du rail aussi,
-  et le glyphe des agents de l'accueil replié ; un cadre pointillé posé sur
+  et l'onglet des agents d'un tableau ; un cadre pointillé posé sur
   un bandeau sélectionné parlait deux langues à la fois. Ne demande des
   frames que ce qui est à l'écran (`prepare_laid_out`) : les tableaux
   montrés et ces habits.
@@ -736,8 +735,8 @@ worktree.
   terminal est un nœud où on le voit travailler, et **cède la place** au
   résultat une fois le fichier là et le tour de l'agent fini — le `status` que
   Claude écrit pour son pid. Ce terminal n'est pas retenu : rouvert, il
-  relancerait la demande. **Sur un tableau, ce `+` est dans la tête de
-  l'accueil.**
+  relancerait la demande. **Sur un tableau, ce `+` est au bout de ses
+  onglets.**
 - **Une revue close s'archive ou se supprime** — toutes remarques résolues, ou
   sa branche fusionnée (plus aucun commit d'avance sur sa base) :
   `.claudhub/archive/`, versionné mais hors de l'accueil. **Une carte de

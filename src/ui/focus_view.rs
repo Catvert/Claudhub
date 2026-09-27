@@ -44,7 +44,6 @@ use gpui_kit::{
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use crate::ui::canvas_view::Hang;
 use crate::ui::focus::{self, View};
 use crate::ui::icons::icon;
 use crate::ui::motion::Axes;
@@ -1072,16 +1071,16 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// What the right of a board shows — see `focus::view_of`.
+    /// The view a board shows under its tabs — see `focus::view_of`.
     pub(super) fn board_view(&self, path: &Path, cx: &App) -> View {
         let chosen = super::store::Store::global(cx)
             .worktrees
             .get(path)
             .and_then(|state| state.focus_view);
-        focus::view_of(chosen, !self.board_terminals(path).is_empty())
+        focus::view_of(chosen)
     }
 
-    /// Puts a view on the right of a board, in the place of the one there.
+    /// Puts a view on a board, in the place of the one there.
     pub(super) fn show_board_view(&mut self, path: &Path, view: View, cx: &mut Context<Self>) {
         super::store::Store::update_global(cx, |store| {
             store
@@ -1267,12 +1266,12 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// A worktree on show: its home, and on its right the one view chosen;
+    /// A worktree on show: its tabs, and the one view chosen under them;
     /// its title is the header's.
     fn render_focus_board(
         &mut self,
         path: &Path,
-        gap: Pixels,
+        _gap: Pixels,
         at_work: &overview::AtWork,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1283,51 +1282,41 @@ impl ClaudhubApp {
             .entry(path.to_path_buf())
             .or_default()
             .clone();
-        *spans.borrow_mut() = vec![(0., 0.); 2];
+        *spans.borrow_mut() = vec![(0., 0.)];
         let column_min = super::settings::Settings::global(cx).terminal.column_min;
         // Terminals stand side by side, each never under the least width.
-        let view_least = match view {
+        let least_width = match view {
             View::Terminals => column_min * self.board_terminals(path).len().max(1) as f32,
             _ => column_min,
         };
-        let least_width = self.summary_width(path, cx) + f32::from(gap) + view_least;
-        let home = self.render_board_summary(path, view, at_work, cx);
+        let tabs = self.render_board_tabs(path, view, at_work, cx);
         let shown = self.render_board_view(path, view, at_work, window, cx);
-        let measured = |rank: usize, spans: Spans| {
-            canvas(
-                move |_, _, _| {},
-                move |bounds, _, _, _| {
-                    if let Some(span) = spans.borrow_mut().get_mut(rank) {
-                        *span = (
-                            f32::from(bounds.origin.x),
-                            f32::from(bounds.origin.x + bounds.size.width),
-                        );
-                    }
-                },
-            )
-            .absolute()
-            .size_full()
-        };
-        let row = h_flex()
+        let measure = canvas(
+            move |_, _, _| {},
+            move |bounds, _, _, _| {
+                if let Some(span) = spans.borrow_mut().first_mut() {
+                    *span = (
+                        f32::from(bounds.origin.x),
+                        f32::from(bounds.origin.x + bounds.size.width),
+                    );
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        let row = v_flex()
             .flex_1()
             .min_h_0()
             .w_full()
-            .gap(gap)
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .h_full()
-                    .child(measured(0, spans.clone()))
-                    .child(home),
-            )
+            .gap_2()
+            .child(tabs)
             .child(
                 div()
                     .relative()
                     .flex_1()
-                    .min_w(px(view_least))
-                    .h_full()
-                    .child(measured(1, spans))
+                    .min_h_0()
+                    .w_full()
+                    .child(measure)
                     .child(shown),
             );
         v_flex()
@@ -1377,8 +1366,7 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The view on the right of a board: its title — what it is, what it
-    /// says of itself, what adds one more — and the whole of it below.
+    /// The view under a board's tabs, whole.
     fn render_board_view(
         &mut self,
         path: &Path,
@@ -1387,80 +1375,18 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (glyph, title) = view_name(view);
-        let detail = self.view_detail(path, view, cx);
-        let add = match view {
-            View::Terminals => {
-                let worktree = path.to_path_buf();
-                Some(
-                    Button::new("focus-view-add")
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("plus"))
-                        .label(tr!("terminal-new"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_focus_terminal(&worktree, window, cx);
-                        })),
-                )
-            }
-            View::Notes => {
-                let worktree = path.to_path_buf();
-                Some(
-                    Button::new("focus-view-add")
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("plus"))
-                        .label(tr!("overview-add-note"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_home_note(Hang::Worktree(worktree.clone()), cx);
-                        })),
-                )
-            }
-            View::Git | View::Review | View::Todo => None,
-        };
-        let head = h_flex()
-            .flex_none()
-            .w_full()
-            .h(super::theme::bar_height(cx))
-            .px_2()
-            .gap_1p5()
-            .items_center()
-            .child(icon(glyph).xsmall().text_color(theme.muted_foreground))
-            .child(
-                div()
-                    .flex_none()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .children(detail),
-            )
-            .children(add);
-        let body = match view {
+        match view {
+            View::Home => self.render_home_view(path, at_work, cx),
             View::Git => self.render_git_view(path, cx),
             View::Review => self.render_review_card(path, true, false, window, cx),
             View::Notes => self.render_notes_view(path, cx),
             View::Todo => self.render_todo_view(path, cx),
             View::Terminals => self.render_terminals_view(path, at_work, window, cx),
-        };
-        v_flex()
-            .size_full()
-            .gap_1()
-            .child(head)
-            .child(div().flex_1().min_h_0().w_full().child(body))
-            .into_any_element()
+        }
     }
 
-    /// What a view's title says beside its name — and what its line in the
-    /// home says too: the files and lines a commit would take, what the
+    /// What a view's tab says of it, beside the view — and its card on the
+    /// home too: the files and lines a commit would take, what the
     /// review compares against, how far the to-do list has come.
     pub(super) fn view_detail(
         &self,
@@ -1504,7 +1430,7 @@ impl ClaudhubApp {
                         .child(tr!("todo-progress", { done: todo.done(), total: todo.tasks.len() }))
                         .into_any_element()
                 }),
-            View::Notes | View::Terminals => None,
+            View::Home | View::Notes | View::Terminals => None,
         }
     }
 
@@ -1881,6 +1807,7 @@ impl ClaudhubApp {
 /// A view's glyph and name.
 pub(super) fn view_name(view: View) -> (&'static str, SharedString) {
     match view {
+        View::Home => ("house", tr!("focus-home")),
         View::Git => ("git-branch", tr!("focus-view-git")),
         View::Review => ("file-diff", tr!("focus-review")),
         View::Notes => ("sticky-note", tr!("focus-view-notes")),

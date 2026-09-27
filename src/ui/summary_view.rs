@@ -1,15 +1,10 @@
-//! A board's home: the first column of a worktree's board, a digest of
-//! everything it holds — its git, its review, its principal note, its
-//! to-do list, its agents — one section each, in `focus::View::ALL`'s order.
+//! A board's tabs, and its home: the digest of a worktree in one screen —
+//! its git, its review, its principal note, its to-do list, its agents —
+//! a card each, in `focus::View::ALL`'s order.
 //!
-//! A section is read at a glance and pressed to go further: the press puts
-//! its view on the right of the board, in the place of the one there, and
-//! the section of the view on show is lit. What is done in one gesture is
-//! done here — a task ticked —, the rest is the view's.
-//!
-//! It folds to a rail of one glyph per section, the agents' wearing the
-//! signal of the loudest of them — the sidebar's edge, which says the same
-//! thing of a worktree.
+//! A card is read at a glance and pressed to go further: the press opens
+//! its tab, the whole of it. What is done in one gesture is done on the
+//! card — a task ticked —, the rest is the tab's.
 
 use std::path::Path;
 
@@ -18,46 +13,31 @@ use gpui_kit::component::{
     checkbox::Checkbox,
     h_flex,
     menu::DropdownMenu as _,
-    v_flex, ActiveTheme, Selectable as _, Sizable as _,
+    v_flex, ActiveTheme, Sizable as _,
 };
-use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, SharedString};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, SharedString};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
 use crate::ui::focus::View;
-use crate::ui::focus_view::{edge_signal, view_name};
+use crate::ui::focus_view::view_name;
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
 
-/// The home's width, and folded to its rail.
-const HOME_WIDTH: f32 = 280.;
-const HOME_RAIL: f32 = 44.;
-/// The open tasks the home lists; the view has the rest.
-const HOME_TASKS: usize = 5;
-/// The lines of the principal note the home shows.
-const HOME_NOTE_LINES: usize = 4;
+/// The least width of a card of the home: under it, the cards wrap.
+const CARD_BASIS: f32 = 340.;
+/// The open tasks a card lists; the tab has the rest.
+const HOME_TASKS: usize = 8;
+/// The lines of the principal note a card shows.
+const HOME_NOTE_LINES: usize = 8;
+/// The commits the git card lists.
+const HOME_COMMITS: usize = 5;
 
 impl ClaudhubApp {
-    /// How wide a board's home is drawn.
-    pub(super) fn summary_width(&self, path: &Path, cx: &App) -> f32 {
-        if home_folded(path, cx) {
-            HOME_RAIL
-        } else {
-            HOME_WIDTH
-        }
-    }
-
-    fn toggle_home(&mut self, path: &Path, cx: &mut Context<Self>) {
-        super::store::Store::update_global(cx, |store| {
-            let state = store.worktrees.entry(path.to_path_buf()).or_default();
-            state.focus_summary_folded = !state.focus_summary_folded;
-        });
-        cx.notify();
-    }
-
-    /// A board's home, or its rail; `view` the one on show.
-    pub(super) fn render_board_summary(
+    /// A board's tabs — the home first —, each saying what waits in it,
+    /// and at the right what adds one more.
+    pub(super) fn render_board_tabs(
         &mut self,
         path: &Path,
         view: View,
@@ -67,98 +47,189 @@ impl ClaudhubApp {
         // Its to-do list and notes are read with the worktree's review
         // state, which a worktree nobody opened does not have yet.
         self.ensure_review(path, cx);
-        if home_folded(path, cx) {
-            return self.render_home_rail(path, view, at_work, cx);
-        }
         let theme = cx.theme().clone();
-        let sections: Vec<AnyElement> = View::ALL
+        let loudest = overview::loudest(
+            self.board_terminals(path)
+                .iter()
+                .filter_map(|id| at_work.terminals.get(id).copied()),
+        );
+        let tabs: Vec<AnyElement> = View::ALL
             .into_iter()
+            .map(|tab| {
+                let (glyph, title) = view_name(tab);
+                let lit = tab == view;
+                let count = match tab {
+                    View::Git => self
+                        .summaries
+                        .get(path)
+                        .filter(|summary| !summary.is_empty())
+                        .map(|summary| summary.files),
+                    View::Todo => self
+                        .review
+                        .get(path)
+                        .and_then(|state| state.todo.as_ref())
+                        .map(|todo| todo.tasks.len() - todo.done())
+                        .filter(|open| *open > 0),
+                    View::Terminals => Some(self.board_terminals(path).len()).filter(|n| *n > 0),
+                    View::Home | View::Review | View::Notes => None,
+                };
+                // The agents' tab wears the loudest of them.
+                let signal = (tab == View::Terminals)
+                    .then(|| match loudest {
+                        Doing::Working => Some(theme.warning),
+                        Doing::Waiting => Some(theme.danger),
+                        Doing::Rest => None,
+                    })
+                    .flatten();
+                let board = path.to_path_buf();
+                h_flex()
+                    .id(SharedString::from(format!("focus-tab-{tab:?}")))
+                    .flex_none()
+                    .h(super::theme::bar_height(cx))
+                    .px_3()
+                    .gap_1p5()
+                    .items_center()
+                    .cursor_pointer()
+                    .rounded(theme.radius)
+                    .text_sm()
+                    .when(lit, |el| {
+                        el.bg(theme.background)
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_color(theme.foreground)
+                    })
+                    .when(!lit, |el| {
+                        el.text_color(theme.muted_foreground)
+                            .hover(|style| style.bg(theme.list_hover))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_board_view(&board, tab, cx);
+                    }))
+                    .child(
+                        icon(glyph)
+                            .xsmall()
+                            .when(lit, |icon| icon.text_color(theme.ring)),
+                    )
+                    .child(title)
+                    .children(count.map(|count| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(count.to_string()))
+                    }))
+                    .children(
+                        signal.map(|tint| div().flex_none().size(px(6.)).rounded_full().bg(tint)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let detail = self.view_detail(path, view, cx);
+        let add = match view {
+            View::Terminals => {
+                let worktree = path.to_path_buf();
+                Some(
+                    Button::new("focus-view-add")
+                        .ghost()
+                        .small()
+                        .icon(icon("plus"))
+                        .label(tr!("terminal-new"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_focus_terminal(&worktree, window, cx);
+                        })),
+                )
+            }
+            View::Notes => {
+                let worktree = path.to_path_buf();
+                Some(
+                    Button::new("focus-view-add")
+                        .ghost()
+                        .small()
+                        .icon(icon("plus"))
+                        .label(tr!("overview-add-note"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_home_note(Hang::Worktree(worktree.clone()), cx);
+                        })),
+                )
+            }
+            _ => None,
+        };
+        let (app, hang) = (cx.entity().downgrade(), Hang::Worktree(path.to_path_buf()));
+        h_flex()
+            .flex_none()
+            .w_full()
+            .gap_1()
+            .items_center()
+            .children(tabs)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .justify_end()
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .children(detail.filter(|_| view != View::Home)),
+            )
+            .children(add)
+            .child(
+                Button::new(SharedString::from(format!(
+                    "focus-board-add-{}",
+                    path.display()
+                )))
+                .ghost()
+                .small()
+                .icon(icon("chevron-down"))
+                .tooltip(tr!("overview-add"))
+                .dropdown_menu(move |menu, _, cx| {
+                    super::overview_view::add_items(&app, &hang, true, menu, cx)
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The home: a card per section, side by side as the width allows.
+    pub(super) fn render_home_view(
+        &mut self,
+        path: &Path,
+        at_work: &overview::AtWork,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cards: Vec<AnyElement> = View::ALL
+            .into_iter()
+            .filter(|section| *section != View::Home)
             .map(|section| {
                 let body = match section {
                     View::Git => self.home_git(path, cx),
                     View::Review => self.home_review(path, cx),
                     View::Notes => self.home_note(path, cx),
                     View::Todo => self.home_todo(path, cx),
-                    View::Terminals => self.home_agents(path, at_work, cx),
+                    _ => self.home_agents(path, at_work, cx),
                 };
-                self.render_home_section(path, section, section == view, body, cx)
+                self.render_home_card(path, section, body, cx)
             })
             .collect();
-        let (app, hang) = (cx.entity().downgrade(), Hang::Worktree(path.to_path_buf()));
-        let fold = {
-            let path = path.to_path_buf();
-            Button::new(SharedString::from(format!(
-                "focus-home-fold-{}",
-                path.display()
-            )))
-            .ghost()
-            .xsmall()
-            .icon(icon("panel-left-close"))
-            .tooltip(tr!("focus-home-fold"))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_home(&path, cx)))
-        };
         v_flex()
-            .flex_none()
-            .w(px(HOME_WIDTH))
-            .h_full()
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
+            .id(SharedString::from(format!("focus-home-{}", path.display())))
+            .size_full()
+            .overflow_y_scroll()
             .child(
                 h_flex()
-                    .flex_none()
-                    .h(super::theme::bar_height(cx))
-                    .pl_3()
-                    .pr_1()
-                    .gap_1()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(icon("house").xsmall().text_color(theme.muted_foreground))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(tr!("focus-home")),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "focus-home-add-{}",
-                            path.display()
-                        )))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("plus"))
-                        .tooltip(tr!("overview-add"))
-                        .dropdown_menu(move |menu, _, cx| {
-                            super::overview_view::add_items(&app, &hang, true, menu, cx)
-                        }),
-                    )
-                    .child(fold),
-            )
-            .child(
-                v_flex()
-                    .id(SharedString::from(format!("focus-home-{}", path.display())))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(sections),
+                    .w_full()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_3()
+                    .children(cards),
             )
             .into_any_element()
     }
 
-    /// A section: its title — lit while its view is on show — and what it
-    /// says of the worktree. A press puts its view on the right.
-    fn render_home_section(
+    /// A card of the home: its title, and what it says of the worktree. A
+    /// press opens its tab.
+    fn render_home_card(
         &self,
         path: &Path,
         section: View,
-        lit: bool,
         body: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -167,48 +238,35 @@ impl ClaudhubApp {
         let board = path.to_path_buf();
         v_flex()
             .id(SharedString::from(format!("focus-home-{section:?}")))
-            .relative()
-            .w_full()
-            .pl_3()
-            .pr_2()
-            .py_2()
-            .gap_1()
+            .flex_grow(1.)
+            .flex_basis(px(CARD_BASIS))
+            .p_3()
+            .gap_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
             .cursor_pointer()
-            .border_b_1()
-            .border_color(theme.border.opacity(0.6))
-            .when(lit, |el| el.bg(theme.list_active))
-            .when(!lit, |el| el.hover(|style| style.bg(theme.list_hover)))
+            .hover(|style| style.border_color(theme.ring.opacity(0.6)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.show_board_view(&board, section, cx);
             }))
-            // The selection is a band with a bar at its edge, as the
-            // sidebar's is.
-            .when(lit, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(2.))
-                        .bg(theme.ring),
-                )
-            })
             .child(
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(icon(glyph).xsmall().text_color(if lit {
-                        theme.ring
-                    } else {
-                        theme.muted_foreground
-                    }))
+                    .child(icon(glyph).xsmall().text_color(theme.muted_foreground))
                     .child(
                         div()
-                            .text_xs()
+                            .flex_1()
+                            .text_sm()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
                             .child(title),
+                    )
+                    .child(
+                        icon("chevron-right")
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
                     ),
             )
             .child(body)
@@ -216,7 +274,7 @@ impl ClaudhubApp {
     }
 
     /// Git: the branch and how far from its remote, the commits ahead of
-    /// its base, what waits for a commit.
+    /// its base, what waits for a commit, the last commits.
     fn home_git(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let branch = self
@@ -238,6 +296,9 @@ impl ClaudhubApp {
                 }
                 (!parts.is_empty()).then(|| SharedString::from(parts.join(" ")))
             });
+        let commits: Vec<_> = outline
+            .map(|outline| outline.commits.iter().take(HOME_COMMITS).cloned().collect())
+            .unwrap_or_default();
         let ahead = outline.and_then(|outline| {
             let base = outline.base.clone()?;
             (outline.ahead_of_base > 0)
@@ -271,6 +332,25 @@ impl ClaudhubApp {
                     .text_color(theme.muted_foreground)
                     .children(self.view_detail(path, View::Git, cx)),
             )
+            .children(commits.into_iter().map(|commit| {
+                h_flex()
+                    .gap_1p5()
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(commit.short)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(commit.subject)),
+                    )
+            }))
             .into_any_element()
     }
 
@@ -470,92 +550,4 @@ impl ClaudhubApp {
             }))
             .into_any_element()
     }
-
-    /// The home folded: a glyph per section, lit for the view on show — a
-    /// press puts its view there — and the unfold at the top.
-    fn render_home_rail(
-        &mut self,
-        path: &Path,
-        view: View,
-        at_work: &overview::AtWork,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let loudest = overview::loudest(
-            self.board_terminals(path)
-                .iter()
-                .filter_map(|id| at_work.terminals.get(id).copied()),
-        );
-        let glyphs: Vec<AnyElement> = View::ALL
-            .into_iter()
-            .map(|section| {
-                let (glyph, title) = view_name(section);
-                let board = path.to_path_buf();
-                div()
-                    .relative()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        Button::new(SharedString::from(format!("focus-rail-{section:?}")))
-                            .ghost()
-                            .small()
-                            .icon(icon(glyph))
-                            .selected(section == view)
-                            .tooltip(title)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.show_board_view(&board, section, cx);
-                            })),
-                    )
-                    .when(section == View::Terminals, |el| {
-                        el.children(edge_signal(Some(&loudest), 2., &theme))
-                    })
-                    .into_any_element()
-            })
-            .collect();
-        let unfold = {
-            let path = path.to_path_buf();
-            Button::new(SharedString::from(format!(
-                "focus-home-unfold-{}",
-                path.display()
-            )))
-            .ghost()
-            .xsmall()
-            .icon(icon("panel-left-open"))
-            .tooltip(tr!("focus-home-unfold"))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_home(&path, cx)))
-        };
-        v_flex()
-            .flex_none()
-            .w(px(HOME_RAIL))
-            .h_full()
-            .items_center()
-            .gap_1()
-            .overflow_hidden()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .child(
-                div()
-                    .flex_none()
-                    .w_full()
-                    .h(super::theme::bar_height(cx))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(unfold),
-            )
-            .children(glyphs)
-            .into_any_element()
-    }
-}
-
-fn home_folded(path: &Path, cx: &App) -> bool {
-    super::store::Store::global(cx)
-        .worktrees
-        .get(path)
-        .is_some_and(|state| state.focus_summary_folded)
 }

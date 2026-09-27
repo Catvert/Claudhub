@@ -1,12 +1,11 @@
-//! The focus view's board: the home of a worktree on the left — a digest of
-//! its git, its review, its principal note, its to-do list and its agents —
-//! and on its right **one** view, the whole of one of them.
+//! The focus view's board: tabs, and **one** view under them — the home, a
+//! digest of the worktree in one screen (its git, its review, its principal
+//! note, its to-do list, its agents), or the whole of one of those.
 //!
-//! The home designates, the view shows, and there is one at a time: views
-//! of different kinds side by side — a diff beside two terminals beside a
-//! note — was a board to arrange before it was a board to read. A press on
-//! a section of the home puts its view on the right, in the place of the
-//! one there; what was chosen is kept per worktree.
+//! One at a time: views of different kinds side by side — a diff beside two
+//! terminals beside a note — was a board to arrange before it was a board
+//! to read, and a digest in a column of its own left each view a strip. A
+//! card of the home opens its tab; the tab chosen is kept per worktree.
 //!
 //! Pure: the view hands in what it knows, this says what shows.
 
@@ -15,6 +14,8 @@ use std::path::{Path, PathBuf};
 /// What the right of a board shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum View {
+    /// The digest of all the others, in one screen.
+    Home,
     /// The branch, how far it is from its remote and its base, and what
     /// waits for a commit.
     Git,
@@ -29,8 +30,9 @@ pub enum View {
 }
 
 impl View {
-    /// In the home's order.
-    pub const ALL: [View; 5] = [
+    /// In the tabs' order.
+    pub const ALL: [View; 6] = [
+        View::Home,
         View::Git,
         View::Review,
         View::Notes,
@@ -39,15 +41,9 @@ impl View {
     ];
 }
 
-/// The view a board shows: the one chosen, else its terminals when it has
-/// any — an agent at work is what one comes to a worktree for — else its
-/// review.
-pub fn view_of(chosen: Option<View>, has_terminals: bool) -> View {
-    chosen.unwrap_or(if has_terminals {
-        View::Terminals
-    } else {
-        View::Review
-    })
+/// The view a board shows: the one chosen, else its home.
+pub fn view_of(chosen: Option<View>) -> View {
+    chosen.unwrap_or(View::Home)
 }
 
 /// The principal note among a worktree's — `(path, created)` —: the one
@@ -336,13 +332,11 @@ mod tests {
         assert_eq!(principal_note(None, &[]), None);
     }
 
-    /// Where a board opens: on its terminals when it has any, else on its
-    /// review; what was chosen, once chosen.
+    /// A board opens on its home; on what was chosen, once chosen.
     #[test]
-    fn a_board_opens_on_its_terminals_else_its_review() {
-        assert_eq!(view_of(None, true), View::Terminals);
-        assert_eq!(view_of(None, false), View::Review);
-        assert_eq!(view_of(Some(View::Todo), true), View::Todo);
+    fn a_board_opens_on_its_home() {
+        assert_eq!(view_of(None), View::Home);
+        assert_eq!(view_of(Some(View::Todo)), View::Todo);
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {

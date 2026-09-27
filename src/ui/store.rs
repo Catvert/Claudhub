@@ -53,8 +53,6 @@ pub struct WorktreeState {
     pub focus_view: Option<crate::ui::focus::View>,
     /// The note its board's home shows as its principal one.
     pub pinned_note: Option<PathBuf>,
-    /// Its board's home folded to its rail.
-    pub focus_summary_folded: bool,
     /// The terminals that were open, in order, to open again — see
     /// `ui::revive`.
     pub terminals: Vec<SavedTerminal>,

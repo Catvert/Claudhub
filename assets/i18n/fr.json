@@ -964,8 +964,6 @@
   "overview-review": "Revue de la branche…",
   "focus-review": "Revue",
   "focus-home": "Accueil",
-  "focus-home-fold": "Réduire l'accueil",
-  "focus-home-unfold": "Déplier l'accueil",
   "focus-home-remarks": "%{count} remarques ouvertes",
   "focus-view-git": "Git",
   "focus-view-notes": "Note principale",

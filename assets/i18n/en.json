@@ -964,8 +964,6 @@
   "overview-review": "Review the branch…",
   "focus-review": "Review",
   "focus-home": "Home",
-  "focus-home-fold": "Collapse the home",
-  "focus-home-unfold": "Expand the home",
   "focus-home-remarks": "%{count} open remarks",
   "focus-view-git": "Git",
   "focus-view-notes": "Principal note",
