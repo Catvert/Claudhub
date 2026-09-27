@@ -1935,15 +1935,9 @@ impl ClaudhubApp {
         // its content: without `min_w_0` on the path — and without the two
         // groups refusing to shrink — a long path pushed the buttons on the
         // right out of the bar, where nothing showed them and nothing said so.
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
             .overflow_hidden()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .flex_shrink_0()

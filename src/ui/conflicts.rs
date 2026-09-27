@@ -114,14 +114,8 @@ impl ClaudhubApp {
         let (muted, warning) = (cx.theme().muted_foreground, cx.theme().warning);
         let mono = cx.theme().mono_font_family.clone();
 
-        let bar = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        let bar = crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(icon("git-merge").xsmall())
             .child(
                 div()

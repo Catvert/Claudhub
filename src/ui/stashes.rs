@@ -434,14 +434,7 @@ impl ClaudhubApp {
             .map(|state| state.items.len())
             .unwrap_or(0);
         let has_active = self.active.is_some();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("archive").xsmall())
             .child(
                 div()

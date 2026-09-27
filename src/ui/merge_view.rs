@@ -639,15 +639,9 @@ impl ClaudhubApp {
                     .child(tr!("merge-all-decided", { count: conflicts }))
             });
 
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
             .overflow_hidden()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(icon("git-merge").xsmall().text_color(warning))
             .child(
                 div()

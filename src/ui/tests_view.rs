@@ -1957,14 +1957,7 @@ impl ClaudhubApp {
                     )
                 })
         };
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("circle-check").xsmall())
             .child(summary)
             .child(self.find_button(Pane::Tests, cx))
@@ -2730,15 +2723,7 @@ impl ClaudhubApp {
         let Some(state) = self.pest_runs.get(worktree) else {
             return div().into_any_element();
         };
-        let bar = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .text_xs();
+        let bar = crate::ui::theme::panel_bar(cx).gap_2().text_xs();
         if state.running {
             // Every id of this campaign, and none other: another worktree's
             // campaign may queue on the same worker, and a stop is by id.

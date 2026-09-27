@@ -1167,14 +1167,7 @@ impl ClaudhubApp {
     fn render_db_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let indexing = !self.db.indexing.is_empty();
         let count = self.db.connections.len();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("database").xsmall())
             .child(
                 div()

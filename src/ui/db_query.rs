@@ -2178,14 +2178,7 @@ impl ClaudhubApp {
             .unwrap_or_else(|| console.host.vim.pending().to_string());
         let status = self.db_status_text(id);
         let rank = id.0 as usize;
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(
                 Button::new(("db-run", rank))
                     .ghost()

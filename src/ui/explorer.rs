@@ -3179,14 +3179,7 @@ impl ClaudhubApp {
         let find = self.find_button(crate::ui::find::Pane::Files, cx);
         let entity = cx.entity();
 
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("folder-open").xsmall().text_color(muted))
             .child(
                 div()
@@ -3558,14 +3551,8 @@ impl ClaudhubApp {
     ) -> impl IntoElement {
         let label = SharedString::from(path.display().to_string());
         let for_external = path.to_path_buf();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(icon("file-text").xsmall())
             .child(
                 div()

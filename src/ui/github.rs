@@ -2234,14 +2234,7 @@ impl ClaudhubApp {
                 .selected(mode == target)
                 .on_click(cx.listener(move |this, _, _window, cx| this.set_github_mode(target, cx)))
         };
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("github").xsmall())
             .child(mode_button(
                 "github-mode-prs",

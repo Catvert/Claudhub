@@ -866,14 +866,8 @@ impl ClaudhubApp {
             .as_ref()
             .map(|dir| SharedString::from(dir.display().to_string()))
             .unwrap_or_else(|| tr!("note-no-vault"));
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(icon("book-open").xsmall())
             .child(
                 div()

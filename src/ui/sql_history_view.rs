@@ -340,14 +340,7 @@ impl ClaudhubApp {
     fn render_sql_history_bar(&mut self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let reach = self.sql_history_reach;
         let entity = cx.entity();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("clock").xsmall())
             .child(
                 div()

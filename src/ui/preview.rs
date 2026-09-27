@@ -206,14 +206,8 @@ impl ClaudhubApp {
             v_flex()
                 .size_full()
                 .child(
-                    h_flex()
-                        .h(crate::ui::theme::bar_height(cx))
-                        .w_full()
-                        .px_2()
+                    crate::ui::theme::panel_bar(cx)
                         .gap_2()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
                         .child(icon("image").xsmall())
                         .child(
                             div()

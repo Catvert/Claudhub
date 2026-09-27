@@ -937,15 +937,7 @@ impl ClaudhubApp {
     }
 
     fn bar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_1()
-            .gap_1()
-            .items_center()
-            .justify_end()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx).px_1().justify_end()
     }
 
     fn tree_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -475,14 +475,7 @@ impl ClaudhubApp {
             tr!("tags-count", { n: count })
         };
         let find = self.find_button(Pane::Tags, cx);
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("tag").xsmall())
             .child(
                 div()

@@ -260,6 +260,21 @@ pub fn bar_height(cx: &App) -> Pixels {
     scaled(cx, 2.2, px(26.))
 }
 
+/// A panel's header bar, empty: the height, the padding, the rule under it.
+///
+/// Every panel completes it with its own children, and a bar that needs a
+/// wider gap or a narrower padding says so after — a later call wins.
+pub fn panel_bar(cx: &App) -> gpui_kit::Div {
+    gpui_kit::component::h_flex()
+        .h(bar_height(cx))
+        .w_full()
+        .px_2()
+        .gap_1()
+        .items_center()
+        .border_b_1()
+        .border_color(gpui_kit::component::ActiveTheme::theme(cx).border)
+}
+
 /// The height of the main toolbar, which carries buttons.
 pub fn toolbar_height(cx: &App) -> Pixels {
     scaled(cx, 2.7, px(32.))

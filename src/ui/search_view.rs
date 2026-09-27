@@ -1216,14 +1216,7 @@ impl ClaudhubApp {
                 .child(div().text_sm().child(tr!("search-preview-empty")))
                 .into_any_element();
         };
-        let header = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        let header = crate::ui::theme::panel_bar(cx)
             // **Left, where the rest of the window puts its buttons right.**
             // The hand arrives from the list this file answers — one row to
             // its left — and a pencil at the far end of a centre-wide bar is a

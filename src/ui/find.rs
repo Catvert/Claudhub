@@ -21,7 +21,6 @@ use std::ops::Range;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    h_flex,
     input::{Input, InputEvent, InputState},
     ActiveTheme, Sizable,
 };
@@ -354,17 +353,11 @@ impl ClaudhubApp {
         let count = self.find_count(pane, &query);
 
         Some(
-            h_flex()
+            crate::ui::theme::panel_bar(cx)
                 // The context only exists under this bar: `Esc` closes the
                 // search here and has nothing to close elsewhere.
                 .key_context(crate::ui::shortcuts::find_context())
-                .h(crate::ui::theme::bar_height(cx))
-                .w_full()
                 .px_1()
-                .gap_1()
-                .items_center()
-                .border_b_1()
-                .border_color(cx.theme().border)
                 .bg(cx.theme().secondary)
                 .child(icon("search").xsmall())
                 .child(div().flex_1().child(Input::new(&input).xsmall()))

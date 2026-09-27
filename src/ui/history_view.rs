@@ -418,14 +418,8 @@ impl ClaudhubApp {
         } else {
             Shape::of(self.history_shape).without_branches()
         };
-        let header = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
+        let header = crate::ui::theme::panel_bar(cx)
             .px_1()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             // **Only where the column of branches is not on screen.** The two
             // are the same two rows that column puts above the branches, and
             // saying it twice would be two controls for one answer, one of
