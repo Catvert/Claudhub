@@ -263,35 +263,16 @@ pub fn head_blob(dir: &Path, path: &Path) -> Option<String> {
 /// Applies (`reverse = false`) or undoes (`reverse = true`) a patch on the
 /// index: that is how an isolated hunk is staged, git having no API for "add
 /// that piece".
+///
+/// Through `git_feeding` like every other command: its ceiling, its
+/// environment and its line in the journal. Written by hand here, it had none
+/// of the three — a hook waiting on a prompt held its worker for good.
 pub fn apply_patch(dir: &Path, patch: &str, reverse: bool) -> Result<()> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(["apply", "--cached", "--unidiff-zero"]);
+    let mut args = vec!["apply", "--cached", "--unidiff-zero"];
     if reverse {
-        cmd.arg("--reverse");
+        args.push("--reverse");
     }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("LC_ALL", "C")
-        .spawn()
-        .context("`git apply` could not start")?;
-    child
-        .stdin
-        .take()
-        .expect("stdin requested as piped")
-        .write_all(patch.as_bytes())
-        .context("writing the patch into `git apply`")?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!("git apply: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(())
+    super::git_feeding(dir, &args, patch.as_bytes().to_vec()).map(|_| ())
 }
 
 pub struct CommitOptions<'a> {
