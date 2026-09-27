@@ -208,7 +208,7 @@ pub async fn export(
 
 fn cells(row: &SqliteRow) -> Vec<Cell> {
     (0..row.columns().len())
-        .map(|index| value_to_cell(row, index))
+        .map(|index| value_to_cell(row, index).map(Into::into))
         .collect()
 }
 
@@ -220,7 +220,7 @@ fn cells(row: &SqliteRow) -> Vec<Cell> {
 /// the fallback for anything else, and it is what keeps the choice invisible.
 /// Going through the cascade for every cell meant up to four failed `try_get`
 /// per value, each of them allocating an error.
-fn value_to_cell(row: &SqliteRow, index: usize) -> Cell {
+fn value_to_cell(row: &SqliteRow, index: usize) -> Option<String> {
     let Ok(value) = row.try_get_raw(index) else {
         return Some("?".to_string());
     };
@@ -258,7 +258,7 @@ fn value_to_cell(row: &SqliteRow, index: usize) -> Cell {
 ///
 /// The order matters: the first successful decode decides the display. Text
 /// first, because an integer stored as text has to read as it was written.
-fn cascade(row: &SqliteRow, index: usize) -> Cell {
+fn cascade(row: &SqliteRow, index: usize) -> Option<String> {
     if let Ok(value) = row.try_get::<String, _>(index) {
         return Some(value);
     }

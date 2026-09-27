@@ -297,7 +297,12 @@ pub struct Column {
 /// rather than a typed value is still the right level — the view does not know
 /// the engine's types, and making them cross would mean one value enum per
 /// driver.
-pub type Cell = Option<String>;
+///
+/// **Shared, not owned**: the table paints every visible cell on every frame,
+/// and a `TEXT` or `JSON` value of several kilobytes was copied each time only
+/// to be truncated; an `Arc<str>` becomes the painted string by a count. It
+/// travels over the wire exactly as a `String` would (serde's `rc`).
+pub type Cell = Option<std::sync::Arc<str>>;
 
 /// A query's result, one page at a time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

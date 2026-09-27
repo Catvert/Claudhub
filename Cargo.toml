@@ -161,7 +161,7 @@ lsp-types = { version = "0.97", optional = true, features = ["proposed"] }
 # cœur évite du même coup une dépendance D-Bus dans un binaire statique.
 keyring = { version = "4", optional = true }
 
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 base64 = "0.22"
 # Le format du fil entre l'interface et `claudhub-server` (runtime::wire).

@@ -361,12 +361,13 @@ fn cells(row: &MySqlRow, decoders: &[Decoder]) -> Vec<Cell> {
                 index,
                 decoders.get(index).copied().unwrap_or(Decoder::Any),
             )
+            .map(Into::into)
         })
         .collect()
 }
 
 /// A column value, as text.
-fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Cell {
+fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Option<String> {
     match row.try_get_raw(index) {
         Ok(value) if value.is_null() => return None,
         Ok(_) => {}
@@ -443,7 +444,7 @@ fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Cell {
 /// The order of attempts goes from the most precise to the most general, and
 /// text comes first: a `DECIMAL(20,4)` arrives as a string, and putting it
 /// through an `f64` would round it.
-fn cascade(row: &MySqlRow, index: usize) -> Cell {
+fn cascade(row: &MySqlRow, index: usize) -> Option<String> {
     if let Ok(value) = row.try_get::<String, _>(index) {
         return Some(value);
     }
@@ -492,7 +493,7 @@ fn cascade(row: &MySqlRow, index: usize) -> Cell {
 /// screen and in the exported CSV, where the server's own text is exact.
 ///
 /// `<?>` is left for bytes that are not even text.
-fn as_sent(row: &MySqlRow, index: usize) -> Cell {
+fn as_sent(row: &MySqlRow, index: usize) -> Option<String> {
     if let Ok(value) = row.try_get_unchecked::<String, _>(index) {
         return Some(value);
     }
