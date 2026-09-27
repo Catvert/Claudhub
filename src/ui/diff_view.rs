@@ -86,6 +86,18 @@ pub struct Rendered {
     /// and the gutter marked everything. What the eye calls a change is the red
     /// and green block; the whole-file view reads these instead, see `blocks`.
     pub changes: Vec<(usize, usize)>,
+    /// Where every hunk's header sits in `rows`: a line named by its hunk and
+    /// its rank is an addition away from its entry.
+    hunk_starts: Vec<usize>,
+    /// For every entry of the unified list, the two-column entry showing it.
+    ///
+    /// The keys walk the displayed list — a search hit, `j`/`k` — and finding
+    /// an entry among the pairs was a sweep of the file per press.
+    split_of: Vec<Option<usize>>,
+    /// `blocks` for its four readings, see `block_slot`: computed here once,
+    /// where the arrows asked for them twice per press and each answer was
+    /// a sweep of the pairs per change.
+    blocks: [Vec<(usize, usize)>; 4],
     /// The heights `v_virtual_list` walks in wrapped mode, kept between frames.
     ///
     /// They depend on the column count and the line height and on nothing else,
@@ -105,11 +117,19 @@ impl Rendered {
         let row_chars: Vec<usize> = rows.iter().map(|row| row_width(&file, *row)).collect();
         let (longest_row, longest_chars) = longest(&row_chars);
         let split = split_rows(&file, &rows);
-        Self {
+        let mut rendered = Self {
             one_sided: one_sided(&file),
             words: word_marks(&file, &rows, &split),
             row_chars,
             changes: changes(&file, &rows),
+            hunk_starts: rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| matches!(row, Row::Header { .. }))
+                .map(|(index, _)| index)
+                .collect(),
+            split_of: split_of(&split, rows.len()),
+            blocks: Default::default(),
             highlights: DiffHighlights::compute(path, &file, theme),
             path: path.to_path_buf(),
             texts: file
@@ -134,7 +154,10 @@ impl Rendered {
             wrap_sizes: std::cell::RefCell::new(None),
             rows,
             file,
-        }
+        };
+        rendered.blocks = [(false, false), (false, true), (true, false), (true, true)]
+            .map(|(split, whole_file)| rendered.find_blocks(split, whole_file));
+        rendered
     }
 
     /// The sizes of the wrapped list, from the cache.
@@ -259,20 +282,16 @@ impl Rendered {
 
     /// The indices of a hunk's first and last line.
     pub fn hunk_bounds(&self, hunk: usize) -> Option<(usize, usize)> {
-        let first = self
-            .rows
-            .iter()
-            .position(|row| matches!(row, Row::Header { hunk: h } if *h == hunk))?;
-        let last = self
-            .rows
-            .iter()
-            .rposition(|row| matches!(row, Row::Line { hunk: h, .. } if *h == hunk))
-            .unwrap_or(first);
-        Some((first, last))
+        let first = *self.hunk_starts.get(hunk)?;
+        let lines = self.file.hunks.get(hunk).map_or(0, |h| h.lines.len());
+        Some((first, first + lines))
     }
 
     /// Which change a displayed entry belongs to — `hunk_of`, for the
     /// whole-file view.
+    ///
+    /// By dichotomy: the changes are sorted and disjoint, and this is asked for
+    /// every visible entry of every frame.
     pub fn change_of(&self, index: usize, split: bool) -> Option<usize> {
         let unified = if split {
             match self.split.get(index)? {
@@ -282,9 +301,12 @@ impl Rendered {
         } else {
             index
         };
-        self.changes
-            .iter()
-            .position(|(first, last)| (*first..=*last).contains(&unified))
+        let candidate = self
+            .changes
+            .partition_point(|(first, _)| *first <= unified)
+            .checked_sub(1)?;
+        let (first, last) = self.changes[candidate];
+        (first..=last).contains(&unified).then_some(candidate)
     }
 
     /// The index, in the displayed list, of a unified entry.
@@ -292,19 +314,22 @@ impl Rendered {
         if !split {
             return Some(unified);
         }
-        self.split
-            .iter()
-            .position(|row| row.unified().any(|index| index == unified))
+        self.split_of.get(unified).copied().flatten()
     }
 
     /// What `j`/`k` stop on and what the gutter marks, in the displayed list:
     /// the hunk headers, or — whole file asked — the first line of every
-    /// change, with the block each one opens, as `(start, end)`.
+    /// change, with the block each one opens, as `(start, end)`, sorted.
     ///
     /// One list for both readings, so that what is marked is what the key
     /// reaches: with the whole file on screen the single header sits at the
     /// top, far from the first change, and would be a stop at nothing.
-    pub fn blocks(&self, split: bool, whole_file: bool) -> Vec<(usize, usize)> {
+    pub fn blocks(&self, split: bool, whole_file: bool) -> &[(usize, usize)] {
+        &self.blocks[block_slot(split, whole_file)]
+    }
+
+    /// `blocks`, computed — once, by `new`.
+    fn find_blocks(&self, split: bool, whole_file: bool) -> Vec<(usize, usize)> {
         if whole_file {
             return self
                 .changes
@@ -378,35 +403,21 @@ impl Rendered {
     /// layout — paired, a removal and the addition answering it sit on the same
     /// entry.
     pub fn display_row(&self, hunk: usize, line: usize, split: bool) -> Option<usize> {
-        let unified = self.rows.iter().position(
-            |row| matches!(row, Row::Line { hunk: h, line: l } if *h == hunk && *l == line),
-        )?;
-        if !split {
-            return Some(unified);
+        if line >= self.file.hunks.get(hunk)?.lines.len() {
+            return None;
         }
-        self.split
-            .iter()
-            .position(|row| row.unified().any(|index| index == unified))
+        // The header, then the lines in order: see `rows`.
+        let unified = self.hunk_starts.get(hunk)? + 1 + line;
+        self.display_index(unified, split)
     }
 
     /// The indices of the hunk headers in the displayed list, in increasing
     /// order.
     pub fn headers(&self, split: bool) -> Vec<usize> {
-        if split {
-            self.split
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| matches!(row, SplitRow::Header { .. }))
-                .map(|(index, _)| index)
-                .collect()
-        } else {
-            self.rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| matches!(row, Row::Header { .. }))
-                .map(|(index, _)| index)
-                .collect()
-        }
+        self.hunk_starts
+            .iter()
+            .filter_map(|start| self.display_index(*start, split))
+            .collect()
     }
 
     /// An entry's text, for measuring as for rendering.
@@ -684,6 +695,26 @@ pub fn split_rows(diff: &FileDiff, rows: &[Row]) -> Vec<SplitRow> {
     }
     pair_up(&mut olds, &mut news, &mut out);
     out
+}
+
+/// For every entry of the unified list, the two-column entry that shows it —
+/// see `Rendered::split_of`. Every entry has one: a header is its own, a line
+/// sits in a pair.
+fn split_of(split: &[SplitRow], unified: usize) -> Vec<Option<usize>> {
+    let mut out = vec![None; unified];
+    for (index, row) in split.iter().enumerate() {
+        for entry in row.unified() {
+            if let Some(slot) = out.get_mut(entry) {
+                *slot = Some(index);
+            }
+        }
+    }
+    out
+}
+
+/// Where `Rendered::blocks` files a reading.
+fn block_slot(split: bool, whole_file: bool) -> usize {
+    usize::from(split) * 2 + usize::from(whole_file)
 }
 
 /// The changed words of every paired line, indexed `[hunk][line]`.
@@ -1201,8 +1232,8 @@ impl ClaudhubApp {
             .and_then(|state| state.diff.as_ref())
             .map(|diff| {
                 diff.blocks(split, whole_file)
-                    .into_iter()
-                    .map(|(start, _)| start)
+                    .iter()
+                    .map(|(start, _)| *start)
                     .collect()
             })
             .unwrap_or_default();
@@ -1275,11 +1306,10 @@ impl ClaudhubApp {
         let Some(diff) = self.active_review().and_then(|state| state.diff.as_ref()) else {
             return 0;
         };
-        let end = diff
-            .blocks(split, whole_file)
-            .into_iter()
-            .find(|(start, _)| *start == header)
-            .map_or(header, |(_, end)| end + 1);
+        let blocks = diff.blocks(split, whole_file);
+        let end = blocks
+            .binary_search_by_key(&header, |(start, _)| *start)
+            .map_or(header, |at| blocks[at].1 + 1);
         end.saturating_sub(header)
     }
 
@@ -3101,8 +3131,8 @@ mod tests {
         // second, and a third press has nowhere to go in this file.
         let stops: Vec<usize> = rendered
             .blocks(false, true)
-            .into_iter()
-            .map(|(s, _)| s)
+            .iter()
+            .map(|(s, _)| *s)
             .collect();
         assert_eq!(next_header(&stops, None, 1), Some(3));
         assert_eq!(next_header(&stops, Some(3), 1), Some(7));
@@ -3114,6 +3144,70 @@ mod tests {
         assert_eq!(paired[0].0, paired[0].1);
         assert_eq!(paired[1].1 - paired[1].0, 1);
         assert_eq!(rendered.change_of(paired[1].0, true), Some(1));
+    }
+
+    /// The tables `new` builds answer what the sweeps they replace answered:
+    /// every line found by its hunk and rank, in both layouts, and every entry
+    /// placed in the right change — on a diff mixing hunks, uneven pairs and a
+    /// "no newline" marker.
+    #[test]
+    fn the_lookup_tables_agree_with_a_sweep() {
+        use DiffLineKind::*;
+        let diff = FileDiff {
+            hunks: vec![
+                hunk("@@ a @@", &[Context, Removed, Removed, Added, Context]),
+                hunk("@@ b @@", &[Added, Context, Removed, NoNewline]),
+                hunk("@@ c @@", &[Context]),
+            ],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("a.rs"), diff, &Theme::default_light());
+        for split in [false, true] {
+            for (h, hunk) in rendered.file.hunks.iter().enumerate() {
+                for l in 0..hunk.lines.len() {
+                    let unified = rendered
+                        .rows
+                        .iter()
+                        .position(|row| *row == Row::Line { hunk: h, line: l })
+                        .unwrap();
+                    let expected = if split {
+                        rendered
+                            .split
+                            .iter()
+                            .position(|row| row.unified().any(|index| index == unified))
+                    } else {
+                        Some(unified)
+                    };
+                    assert_eq!(rendered.display_row(h, l, split), expected, "{h}:{l}");
+                }
+                assert_eq!(rendered.display_row(h, hunk.lines.len(), split), None);
+            }
+            for index in 0..rendered.len(split) + 1 {
+                let unified = if split {
+                    match rendered.split.get(index) {
+                        Some(SplitRow::Pair { old, new }) => old.or(*new),
+                        _ => None,
+                    }
+                } else {
+                    Some(index)
+                };
+                let expected = unified.and_then(|unified| {
+                    rendered
+                        .changes
+                        .iter()
+                        .position(|(first, last)| (*first..=*last).contains(&unified))
+                });
+                assert_eq!(rendered.change_of(index, split), expected, "{index}");
+            }
+            // The stops are sorted: the arrows search them by dichotomy.
+            for whole_file in [false, true] {
+                let blocks = rendered.blocks(split, whole_file);
+                assert!(blocks.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            }
+        }
+        assert_eq!(rendered.hunk_bounds(1), Some((6, 10)));
+        assert_eq!(rendered.hunk_bounds(3), None);
     }
 
     /// A brand-new or deleted file carries a single version; anything with a
