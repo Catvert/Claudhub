@@ -1011,13 +1011,9 @@ pub struct ClaudhubApp {
     /// lane. Without it the label kept the base one had left, until the next
     /// branch list happened to arrive and refresh the whole selector.
     pub(super) base_changed: bool,
-    /// Worktrees whose status read has already gone out.
-    ///
-    /// The file watcher can produce several waves before an answer comes back;
-    /// without this guard rail, a build touching a thousand files piles up a
-    /// thousand identical `git status`es, and everything after — diffs included
-    /// — waits behind them.
-    pub(super) pending_status: std::collections::HashSet<PathBuf>,
+    /// The status reads gone out, one per worktree — see
+    /// `inflight::StatusReads`.
+    pub(super) status_reads: crate::ui::inflight::StatusReads,
     /// When the last automatic fetch was started.
     last_auto_fetch: Option<std::time::Instant>,
     /// The worktree a commit message is being waited for, if there is one.
@@ -1616,7 +1612,7 @@ impl ClaudhubApp {
             pending_notes: Vec::new(),
             pending_reveal: None,
             base_changed: false,
-            pending_status: std::collections::HashSet::new(),
+            status_reads: Default::default(),
             last_auto_fetch: None,
             suggesting_message: None,
             dock,
@@ -2868,7 +2864,12 @@ impl ClaudhubApp {
     // — Review ————————————————————————————————————————————————————
 
     fn status_arrived(&mut self, worktree: PathBuf, status: Status, cx: &mut Context<Self>) {
-        self.pending_status.remove(&worktree);
+        // Asked again while this one ran: it may already be stale.
+        if self.status_reads.answered(&worktree) {
+            self.git.send(Cmd::RefreshStatus {
+                worktree: worktree.clone(),
+            });
+        }
         self.status_seen.insert(worktree.clone());
         // A hunk staged inside a submodule answers with that repository's
         // status. Refresh the containing Changes panel as well.
@@ -3350,7 +3351,7 @@ impl ClaudhubApp {
         // Without this, a status that fails once — repository briefly locked,
         // disk busy — would block every later refresh of that worktree for good.
         if let Some(worktree) = worktree.as_ref() {
-            self.pending_status.remove(worktree);
+            self.status_reads.failed(worktree);
         }
         // An armed integration flag would survive the failure and would offer
         // the cleanup on the next success, whatever it was.
@@ -3797,7 +3798,7 @@ impl ClaudhubApp {
 
     /// Asks for a status, unless one is already in flight for this worktree.
     pub(super) fn request_status(&mut self, worktree: PathBuf) {
-        if self.pending_status.insert(worktree.clone()) {
+        if self.status_reads.ask(&worktree) {
             self.git.send(Cmd::RefreshStatus { worktree });
         }
     }

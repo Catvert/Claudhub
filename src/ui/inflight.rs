@@ -10,7 +10,7 @@
 //! and it comes from a key put down that never gets taken back: that is a thing
 //! to be tested, not a thing to be watched for.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::runtime::{Action, Ticket};
@@ -110,6 +110,59 @@ impl InFlight {
     }
 }
 
+/// The `git status` reads gone out, and those asked for again meanwhile.
+///
+/// One read per worktree at a time: the file watcher can produce several
+/// waves before an answer comes back, and a build touching a thousand files
+/// would otherwise pile up a thousand identical reads, the diffs waiting
+/// behind them.
+///
+/// **But an ask that finds a read under way is noted, not dropped.** A
+/// `git merge` writes the files first and moves the branch last: the first
+/// wave sent a read, the reference moved while it ran, and its event found
+/// the read under way. The answer said the branch as it was, and nothing more
+/// came — the title bar offered the push seconds later, at whatever next
+/// touched the worktree.
+#[derive(Debug, Default)]
+pub struct StatusReads {
+    pending: HashSet<PathBuf>,
+    again: HashSet<PathBuf>,
+}
+
+impl StatusReads {
+    /// Whether a read is to go out now; otherwise one follows the answer.
+    pub fn ask(&mut self, worktree: &Path) -> bool {
+        if self.pending.contains(worktree) {
+            self.again.insert(worktree.to_path_buf());
+            return false;
+        }
+        self.pending.insert(worktree.to_path_buf());
+        true
+    }
+
+    /// A read answered: whether another is to go out at once, the worktree
+    /// having changed while it ran. It is then under way again.
+    pub fn answered(&mut self, worktree: &Path) -> bool {
+        if self.again.remove(worktree) {
+            return true;
+        }
+        self.pending.remove(worktree);
+        false
+    }
+
+    /// A read failed. What was asked meanwhile is forgotten with it: a
+    /// repository briefly locked is read at the next change, and an ask
+    /// renewed at once would fail the same way.
+    pub fn failed(&mut self, worktree: &Path) {
+        self.pending.remove(worktree);
+        self.again.remove(worktree);
+    }
+
+    pub fn is_pending(&self, worktree: &Path) -> bool {
+        self.pending.contains(worktree)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +252,29 @@ mod tests {
         flight.start(Ticket(1), worktree("/p/a"), Action::Stage);
         flight.start(Ticket(2), worktree("/p/a"), Action::Unstage);
         assert_eq!(flight.announcements(), vec!["running-generic"]);
+    }
+
+    /// One read at a time, and what was asked meanwhile follows the answer.
+    #[test]
+    fn a_status_asked_during_a_read_follows_it() {
+        let (a, b) = (Path::new("/a"), Path::new("/b"));
+        let mut reads = StatusReads::default();
+        assert!(reads.ask(a));
+        assert!(!reads.ask(a));
+        assert!(!reads.ask(a));
+        assert!(reads.ask(b));
+        // Once, however many asks came meanwhile, and under way again.
+        assert!(reads.answered(a));
+        assert!(reads.is_pending(a));
+        assert!(!reads.answered(a));
+        assert!(!reads.is_pending(a));
+        assert!(!reads.answered(b));
+
+        assert!(reads.ask(a));
+        assert!(!reads.ask(a));
+        reads.failed(a);
+        assert!(!reads.is_pending(a));
+        assert!(!reads.answered(a));
+        assert!(reads.ask(a));
     }
 }

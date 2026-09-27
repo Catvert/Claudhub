@@ -334,7 +334,7 @@ impl ClaudhubApp {
     /// The worktree's status, when it is the latest word on it: asked since
     /// the sweep's count last moved, and answered.
     fn fresh_status(&self, worktree: &Path) -> Option<&crate::git::Status> {
-        (self.changes_read.contains(worktree) && !self.pending_status.contains(worktree))
+        (self.changes_read.contains(worktree) && !self.status_reads.is_pending(worktree))
             .then(|| self.review.get(worktree).map(|review| &review.status))
             .flatten()
     }
@@ -351,7 +351,7 @@ impl ClaudhubApp {
             .get(worktree)
             .filter(|_| self.status_seen.contains(worktree))
             .map(|review| &review.status)?;
-        (!status.files.is_empty() || !self.pending_status.contains(worktree)).then_some(status)
+        (!status.files.is_empty() || !self.status_reads.is_pending(worktree)).then_some(status)
     }
 
     /// Whether a worktree has anything to commit, for its changes node.
