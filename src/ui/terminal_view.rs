@@ -56,15 +56,19 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 pub struct TerminalView {
     terminal: Terminal,
     snapshot: Snapshot,
+    /// The grid has moved since `snapshot` was taken: it is read again at the
+    /// next render — see `take_snapshot`.
+    stale: bool,
     /// The snapshot cut into the runs the view paints, one entry per line.
     ///
     /// Held rather than worked out at render: cutting the runs and slicing
     /// their text is one walk of the visible grid, and it answers the same
     /// thing for as long as the snapshot, the font and the measured glyphs
-    /// stay put. What invalidates it is `restyled`.
+    /// stay put. What invalidates it is a new snapshot, line by line, and
+    /// `restyled`, entirely.
     painted: Vec<Vec<Painted>>,
-    /// The runs have to be cut again: a new snapshot, a new font, or a glyph
-    /// that has just been measured.
+    /// Every line's runs have to be cut again: a new font, or a glyph that has
+    /// just been measured.
     restyled: bool,
     /// The title the running program has set, ready to be handed to a tab.
     ///
@@ -204,8 +208,9 @@ impl TerminalView {
                 // a `cat` of a large file sends hundreds a second. Each one
                 // used to copy the whole grid; what they all say is the same
                 // thing — "redraw" — so they are drained here and answered
-                // with a single snapshot. What a queued event *carries* — a
-                // title, a child's death — is handled on the way through.
+                // with a single mark, the grid being read when it is painted.
+                // What a queued event *carries* — a title, a child's death —
+                // is handled on the way through.
                 let mut batch = vec![event];
                 while let Ok(next) = events.try_recv() {
                     batch.push(next);
@@ -257,7 +262,8 @@ impl TerminalView {
         .detach();
 
         Self {
-            snapshot: terminal.snapshot(),
+            snapshot: Snapshot::default(),
+            stale: true,
             painted: Vec::new(),
             restyled: true,
             title: SharedString::default(),
@@ -458,28 +464,48 @@ impl TerminalView {
         })
     }
 
-    /// Reads the grid, and says the runs have to be cut again.
+    /// Says the grid has moved: the snapshot is taken at the next render.
     ///
     /// The one door in: what is painted is derived from the snapshot, and a
     /// snapshot replaced behind the derivation's back is a frame drawn from
     /// the grid as it was.
+    ///
+    /// **Marked here, read at render**: a terminal nobody sees — a tab behind
+    /// another, a board scrolled away — is woken by every `pty_read` of its
+    /// program, and copying its grid each time was a walk of the screen under
+    /// the I/O loop's lock for a picture nobody would paint. Everything that
+    /// reads the snapshot is the render's, or runs after it.
     fn take_snapshot(&mut self) {
-        self.snapshot = self.terminal.snapshot();
-        self.restyled = true;
+        self.stale = true;
+    }
+
+    /// Reads the grid if it has moved, and returns the snapshot it replaces —
+    /// the one the held runs were cut from.
+    fn refresh_snapshot(&mut self) -> Option<Snapshot> {
+        if !std::mem::take(&mut self.stale) {
+            return None;
+        }
+        Some(std::mem::replace(
+            &mut self.snapshot,
+            self.terminal.snapshot(),
+        ))
     }
 
     /// Cuts the snapshot's lines into the runs the view paints.
     ///
     /// Once per snapshot and not once per frame: the cut asks `on_grid` about
     /// every character on screen and slices the line's text for every run —
-    /// a walk of the grid, which is what a frame must not carry.
-    fn restyle(&mut self) {
-        self.painted = self
-            .snapshot
-            .lines
-            .iter()
-            .map(|line| painted_line(line, &self.on_grid))
-            .collect();
+    /// a walk of the grid, which is what a frame must not carry. `previous` is
+    /// the snapshot the held runs were cut from — see `recut`.
+    fn restyle(&mut self, previous: Option<Snapshot>) {
+        let previous = match previous {
+            // A new font or a new glyph: nothing held is worth keeping.
+            _ if self.restyled => Vec::new(),
+            Some(previous) => previous.lines,
+            None => Vec::new(),
+        };
+        let held = std::mem::take(&mut self.painted);
+        self.painted = recut(&self.snapshot.lines, &previous, held, &self.on_grid);
         self.restyled = false;
     }
 
@@ -1077,11 +1103,12 @@ impl Render for TerminalView {
         // colour behind the grid, set on the root below.
         let default_bg = cx.theme().background;
         self.sync_font(cx);
+        let previous = self.refresh_snapshot();
         // Both only answer for the snapshot on screen: they run when it — or
         // the font under it — has moved, never on a frame that repeats one.
-        if self.restyled {
+        if previous.is_some() || self.restyled {
             self.learn_glyphs(window);
-            self.restyle();
+            self.restyle(previous);
         }
         let font_size = self.font_size;
         let font_family = self.font_family.clone();
@@ -1560,12 +1587,34 @@ struct Painted {
     text: SharedString,
 }
 
+/// The runs of every line of `lines`, cutting only the lines that changed.
+///
+/// `held` was cut from `previous`, row for row: a line equal to the one at its
+/// row there keeps its runs — a program printing one line leaves the forty
+/// others alone, and they were recut, their text sliced again, on every
+/// output. A scroll moves every row and recuts everything, as before.
+fn recut(
+    lines: &[crate::terminal::Line],
+    previous: &[crate::terminal::Line],
+    mut held: Vec<Vec<Painted>>,
+    on_grid: &HashMap<char, bool>,
+) -> Vec<Vec<Painted>> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(row, line)| match (previous.get(row), held.get_mut(row)) {
+            (Some(before), Some(runs)) if before == line => std::mem::take(runs),
+            _ => painted_line(line, on_grid),
+        })
+        .collect()
+}
+
 /// Cuts a line into its runs and slices their text — once per snapshot.
 fn painted_line(line: &crate::terminal::Line, on_grid: &HashMap<char, bool>) -> Vec<Painted> {
     let mut out = Vec::new();
     for (segment, seg) in line.segments.iter().enumerate() {
         for chunk in chunks(line, seg, on_grid) {
-            let text = SharedString::from(line.text[chunk.start..chunk.end].to_string());
+            let text = SharedString::from(&line.text[chunk.start..chunk.end]);
             out.push(Painted {
                 segment,
                 chunk,
@@ -3083,6 +3132,29 @@ mod tests {
             selected: false,
         };
         (line, seg)
+    }
+
+    /// A line that did not move keeps the runs it had; one that did, and one
+    /// that was not there, are cut again.
+    #[test]
+    fn only_the_lines_that_changed_are_cut_again() {
+        let line = |text: &str| {
+            let (mut line, seg) = run(text, 0, text.len());
+            line.segments.push(seg);
+            line
+        };
+        let before = [line("$ ls"), line("a  b")];
+        let after = [line("$ ls"), line("a  b  c"), line("$ ")];
+        let on_grid = HashMap::new();
+        let mut held = recut(&before, &[], Vec::new(), &on_grid);
+        // A mark only the kept runs can carry: a recut would slice "$ ls".
+        held[0][0].text = SharedString::new_static("kept");
+        let cut = recut(&after, &before, held, &on_grid);
+        let texts: Vec<Vec<&str>> = cut
+            .iter()
+            .map(|runs| runs.iter().map(|run| run.text.as_ref()).collect())
+            .collect();
+        assert_eq!(texts, [vec!["kept"], vec!["a  b  c"], vec!["$ "]]);
     }
 
     /// The reported flicker: an agent's spinner cycles through dingbats the
