@@ -98,13 +98,12 @@ impl Run {
         !self.is_active() && self.stage() == Stage::Failed
     }
 
-    /// Whether the filter's word is in what the row shows.
+    /// Whether the filter's word is in what the row shows, case read the way
+    /// every panel reads it (`text::matches`).
     pub fn matches(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.title.to_lowercase().contains(&needle)
-            || self.workflow.to_lowercase().contains(&needle)
-            || self.branch.to_lowercase().contains(&needle)
+        [&self.title, &self.workflow, &self.branch]
+            .into_iter()
+            .any(|shown| crate::text::matches(needle, shown))
     }
 }
 

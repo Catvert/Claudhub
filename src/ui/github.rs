@@ -255,14 +255,13 @@ impl PullRequest {
         }
     }
 
-    /// Whether the filter's word is in what the row shows.
+    /// Whether the filter's word is in what the row shows, case read the way
+    /// every panel reads it (`text::matches`).
     pub fn matches(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.title.to_lowercase().contains(&needle)
-            || self.head_ref_name.to_lowercase().contains(&needle)
-            || self.author.login.to_lowercase().contains(&needle)
-            || self.number.to_string().contains(&needle)
+        [&self.title, &self.head_ref_name, &self.author.login]
+            .into_iter()
+            .any(|shown| crate::text::matches(needle, shown))
+            || crate::text::matches(needle, &self.number.to_string())
     }
 
     /// Whether GitHub says the merge would conflict. `UNKNOWN` is not a

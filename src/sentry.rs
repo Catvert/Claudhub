@@ -77,11 +77,9 @@ impl Issue {
     ///
     /// The title and the culprit, and nothing else: a filter that matched what
     /// is not on screen is a filter whose answers cannot be checked.
+    /// Case is read the way every panel reads it (`text::matches`).
     pub fn matches(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.title.to_lowercase().contains(&needle)
-            || self.culprit.to_lowercase().contains(&needle)
+        crate::text::matches(needle, &self.title) || crate::text::matches(needle, &self.culprit)
     }
 }
 
