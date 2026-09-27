@@ -1133,6 +1133,10 @@ pub struct ClaudhubApp {
     /// The note each board's notes view shows, when a press chose another
     /// than the principal one; not kept.
     pub(super) focus_note_shown: HashMap<PathBuf, PathBuf>,
+    /// The previews of the terminals a board's home shows, by terminal —
+    /// entities, so that a terminal's output repaints its preview alone.
+    pub(super) terminal_previews:
+        HashMap<gpui_kit::EntityId, gpui_kit::Entity<crate::ui::summary_view::TerminalPreview>>,
     /// The worktrees chosen in the focus view's sidebar — see
     /// `focus::shown_worktrees`.
     pub(super) focus_chosen: Vec<PathBuf>,
@@ -1636,6 +1640,7 @@ impl ClaudhubApp {
             home_window_drag: false,
             home_mode: crate::ui::store::Store::global(cx).session.home_mode,
             focus_note_shown: HashMap::new(),
+            terminal_previews: HashMap::new(),
             focus_chosen: crate::ui::store::Store::global(cx)
                 .session
                 .focus_shown

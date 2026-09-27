@@ -62,6 +62,108 @@ pub fn principal_note(
         .map(|(path, _)| path.clone())
 }
 
+/// What a worktree's home reads to say what waits for the hand.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// The terminals whose agent asks something.
+    pub waiting: Vec<u64>,
+    /// Files git holds in conflict.
+    pub conflicts: usize,
+    /// The branch's last CI run failed.
+    pub ci_failed: bool,
+    /// Commits the upstream has and the branch has not, and the reverse.
+    pub behind: usize,
+    pub ahead: usize,
+    /// Files waiting for a commit.
+    pub uncommitted: usize,
+    /// Review remarks not yet resolved.
+    pub remarks: usize,
+}
+
+/// A thing that waits for the hand, as the home's strip says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attention {
+    /// An agent asks something, in this terminal.
+    Waiting(u64),
+    Conflicts(usize),
+    CiFailed,
+    /// Commits to pull.
+    Behind(usize),
+    Uncommitted(usize),
+    Remarks(usize),
+    /// Commits to push.
+    Ahead(usize),
+}
+
+/// What waits for the hand, the most pressing first: what nothing goes on
+/// without — an agent's question, a conflict — then what breaks, then what
+/// is due. Empty when all is quiet, and the strip is not drawn.
+pub fn attention(facts: &Facts) -> Vec<Attention> {
+    let mut out: Vec<Attention> = facts
+        .waiting
+        .iter()
+        .map(|id| Attention::Waiting(*id))
+        .collect();
+    if facts.conflicts > 0 {
+        out.push(Attention::Conflicts(facts.conflicts));
+    }
+    if facts.ci_failed {
+        out.push(Attention::CiFailed);
+    }
+    if facts.behind > 0 {
+        out.push(Attention::Behind(facts.behind));
+    }
+    if facts.uncommitted > 0 {
+        out.push(Attention::Uncommitted(facts.uncommitted));
+    }
+    if facts.remarks > 0 {
+        out.push(Attention::Remarks(facts.remarks));
+    }
+    if facts.ahead > 0 {
+        out.push(Attention::Ahead(facts.ahead));
+    }
+    out
+}
+
+/// The files of a review that weigh most — `(path, added, removed)` —, the
+/// heaviest first, at most `count`, each with its share of the heaviest's
+/// weight: what a bar beside its name is drawn at.
+pub fn heaviest(
+    files: &[(PathBuf, usize, usize)],
+    count: usize,
+) -> Vec<(PathBuf, usize, usize, f32)> {
+    let mut files: Vec<&(PathBuf, usize, usize)> = files.iter().collect();
+    files.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)).then_with(|| a.0.cmp(&b.0)));
+    let top = files.first().map_or(0, |file| file.1 + file.2).max(1) as f32;
+    files
+        .into_iter()
+        .take(count)
+        .map(|(path, added, removed)| {
+            (
+                path.clone(),
+                *added,
+                *removed,
+                (added + removed) as f32 / top,
+            )
+        })
+        .collect()
+}
+
+/// The last lines a terminal shows, for its preview: the blank ones under
+/// its prompt left out — a screen is mostly empty below where it writes —,
+/// at most `count`, each with its trailing blanks trimmed.
+pub fn tail_lines(lines: &[String], count: usize) -> Vec<String> {
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(0, |last| last + 1);
+    let start = end.saturating_sub(count);
+    lines[start..end]
+        .iter()
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
 /// The worktrees on show, side by side: the ones chosen in the sidebar, as
 /// long as the window's own — `primary` — is among them; else that one
 /// alone. Choosing a worktree anywhere else in the window is choosing it
@@ -337,6 +439,59 @@ mod tests {
     fn a_board_opens_on_its_home() {
         assert_eq!(view_of(None), View::Home);
         assert_eq!(view_of(Some(View::Todo)), View::Todo);
+    }
+
+    /// The pressing first; nothing when all is quiet.
+    #[test]
+    fn what_waits_comes_most_pressing_first() {
+        assert!(attention(&Facts::default()).is_empty());
+        let facts = Facts {
+            waiting: vec![7],
+            conflicts: 0,
+            ci_failed: true,
+            behind: 3,
+            ahead: 1,
+            uncommitted: 2,
+            remarks: 4,
+        };
+        assert_eq!(
+            attention(&facts),
+            vec![
+                Attention::Waiting(7),
+                Attention::CiFailed,
+                Attention::Behind(3),
+                Attention::Uncommitted(2),
+                Attention::Remarks(4),
+                Attention::Ahead(1),
+            ]
+        );
+    }
+
+    /// The heaviest first, each against the heaviest.
+    #[test]
+    fn the_heaviest_files_come_first() {
+        let files = vec![
+            (PathBuf::from("a"), 1, 1),
+            (PathBuf::from("b"), 30, 10),
+            (PathBuf::from("c"), 10, 10),
+        ];
+        let top = heaviest(&files, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!((top[0].0.as_path(), top[0].3), (Path::new("b"), 1.));
+        assert_eq!((top[1].0.as_path(), top[1].3), (Path::new("c"), 0.5));
+        assert!(heaviest(&[], 3).is_empty());
+    }
+
+    /// The last written lines, the blank screen under them left out.
+    #[test]
+    fn a_preview_is_the_last_written_lines() {
+        let lines: Vec<String> = ["$ ls", "a  b  ", "$ claude", "", "  ", ""]
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(tail_lines(&lines, 2), vec!["a  b", "$ claude"]);
+        assert_eq!(tail_lines(&lines, 9).len(), 3);
+        assert!(tail_lines(&["".to_string()], 3).is_empty());
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {

@@ -1,10 +1,17 @@
-//! A board's tabs, and its home: the digest of a worktree in one screen —
-//! its git, its review, its principal note, its to-do list, its agents —
-//! a card each, in `focus::View::ALL`'s order.
+//! A board's tabs, and its home: the digest of a worktree in one screen.
 //!
-//! A card is read at a glance and pressed to go further: the press opens
-//! its tab, the whole of it. What is done in one gesture is done on the
-//! card — a task ticked —, the rest is the tab's.
+//! The home answers « what waits for me here » before « what is in here ».
+//! At the top, a strip of what waits for the hand — an agent's question, a
+//! conflict, a failed CI run, commits to pull, files to commit, remarks,
+//! commits to push —, each with the button that deals with it, and no strip
+//! at all when all is quiet (`focus::attention`). Under it two columns: on
+//! the left what moves — the agents, each with its last lines, the to-do
+//! list, the principal note —; on the right what stands — the branch, its
+//! pull request and CI, what waits for a commit, the review, what runs.
+//!
+//! A card's title opens its tab, the whole of it; what is done in one
+//! gesture is done on the card — a task ticked or added, a recipe started,
+//! a pull. An empty card says what fills it, and has the button for it.
 
 use std::path::Path;
 
@@ -12,27 +19,79 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
+    input::Input,
     menu::DropdownMenu as _,
-    v_flex, ActiveTheme, Sizable as _,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
-use gpui_kit::{div, prelude::*, px, AnyElement, Context, SharedString};
+use gpui_kit::{
+    div, prelude::*, px, AnyElement, Context, Entity, Hsla, SharedString, Subscription, Window,
+};
 
+use crate::runtime::{Action, Cmd};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
-use crate::ui::focus::View;
+use crate::ui::focus::{self, Attention, View};
 use crate::ui::focus_view::view_name;
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
+use crate::ui::terminal_view::TerminalView;
 
-/// The least width of a card of the home: under it, the cards wrap.
-const CARD_BASIS: f32 = 340.;
-/// The open tasks a card lists; the tab has the rest.
-const HOME_TASKS: usize = 8;
-/// The lines of the principal note a card shows.
-const HOME_NOTE_LINES: usize = 8;
-/// The commits the git card lists.
+/// The open tasks the home lists; the tab has the rest.
+const HOME_TASKS: usize = 12;
+/// The lines of the principal note the home shows.
+const HOME_NOTE_LINES: usize = 14;
+/// The commits the branch card lists.
 const HOME_COMMITS: usize = 5;
+/// The files waiting for a commit the home lists.
+const HOME_FILES: usize = 8;
+/// The review's heaviest files the home draws a bar for.
+const HOME_HEAVIEST: usize = 6;
+/// The lines of a terminal its preview shows.
+const PREVIEW_LINES: usize = 5;
+
+/// A terminal's last lines, as the home previews them: an entity of its
+/// own that the terminal's view notifies. The terminal repaints itself on
+/// output, not the application, and a preview read in the application's
+/// render would stay as the last frame of the application left it.
+pub(super) struct TerminalPreview {
+    view: Entity<TerminalView>,
+    _observed: Subscription,
+}
+
+impl TerminalPreview {
+    fn new(view: Entity<TerminalView>, cx: &mut Context<Self>) -> Self {
+        let observed = cx.observe(&view, |_, _, cx| cx.notify());
+        Self {
+            view,
+            _observed: observed,
+        }
+    }
+}
+
+impl Render for TerminalPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lines = self.view.read(cx).tail(PREVIEW_LINES);
+        let theme = cx.theme();
+        v_flex()
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .rounded(theme.radius)
+            .bg(theme.secondary)
+            .font_family(theme.mono_font_family.clone())
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .when(lines.is_empty(), |el| el.child("…"))
+            .children(lines.into_iter().map(|line| {
+                div()
+                    .w_full()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .child(SharedString::from(line))
+            }))
+    }
+}
 
 impl ClaudhubApp {
     /// A board's tabs — the home first —, each saying what waits in it,
@@ -188,150 +247,700 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The home: a card per section, side by side as the width allows.
+    /// The home: the strip of what waits, then the two columns.
     pub(super) fn render_home_view(
         &mut self,
         path: &Path,
         at_work: &overview::AtWork,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cards: Vec<AnyElement> = View::ALL
-            .into_iter()
-            .filter(|section| *section != View::Home)
-            .map(|section| {
-                let body = match section {
-                    View::Git => self.home_git(path, cx),
-                    View::Review => self.home_review(path, cx),
-                    View::Notes => self.home_note(path, cx),
-                    View::Todo => self.home_todo(path, cx),
-                    _ => self.home_agents(path, at_work, cx),
-                };
-                self.render_home_card(path, section, body, cx)
-            })
-            .collect();
+        // The worktree on show has the editor's readings — its pull request
+        // and CI, its review's list —, asked for here as their panels would.
+        if self.active.as_deref() == Some(path) {
+            self.ensure_github(cx);
+            if let Some(range) = self.review.get(path).and_then(|state| {
+                super::review::branch_panel_range(
+                    state.base.as_deref(),
+                    state.review_point.as_ref(),
+                    state.since_review,
+                )
+            }) {
+                self.ensure_files(range, cx);
+            }
+        }
+        let alive: Vec<gpui_kit::EntityId> =
+            self.terminals.iter().map(|t| t.view.entity_id()).collect();
+        self.terminal_previews.retain(|id, _| alive.contains(id));
+
+        let strip = self.render_attention(path, at_work, cx);
+        let left = v_flex()
+            .flex_grow(3.)
+            .flex_basis(px(0.))
+            .min_w(px(320.))
+            .gap_3()
+            .child(self.home_agents(path, at_work, cx))
+            .child(self.home_tasks(path, cx))
+            .child(self.home_note(path, cx));
+        let right = v_flex()
+            .flex_grow(2.)
+            .flex_basis(px(0.))
+            .min_w(px(300.))
+            .gap_3()
+            .child(self.home_branch(path, cx))
+            .child(self.home_to_commit(path, cx))
+            .child(self.home_review(path, cx))
+            .children(self.home_run(path, cx));
         v_flex()
             .id(SharedString::from(format!("focus-home-{}", path.display())))
             .size_full()
+            .gap_3()
             .overflow_y_scroll()
+            .children(strip)
             .child(
                 h_flex()
                     .w_full()
-                    .flex_wrap()
                     .items_start()
                     .gap_3()
-                    .children(cards),
+                    .child(left)
+                    .child(right),
             )
             .into_any_element()
     }
 
-    /// A card of the home: its title, and what it says of the worktree. A
-    /// press opens its tab.
-    fn render_home_card(
+    /// A card of the home: its title — which opens `tab` — what it says of
+    /// itself beside it, what acts at its right, and its body.
+    #[allow(clippy::too_many_arguments)]
+    fn home_card(
         &self,
         path: &Path,
-        section: View,
+        glyph: &'static str,
+        title: SharedString,
+        tab: View,
+        detail: Option<AnyElement>,
+        actions: Vec<AnyElement>,
         body: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let (glyph, title) = view_name(section);
         let board = path.to_path_buf();
         v_flex()
-            .id(SharedString::from(format!("focus-home-{section:?}")))
-            .flex_grow(1.)
-            .flex_basis(px(CARD_BASIS))
+            .w_full()
             .p_3()
             .gap_2()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .cursor_pointer()
-            .hover(|style| style.border_color(theme.ring.opacity(0.6)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.show_board_view(&board, section, cx);
-            }))
             .child(
                 h_flex()
+                    .w_full()
                     .gap_1p5()
                     .items_center()
-                    .child(icon(glyph).xsmall().text_color(theme.muted_foreground))
                     .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(title),
+                        h_flex()
+                            .id(SharedString::from(format!("focus-card-{title}")))
+                            .flex_none()
+                            .gap_1p5()
+                            .items_center()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.ring))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.show_board_view(&board, tab, cx);
+                            }))
+                            .child(icon(glyph).xsmall().text_color(theme.muted_foreground))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
+                            .child(
+                                icon("chevron-right")
+                                    .xsmall()
+                                    .text_color(theme.muted_foreground),
+                            ),
                     )
                     .child(
-                        icon("chevron-right")
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    ),
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .children(detail),
+                    )
+                    .children(actions),
             )
             .child(body)
             .into_any_element()
     }
 
-    /// Git: the branch and how far from its remote, the commits ahead of
-    /// its base, what waits for a commit, the last commits.
-    fn home_git(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let branch = self
-            .repos
-            .worktree(path)
-            .and_then(|worktree| worktree.branch.clone())
-            .map(SharedString::from)
-            .unwrap_or_else(|| tr!("overview-detached"));
-        let outline = self.outlines.get(path);
-        let upstream = outline
+    /// What waits for the hand, a line each with the button that deals with
+    /// it — see `focus::attention`. `None` when all is quiet.
+    fn render_attention(
+        &mut self,
+        path: &Path,
+        at_work: &overview::AtWork,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let terminals = self.board_terminals(path);
+        let status = self.review.get(path).map(|state| &state.status);
+        let upstream = self
+            .outlines
+            .get(path)
             .and_then(|outline| outline.upstream)
-            .and_then(|(ahead, behind)| {
-                let mut parts = Vec::new();
-                if ahead > 0 {
-                    parts.push(format!("↑{ahead}"));
-                }
-                if behind > 0 {
-                    parts.push(format!("↓{behind}"));
-                }
-                (!parts.is_empty()).then(|| SharedString::from(parts.join(" ")))
-            });
-        let commits: Vec<_> = outline
-            .map(|outline| outline.commits.iter().take(HOME_COMMITS).cloned().collect())
-            .unwrap_or_default();
-        let ahead = outline.and_then(|outline| {
-            let base = outline.base.clone()?;
-            (outline.ahead_of_base > 0)
-                .then(|| tr!("overview-ahead", { count: outline.ahead_of_base, base: base }))
-        });
-        v_flex()
-            .gap_0p5()
-            .text_sm()
+            .unwrap_or((0, 0));
+        let on_show = self.active.as_deref() == Some(path);
+        let facts = focus::Facts {
+            waiting: terminals
+                .iter()
+                .copied()
+                .filter(|id| at_work.terminals.get(id) == Some(&Doing::Waiting))
+                .collect(),
+            conflicts: status.map_or(0, |status| status.conflicted().count()),
+            ci_failed: on_show
+                && self
+                    .github
+                    .runs
+                    .first()
+                    .is_some_and(|run| run.stage() == crate::github::Stage::Failed),
+            behind: upstream.1,
+            ahead: upstream.0,
+            uncommitted: self.summaries.get(path).map_or(0, |summary| summary.files),
+            remarks: self.open_findings(path).len(),
+        };
+        let items = focus::attention(&facts);
+        if items.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let lines: Vec<AnyElement> = items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| self.attention_line(path, index, item, &theme, cx))
+            .collect();
+        Some(
+            v_flex()
+                .flex_none()
+                .w_full()
+                .p_3()
+                .gap_1p5()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.warning.opacity(0.5))
+                .bg(theme.warning.opacity(0.06))
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(icon("bell").xsmall().text_color(theme.warning))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(tr!("focus-attention-title")),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .flex_wrap()
+                        .gap_x_4()
+                        .gap_y_1()
+                        .children(lines),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// One thing that waits: its glyph and words, and its button.
+    fn attention_line(
+        &self,
+        path: &Path,
+        index: usize,
+        item: Attention,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let worktree = path.to_path_buf();
+        let (glyph, tint, text): (&str, Hsla, SharedString) = match &item {
+            Attention::Waiting(id) => (
+                "bot",
+                theme.danger,
+                tr!("focus-attention-waiting", { name: self.card_name(&Node::Terminal(*id), cx).1 }),
+            ),
+            Attention::Conflicts(count) => (
+                "triangle-alert",
+                theme.danger,
+                tr!("focus-attention-conflicts", { count: *count }),
+            ),
+            Attention::CiFailed => ("circle-x", theme.danger, tr!("focus-attention-ci")),
+            Attention::Behind(count) => (
+                "arrow-down-to-line",
+                theme.warning,
+                tr!("focus-attention-behind", { count: *count }),
+            ),
+            Attention::Uncommitted(count) => (
+                "git-commit-horizontal",
+                theme.warning,
+                tr!("focus-attention-uncommitted", { count: *count }),
+            ),
+            Attention::Remarks(count) => (
+                "file-text",
+                theme.info,
+                tr!("focus-home-remarks", { count: *count }),
+            ),
+            Attention::Ahead(count) => (
+                "arrow-up-from-line",
+                theme.success,
+                tr!("focus-attention-ahead", { count: *count }),
+            ),
+        };
+        let label = match &item {
+            Attention::Waiting(_) => tr!("focus-attention-reply"),
+            Attention::Conflicts(_) => tr!("focus-attention-resolve"),
+            Attention::CiFailed | Attention::Remarks(_) => tr!("focus-attention-see"),
+            Attention::Behind(_) => tr!("focus-attention-pull"),
+            Attention::Uncommitted(_) => tr!("focus-attention-commit"),
+            Attention::Ahead(_) => tr!("focus-attention-push"),
+        };
+        let busy = match &item {
+            Attention::Behind(_) => self.is_running(Some(path), Action::Pull),
+            Attention::Ahead(_) => self.is_running(Some(path), Action::Push),
+            _ => false,
+        };
+        let run_url = self.github.runs.first().map(|run| run.url.clone());
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(icon(glyph).xsmall().text_color(tint))
+            .child(div().text_sm().child(text))
             .child(
-                h_flex()
-                    .gap_1()
-                    .child(div().min_w_0().truncate().child(branch))
-                    .children(upstream.map(|text| {
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(text)
+                Button::new(("focus-attention", index))
+                    .xsmall()
+                    .ghost()
+                    .label(label)
+                    .loading(busy)
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| match &item {
+                        Attention::Waiting(id) => this.reply_to(&worktree, *id, window, cx),
+                        Attention::Conflicts(_) | Attention::Uncommitted(_) => {
+                            this.show_board_view(&worktree, View::Git, cx)
+                        }
+                        Attention::Remarks(_) => this.show_board_view(&worktree, View::Review, cx),
+                        Attention::CiFailed => {
+                            if let Some(url) = &run_url {
+                                cx.open_url(url);
+                            }
+                        }
+                        Attention::Behind(_) => {
+                            let cmd = Cmd::Pull {
+                                worktree: worktree.clone(),
+                            };
+                            this.start(Some(worktree.clone()), Action::Pull, cmd, cx);
+                        }
+                        Attention::Ahead(_) => {
+                            let cmd = Cmd::Push {
+                                worktree: worktree.clone(),
+                                force_with_lease: false,
+                            };
+                            this.start(Some(worktree.clone()), Action::Push, cmd, cx);
+                        }
                     })),
             )
-            .children(ahead.map(|text| {
+            .into_any_element()
+    }
+
+    /// Goes to a terminal to answer it: the board's agents, and the keys in
+    /// that terminal.
+    fn reply_to(&mut self, path: &Path, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_board_view(path, View::Terminals, cx);
+        if let Some(view) = self
+            .terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id().as_u64() == id)
+            .map(|terminal| terminal.view.clone())
+        {
+            super::dialogs::focus_field(&view, window, cx);
+        }
+    }
+
+    /// A terminal's preview, made the first time it is asked for.
+    fn terminal_preview(
+        &mut self,
+        view: &Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalPreview> {
+        let id = view.entity_id();
+        if let Some(preview) = self.terminal_previews.get(&id) {
+            return preview.clone();
+        }
+        let preview = cx.new(|cx| TerminalPreview::new(view.clone(), cx));
+        self.terminal_previews.insert(id, preview.clone());
+        preview
+    }
+
+    /// The agents: each terminal, what its agent is doing and its last
+    /// lines — a press goes into it —, and what opens another.
+    fn home_agents(
+        &mut self,
+        path: &Path,
+        at_work: &overview::AtWork,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let terminals: Vec<(u64, Entity<TerminalView>, Option<String>)> = self
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.worktree == path)
+            .map(|terminal| {
+                (
+                    terminal.view.entity_id().as_u64(),
+                    terminal.view.clone(),
+                    terminal.session.clone(),
+                )
+            })
+            .collect();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (id, view, session) in terminals {
+            let (_, name) = self.card_name(&Node::Terminal(id), cx);
+            let doing = at_work.terminals.get(&id).copied().unwrap_or(Doing::Rest);
+            let activity = session
+                .as_deref()
+                .and_then(|session| self.agents.session(session));
+            let (word, tint) = match (activity, doing) {
+                (_, Doing::Waiting) | (Some(crate::agent::Activity::Waiting(_)), _) => {
+                    let word = match activity {
+                        Some(crate::agent::Activity::Waiting(message)) if !message.is_empty() => {
+                            tr!("agent-waiting", { message: message.clone() })
+                        }
+                        _ => tr!("agent-waiting-bare"),
+                    };
+                    (Some(word), theme.danger)
+                }
+                (_, Doing::Working) | (Some(crate::agent::Activity::Working), _) => {
+                    (Some(tr!("focus-agent-working")), theme.warning)
+                }
+                (Some(crate::agent::Activity::Finished), _) => {
+                    (Some(tr!("agent-finished")), theme.success)
+                }
+                _ => (None, theme.muted_foreground),
+            };
+            let preview = self.terminal_preview(&view, cx);
+            let board = path.to_path_buf();
+            rows.push(
+                v_flex()
+                    .id(("focus-home-agent", id as usize))
+                    .w_full()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.reply_to(&board, id, window, cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
+                            .child(div().min_w_0().truncate().text_sm().child(name))
+                            .children(word.map(|word| {
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(tint)
+                                    .child(word)
+                            })),
+                    )
+                    .child(preview)
+                    .into_any_element(),
+            );
+        }
+        let count = rows.len();
+        let body = if rows.is_empty() {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(tr!("focus-terminals-none"))
+                .into_any_element()
+        } else {
+            v_flex().gap_3().children(rows).into_any_element()
+        };
+        let worktree = path.to_path_buf();
+        let (app, hang) = (cx.entity().downgrade(), Hang::Worktree(path.to_path_buf()));
+        let actions = vec![
+            Button::new("focus-home-terminal")
+                .ghost()
+                .xsmall()
+                .icon(icon("plus"))
+                .label(tr!("terminal-new"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_focus_terminal(&worktree, window, cx);
+                }))
+                .into_any_element(),
+            Button::new("focus-home-agent-add")
+                .ghost()
+                .xsmall()
+                .icon(icon("bot"))
+                .label(tr!("focus-home-add"))
+                .dropdown_menu(move |menu, _, cx| {
+                    super::overview_view::add_items(&app, &hang, false, menu, cx)
+                })
+                .into_any_element(),
+        ];
+        let (glyph, title) = view_name(View::Terminals);
+        let detail = (count > 0).then(|| {
+            div()
+                .child(SharedString::from(count.to_string()))
+                .into_any_element()
+        });
+        self.home_card(
+            path,
+            glyph,
+            title,
+            View::Terminals,
+            detail,
+            actions,
+            body,
+            cx,
+        )
+    }
+
+    /// The to-do list: its open tasks, ticked here, how many are done, and
+    /// — on the worktree on show — the field that adds one.
+    fn home_tasks(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let todo = self.review.get(path).and_then(|state| state.todo.clone());
+        let on_show = self.active.as_deref() == Some(path);
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(todo) = &todo {
+            for task in todo.tasks.iter().filter(|task| !task.done).take(HOME_TASKS) {
+                let (worktree, line) = (path.to_path_buf(), task.line);
+                rows.push(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .pl(px(12. * task.depth.min(4) as f32))
+                        .child(
+                            Checkbox::new(("focus-home-tick", line))
+                                .checked(false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_task_in(worktree.clone(), line, true, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .child(SharedString::from(task.label.clone())),
+                        )
+                        .into_any_element(),
+                );
+            }
+            let done = todo.done();
+            if done > 0 {
+                rows.push(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(icon("check").xsmall())
+                        .child(tr!("focus-home-done", { count: done }))
+                        .into_any_element(),
+                );
+            }
+        } else if !on_show {
+            rows.push(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .truncate()
-                    .child(text)
-            }))
+                    .child(tr!("todo-none"))
+                    .into_any_element(),
+            );
+        }
+        if on_show {
+            rows.push(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(icon("plus").xsmall().text_color(theme.muted_foreground))
+                    .child(div().flex_1().child(Input::new(&self.task_input).xsmall()))
+                    .into_any_element(),
+            );
+        }
+        let detail = self.view_detail(path, View::Todo, cx);
+        let (glyph, title) = view_name(View::Todo);
+        let body = v_flex().gap_1p5().children(rows).into_any_element();
+        self.home_card(path, glyph, title, View::Todo, detail, Vec::new(), body, cx)
+    }
+
+    /// The principal note: its title and its first lines, the headings
+    /// standing out. Without a note, the button that writes one.
+    fn home_note(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (glyph, title) = view_name(View::Notes);
+        let Some(note) = self.principal_note(path, cx) else {
+            let worktree = path.to_path_buf();
+            let body = v_flex()
+                .gap_2()
+                .items_start()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("focus-home-note-empty")),
+                )
+                .child(
+                    Button::new("focus-home-write")
+                        .small()
+                        .icon(icon("pencil"))
+                        .label(tr!("focus-home-write-note"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_home_note(Hang::Worktree(worktree.clone()), cx);
+                            this.show_board_view(&worktree, View::Notes, cx);
+                        })),
+                )
+                .into_any_element();
+            return self.home_card(path, glyph, title, View::Notes, None, Vec::new(), body, cx);
+        };
+        let pinned = super::store::Store::global(cx)
+            .worktrees
+            .get(path)
+            .and_then(|state| state.pinned_note.as_deref())
+            == Some(note.as_path());
+        let (_, heading) = self.card_name(&Node::Note(note.clone()), cx);
+        let lines: Vec<String> = self
+            .canvas_entry(&note)
+            .map(|(_, entry)| {
+                entry
+                    .node
+                    .body
+                    .lines()
+                    .map(str::trim_end)
+                    .filter(|line| !line.trim().is_empty())
+                    .take(HOME_NOTE_LINES)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let body = v_flex()
+            .gap_0p5()
             .child(
                 h_flex()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .children(self.view_detail(path, View::Git, cx)),
+                    .gap_1()
+                    .items_center()
+                    .when(pinned, |el| {
+                        el.child(icon("pin").xsmall().text_color(theme.ring))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(heading),
+                    ),
             )
+            .children(lines.into_iter().map(|line| {
+                let heading = line.trim_start().starts_with('#');
+                let text = line.trim_start().trim_start_matches('#').trim().to_string();
+                div()
+                    .text_xs()
+                    .when(heading, |el| {
+                        el.mt_1().font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    })
+                    .when(!heading, |el| el.text_color(theme.muted_foreground))
+                    .child(SharedString::from(if heading { text } else { line }))
+            }))
+            .into_any_element();
+        self.home_card(path, glyph, title, View::Notes, None, Vec::new(), body, cx)
+    }
+
+    /// The branch: its name and base, how far from its remote — with pull
+    /// and push —, the commits it adds and the way to merge them; on the
+    /// worktree on show, its pull request and its last CI run.
+    fn home_branch(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let worktree = self.repos.worktree(path);
+        let is_main = worktree.is_some_and(|worktree| worktree.is_main);
+        let branch = worktree
+            .and_then(|worktree| worktree.branch.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| tr!("overview-detached"));
+        let outline = self.outlines.get(path).cloned();
+        // The base the review compares against, which the hand may have
+        // chosen; the outline's own guess otherwise.
+        let base = self
+            .review
+            .get(path)
+            .and_then(|state| state.base.clone())
+            .or_else(|| outline.as_ref().and_then(|outline| outline.base.clone()));
+        let (ahead, behind) = outline
+            .as_ref()
+            .and_then(|outline| outline.upstream)
+            .unwrap_or((0, 0));
+        let sync = self.sync_buttons(path, ahead, behind, gpui_kit::component::Size::XSmall, cx);
+        // The count is against the outline's base: said only when it is the
+        // one shown, a count against another branch being a wrong count.
+        let commits_title = outline.as_ref().and_then(|outline| {
+            let counted = outline.base.clone()?;
+            (outline.ahead_of_base > 0 && Some(&counted) == base.as_ref())
+                .then(|| tr!("overview-ahead", { count: outline.ahead_of_base, base: counted }))
+        });
+        let merge = outline
+            .as_ref()
+            .filter(|outline| !is_main && outline.ahead_of_base > 0)
+            .and_then(|outline| outline.base.clone())
+            .map(|merge_base| {
+                let merge = path.to_path_buf();
+                Button::new("focus-home-merge")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("git-merge"))
+                    .label(tr!("overview-merge", { base: merge_base }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_merge(&merge, window, cx);
+                    }))
+            });
+        let now = chrono::Utc::now().timestamp();
+        let commits = outline
+            .map(|outline| {
+                outline
+                    .commits
+                    .into_iter()
+                    .take(HOME_COMMITS)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let github = (self.active.as_deref() == Some(path)).then(|| self.home_github(cx));
+        let body = v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_sm()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(branch),
+                    )
+                    .children(base.map(|base| {
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(SharedString::from(format!("← {base}")))
+                    }))
+                    .child(div().flex_1())
+                    .children(sync),
+            )
+            .children(commits_title.map(|title| div().text_xs().text_color(muted).child(title)))
             .children(commits.into_iter().map(|commit| {
                 h_flex()
                     .gap_1p5()
@@ -340,7 +949,7 @@ impl ClaudhubApp {
                         div()
                             .flex_none()
                             .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted)
                             .child(SharedString::from(commit.short)),
                     )
                     .child(
@@ -350,204 +959,434 @@ impl ClaudhubApp {
                             .truncate()
                             .child(SharedString::from(commit.subject)),
                     )
-            }))
-            .into_any_element()
-    }
-
-    /// The review: what it compares against, the files and lines when the
-    /// list has been read, the remarks still open.
-    fn home_review(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let diff = super::theme::DiffColors::of(cx);
-        let files = self.review.get(path).and_then(|state| {
-            let range = super::review::branch_panel_range(
-                state.base.as_deref(),
-                state.review_point.as_ref(),
-                state.since_review,
-            )?;
-            state.files.get(&range).map(|files| {
-                (
-                    files.len(),
-                    files.iter().map(|file| file.added).sum::<usize>(),
-                    files.iter().map(|file| file.removed).sum::<usize>(),
-                )
-            })
-        });
-        let open = self.open_findings(path).len();
-        v_flex()
-            .gap_0p5()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .children(self.view_detail(path, View::Review, cx))
-            .children(files.map(|(count, added, removed)| {
-                h_flex()
-                    .gap_1()
-                    .child(tr!("home-files", { count: count }))
-                    .child(div().text_color(diff.added_fg).child(format!("+{added}")))
                     .child(
                         div()
-                            .text_color(diff.removed_fg)
-                            .child(format!("−{removed}")),
+                            .flex_none()
+                            .text_color(muted)
+                            .child(super::overview_view::ago(now, commit.at)),
                     )
             }))
-            .when(open > 0, |el| {
-                el.child(
-                    div()
-                        .text_color(theme.warning)
-                        .child(tr!("focus-home-remarks", { count: open })),
-                )
-            })
-            .into_any_element()
+            .children(merge.map(|merge| h_flex().child(merge)))
+            .children(github.flatten())
+            .into_any_element();
+        let (glyph, _) = view_name(View::Git);
+        self.home_card(
+            path,
+            glyph,
+            tr!("focus-home-branch"),
+            View::Git,
+            None,
+            Vec::new(),
+            body,
+            cx,
+        )
     }
 
-    /// The principal note: its title, and its first lines.
-    fn home_note(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// The branch's pull request and its last CI run, as the GitHub panel
+    /// read them — for the worktree on show, the one it reads for.
+    fn home_github(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
-        let Some(note) = self.principal_note(path, cx) else {
-            return div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(tr!("focus-notes-none"))
-                .into_any_element();
-        };
-        let pinned = super::store::Store::global(cx)
-            .worktrees
-            .get(path)
-            .and_then(|state| state.pinned_note.as_deref())
-            == Some(note.as_path());
-        let (_, title) = self.card_name(&Node::Note(note.clone()), cx);
-        let lines: Vec<String> = self
-            .canvas_entry(&note)
-            .map(|(_, entry)| {
-                entry
-                    .node
-                    .body
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                    .take(HOME_NOTE_LINES)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        v_flex()
-            .gap_0p5()
-            .child(
+        let muted = theme.muted_foreground;
+        let pr = self.branch_pr().cloned();
+        let run = self.github.runs.first().cloned();
+        let loaded = !self.github.pr_loading && self.github.error.is_none();
+        if pr.is_none() && run.is_none() && !loaded {
+            return None;
+        }
+        let pr_line = match pr {
+            Some(pr) => {
+                let checks = pr.checks();
+                let url = pr.url.clone();
                 h_flex()
-                    .gap_1()
-                    .items_center()
-                    .when(pinned, |el| {
-                        el.child(icon("pin").xsmall().text_color(theme.ring))
-                    })
-                    .child(div().min_w_0().truncate().text_sm().child(title)),
-            )
-            .children(lines.into_iter().map(|line| {
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .truncate()
-                    .child(SharedString::from(line))
-            }))
-            .into_any_element()
-    }
-
-    /// The to-do list: how far it has come, and its first open tasks, ticked
-    /// here.
-    fn home_todo(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let Some(todo) = self.review.get(path).and_then(|state| state.todo.clone()) else {
-            return div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(tr!("todo-none"))
-                .into_any_element();
-        };
-        let open: Vec<_> = todo
-            .tasks
-            .iter()
-            .filter(|task| !task.done)
-            .take(HOME_TASKS)
-            .cloned()
-            .collect();
-        let detail = self.view_detail(path, View::Todo, cx);
-        let rows: Vec<_> = open
-            .into_iter()
-            .map(|task| {
-                let (worktree, line) = (path.to_path_buf(), task.line);
-                h_flex()
+                    .id("focus-home-pr")
                     .gap_1p5()
                     .items_center()
+                    .text_xs()
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .child(
+                        icon("git-pull-request")
+                            .xsmall()
+                            .text_color(if pr.is_draft { muted } else { theme.success }),
+                    )
                     .child(
                         div()
-                            // The tick is its own gesture, not the section's.
-                            .id(("focus-home-task", line))
-                            .on_click(|_, _, cx| cx.stop_propagation())
-                            .child(
-                                Checkbox::new(("focus-home-tick", line))
-                                    .checked(false)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.toggle_task_in(worktree.clone(), line, true, cx);
-                                    })),
-                            ),
+                            .flex_none()
+                            .text_color(muted)
+                            .child(SharedString::from(format!("#{}", pr.number))),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
-                            .child(SharedString::from(task.label)),
+                            .child(SharedString::from(pr.title.clone())),
                     )
-            })
-            .collect();
-        v_flex()
-            .gap_0p5()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .children(detail),
-            )
-            .children(rows)
-            .into_any_element()
+                    .children(
+                        pr.review_note()
+                            .map(|note| div().flex_none().text_color(muted).child(note)),
+                    )
+                    .when(checks.failed > 0, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(format!("✗{}", checks.failed))),
+                        )
+                    })
+                    .when(checks.running > 0, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.warning)
+                                .child(SharedString::from(format!("⟳{}", checks.running))),
+                        )
+                    })
+                    .when(checks.passed > 0, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.success)
+                                .child(SharedString::from(format!("✓{}", checks.passed))),
+                        )
+                    })
+                    .into_any_element()
+            }
+            None => div()
+                .text_xs()
+                .text_color(muted)
+                .child(tr!("focus-home-no-pr"))
+                .into_any_element(),
+        };
+        let run_line = run.map(|run| {
+            let tint = match run.stage() {
+                crate::github::Stage::Passed => theme.success,
+                crate::github::Stage::Failed => theme.danger,
+                crate::github::Stage::Running | crate::github::Stage::Waiting => theme.warning,
+                crate::github::Stage::Skipped => muted,
+            };
+            let url = run.url.clone();
+            h_flex()
+                .id("focus-home-run")
+                .gap_1p5()
+                .items_center()
+                .text_xs()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .child(icon(run.glyph()).xsmall().text_color(tint))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(muted)
+                        .child(SharedString::from(run.workflow.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(run.title.clone())),
+                )
+        });
+        Some(
+            v_flex()
+                .gap_1()
+                .pt_1p5()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(pr_line)
+                .children(run_line)
+                .into_any_element(),
+        )
     }
 
-    /// The agents: a line per terminal, and what its agent is doing.
-    fn home_agents(
-        &self,
-        path: &Path,
-        at_work: &overview::AtWork,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// What waits for a commit: its files, the first few, and the way to
+    /// the git tab where it is committed.
+    fn home_to_commit(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let ids = self.board_terminals(path);
-        if ids.is_empty() {
-            return div()
+        let files: Vec<crate::git::FileStatus> = if self.has_changes(path) {
+            self.review
+                .get(path)
+                .map(|state| state.status.files.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let body = if files.is_empty() {
+            div()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(tr!("focus-terminals-none"))
-                .into_any_element();
+                .child(tr!("home-clean"))
+                .into_any_element()
+        } else {
+            let more = files.len().saturating_sub(HOME_FILES);
+            v_flex()
+                .gap_0p5()
+                .children(files.into_iter().take(HOME_FILES).map(|file| {
+                    let tint = if file.is_untracked() {
+                        crate::git::StatusCode::Untracked
+                    } else if file.is_unstaged() {
+                        file.worktree
+                    } else {
+                        file.index
+                    };
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .text_xs()
+                        .child(crate::ui::file_icons::file_icon(&file.path, cx))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(super::theme::status_color(tint, cx))
+                                .child(SharedString::from(file.path.display().to_string())),
+                        )
+                }))
+                .when(more > 0, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(tr!("focus-home-more", { count: more })),
+                    )
+                })
+                .into_any_element()
+        };
+        let worktree = path.to_path_buf();
+        let actions = vec![Button::new("focus-home-commit")
+            .xsmall()
+            .primary()
+            .icon(icon("git-commit-horizontal"))
+            .label(tr!("focus-attention-commit"))
+            .disabled(!self.has_changes(path))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.show_board_view(&worktree, View::Git, cx);
+            }))
+            .into_any_element()];
+        let detail = self.view_detail(path, View::Git, cx);
+        self.home_card(
+            path,
+            "git-commit-horizontal",
+            tr!("focus-home-to-commit"),
+            View::Git,
+            detail,
+            actions,
+            body,
+            cx,
+        )
+    }
+
+    /// The review: its size, its heaviest files with a bar each, when it was
+    /// last read and what remarks are still open.
+    fn home_review(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let diff = super::theme::DiffColors::of(cx);
+        let files: Option<Vec<(std::path::PathBuf, usize, usize)>> =
+            self.review.get(path).and_then(|state| {
+                let range = super::review::branch_panel_range(
+                    state.base.as_deref(),
+                    state.review_point.as_ref(),
+                    state.since_review,
+                )?;
+                state.files.get(&range).map(|files| {
+                    files
+                        .iter()
+                        .map(|file| (file.path.clone(), file.added, file.removed))
+                        .collect()
+                })
+            });
+        let point = self
+            .review
+            .get(path)
+            .and_then(|state| state.review_point.as_ref().map(|point| point.at));
+        let open = self.open_findings(path).len();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        match &files {
+            Some(files) => {
+                let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.1, r + f.2));
+                rows.push(
+                    h_flex()
+                        .gap_1p5()
+                        .text_xs()
+                        .child(tr!("home-files", { count: files.len() }))
+                        .child(div().text_color(diff.added_fg).child(format!("+{added}")))
+                        .child(
+                            div()
+                                .text_color(diff.removed_fg)
+                                .child(format!("−{removed}")),
+                        )
+                        .into_any_element(),
+                );
+                for (file, added, removed, share) in focus::heaviest(files, HOME_HEAVIEST) {
+                    let name = file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    rows.push(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(64.))
+                                    .h(px(6.))
+                                    .rounded_full()
+                                    .bg(theme.secondary)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .rounded_full()
+                                            .bg(theme.info.opacity(0.7))
+                                            .w(px(64. * share.max(0.04))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(SharedString::from(name)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(diff.added_fg)
+                                    .child(format!("+{added}")),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(diff.removed_fg)
+                                    .child(format!("−{removed}")),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+            None if self.active.as_deref() != Some(path) => rows.push(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(tr!("focus-review-idle"))
+                    .into_any_element(),
+            ),
+            None => rows.push(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(tr!("review-loading"))
+                    .into_any_element(),
+            ),
         }
-        v_flex()
-            .gap_0p5()
-            .children(ids.into_iter().map(|id| {
-                let (_, name) = self.card_name(&Node::Terminal(id), cx);
-                let doing = at_work.terminals.get(&id).copied().unwrap_or(Doing::Rest);
-                let (word, tint) = match doing {
-                    Doing::Working => (Some(tr!("focus-agent-working")), theme.warning),
-                    Doing::Waiting => (Some(tr!("focus-agent-waiting")), theme.danger),
-                    Doing::Rest => (None, theme.muted_foreground),
-                };
+        let mut foot: Vec<SharedString> = Vec::new();
+        if let Some(at) = point {
+            let when = super::overview_view::ago(chrono::Utc::now().timestamp(), at);
+            foot.push(tr!("focus-home-reviewed", { when: when }));
+        }
+        if open > 0 {
+            foot.push(tr!("focus-home-remarks", { count: open }));
+        }
+        if !foot.is_empty() {
+            rows.push(
+                div()
+                    .text_xs()
+                    .text_color(if open > 0 { theme.warning } else { muted })
+                    .child(SharedString::from(foot.join(" · ")))
+                    .into_any_element(),
+            );
+        }
+        let detail = self.view_detail(path, View::Review, cx);
+        let (glyph, title) = view_name(View::Review);
+        let body = v_flex().gap_1().children(rows).into_any_element();
+        self.home_card(
+            path,
+            glyph,
+            title,
+            View::Review,
+            detail,
+            Vec::new(),
+            body,
+            cx,
+        )
+    }
+
+    /// What runs: the environment and the recipes, each with its state and
+    /// its ▶ — ↻ while it runs — and ■. `None` for a worktree with nothing
+    /// to run.
+    fn home_run(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let configs = self.run_configs(path);
+        if configs.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let rows: Vec<AnyElement> = configs
+            .into_iter()
+            .enumerate()
+            .map(|(index, config)| {
+                let running = self.runs(path, &config, cx);
+                let name = Self::config_name(&config);
+                let is_env = matches!(config, super::run::RunConfig::Env);
+                let (start_path, start_config) = (path.to_path_buf(), config.clone());
+                let (stop_path, stop_config) = (path.to_path_buf(), config);
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(div().flex_none().size(px(6.)).rounded_full().bg(tint))
-                    .child(div().flex_1().min_w_0().truncate().text_xs().child(name))
-                    .children(
-                        word.map(|word| div().flex_none().text_xs().text_color(tint).child(word)),
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(if running { theme.success } else { theme.border }),
                     )
-            }))
-            .into_any_element()
+                    .child(
+                        icon(if is_env { "zap" } else { "play" })
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                    .child(
+                        Button::new(("focus-home-run-start", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon(if running && !is_env {
+                                "refresh-cw"
+                            } else {
+                                "play"
+                            }))
+                            .disabled(running && is_env)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_config(&start_path, &start_config, window, cx);
+                            })),
+                    )
+                    .when(running, |el| {
+                        el.child(
+                            Button::new(("focus-home-run-stop", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("circle-stop"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.stop_config(&stop_path, &stop_config, window, cx);
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        let body = v_flex().gap_1().children(rows).into_any_element();
+        Some(self.home_card(
+            path,
+            "play",
+            tr!("focus-home-run"),
+            View::Terminals,
+            None,
+            Vec::new(),
+            body,
+            cx,
+        ))
     }
 }

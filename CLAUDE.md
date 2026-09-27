@@ -225,8 +225,9 @@ src/
     focus_view.rs   la vue par défaut de l'accueil : la barre latérale des
                     worktrees (ou son rail), et ceux choisis côte à côte,
                     chacun sur son tableau, et les vues sous ses onglets
-    summary_view.rs les onglets d'un tableau, et son Accueil : Git, Revue,
-                    note principale, TODO, agents, en cartes
+    summary_view.rs les onglets d'un tableau, et son Accueil : ce qui attend
+                    la main, puis agents, tâches, note, branche, PR et CI,
+                    ce qui attend un commit, revue, ce qui tourne
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes
     revive.rs       les terminaux qui survivent à la fenêtre : quelle session
                     Claude un onglet porte, la commande qui la reprend — pur
@@ -690,8 +691,22 @@ worktree.
   qu'il tient dans l'instant est **rangé par worktree**.
   **Un tableau, ce sont des onglets et une seule vue** (`ui::summary_view`,
   `ui::focus`) : **Accueil**, Git, Revue, note principale, TODO, agents.
-  L'Accueil est le résumé du worktree en un écran, une carte par section,
-  et une carte pressée ouvre son onglet ; l'onglet choisi est retenu par
+  **L'Accueil répond à « qu'est-ce qui m'attend ici » avant « qu'est-ce
+  qu'il y a »** : en tête un bandeau de ce qui attend la main — la question
+  d'un agent, un conflit, une CI rouge, des commits à tirer, des fichiers à
+  valider, des remarques, des commits à pousser —, chacun avec le bouton qui
+  le traite, et aucun bandeau quand tout est calme (`focus::attention`) ;
+  dessous, à gauche ce qui bouge (les agents et leurs dernières lignes, les
+  tâches, la note principale), à droite ce qui tient (la branche, sa PR et
+  sa CI, ce qui attend un commit, la revue, ce qui tourne). Le titre d'une
+  carte ouvre son onglet, un geste simple se fait sur la carte, une carte
+  vide dit ce qui la remplit. **L'aperçu d'un terminal est une entité**
+  (`TerminalPreview`) que la vue du terminal notifie : un terminal se
+  repeint lui-même sur sa sortie, pas l'application, et lu dans son rendu
+  l'aperçu restait à la dernière frame ; il lit l'instantané que le terminal
+  garde pour lui (`TerminalView::tail`), sans verrou ni copie de la grille.
+  La PR et la CI ne sont lues que pour le worktree regardé, l'état GitHub
+  n'en suivant qu'un ; l'onglet choisi est retenu par
   worktree (`focus_view`), l'Accueil à défaut. Il y a eu des colonnes de
   cartes arrangées à la main, puis une colonne par type ouvrable côte à
   côte, puis un résumé en colonne et une vue à côté : un diff, deux

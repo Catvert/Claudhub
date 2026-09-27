@@ -416,6 +416,19 @@ impl TerminalView {
         self.restyled = true;
     }
 
+    /// The last lines the terminal shows, for a preview — read off the
+    /// snapshot it keeps for its own paint, so neither the grid's lock nor a
+    /// copy of it: see `focus::tail_lines`.
+    pub fn tail(&self, count: usize) -> Vec<String> {
+        let lines: Vec<String> = self
+            .snapshot
+            .lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
+        crate::ui::focus::tail_lines(&lines, count)
+    }
+
     pub fn has_exited(&self) -> bool {
         self.terminal.has_exited()
     }

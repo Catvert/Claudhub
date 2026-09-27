@@ -31,7 +31,7 @@ use crate::ui::run::{self, RunConfig};
 
 impl ClaudhubApp {
     /// A worktree's configurations — see `run::configs`.
-    fn run_configs(&self, worktree: &Path) -> Vec<RunConfig> {
+    pub(super) fn run_configs(&self, worktree: &Path) -> Vec<RunConfig> {
         let recipes: Vec<String> = self
             .just_recipes(worktree)
             .map(|snapshot| {
@@ -54,7 +54,7 @@ impl ClaudhubApp {
     }
 
     /// Whether a configuration runs now.
-    fn runs(&self, worktree: &Path, config: &RunConfig, cx: &Context<Self>) -> bool {
+    pub(super) fn runs(&self, worktree: &Path, config: &RunConfig, cx: &Context<Self>) -> bool {
         match config {
             RunConfig::Env => self
                 .wt_state(worktree)
@@ -79,7 +79,7 @@ impl ClaudhubApp {
 
     /// Starts a configuration — again, for a recipe that runs: its tabs are
     /// closed first, what they held going with them.
-    fn start_config(
+    pub(super) fn start_config(
         &mut self,
         worktree: &Path,
         config: &RunConfig,
@@ -108,7 +108,7 @@ impl ClaudhubApp {
     /// Stops a configuration: `wt down`, or the recipe interrupted, its tab
     /// closing once it has ended — at once, on a second press, for a recipe
     /// that does not end on `Ctrl+C`.
-    fn stop_config(
+    pub(super) fn stop_config(
         &mut self,
         worktree: &Path,
         config: &RunConfig,
@@ -146,7 +146,7 @@ impl ClaudhubApp {
     }
 
     /// What a configuration is called in the widget and its menu.
-    fn config_name(config: &RunConfig) -> SharedString {
+    pub(super) fn config_name(config: &RunConfig) -> SharedString {
         match config {
             RunConfig::Env => tr!("run-env"),
             RunConfig::Recipe(name) => SharedString::from(name.clone()),
