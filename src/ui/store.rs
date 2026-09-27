@@ -24,6 +24,7 @@ use gpui_kit::{App, BorrowAppContext};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::notes::Note;
+use crate::ui::overview::Node;
 
 /// The same delay as the settings: short enough that an abrupt shutdown loses
 /// nothing visible, long enough that a mouse drag does not write one file per
@@ -338,6 +339,137 @@ pub struct NodePlace {
     pub hidden: bool,
 }
 
+/// A node's arrangement where the store keeps it, borrowed to be written.
+/// The git node and a worktree's card keep theirs in fields of their own —
+/// written before `NodePlace` was, and a field does not change its shape —
+/// the others in a `NodePlace`.
+pub struct PlaceMut<'a> {
+    pub offset: &'a mut Option<(f32, f32)>,
+    pub size: &'a mut Option<(f32, f32)>,
+    pub collapsed: &'a mut bool,
+    /// `None` for the git node, which is never taken off the plane.
+    pub hidden: Option<&'a mut bool>,
+}
+
+impl PlaceMut<'_> {
+    /// Back to where the tree puts it, at the size it starts at, unfolded
+    /// and on the plane.
+    fn reset(self) {
+        *self.offset = None;
+        *self.size = None;
+        *self.collapsed = false;
+        if let Some(hidden) = self.hidden {
+            *hidden = false;
+        }
+    }
+}
+
+impl Store {
+    /// Where a node of the home screen keeps its arrangement, the entry made
+    /// if need be. `None` for a terminal, whose place goes with the rest of
+    /// it (`SavedTerminal`).
+    pub fn home_place_mut(&mut self, node: &Node) -> Option<PlaceMut<'_>> {
+        Some(match node {
+            Node::Git(main) => {
+                let repo = self.repos.entry(main.clone()).or_default();
+                PlaceMut {
+                    offset: &mut repo.home_offset,
+                    size: &mut repo.home_size,
+                    collapsed: &mut repo.home_collapsed,
+                    hidden: None,
+                }
+            }
+            Node::Worktree(path) => {
+                let worktree = self.worktrees.entry(path.clone()).or_default();
+                PlaceMut {
+                    offset: &mut worktree.home_offset,
+                    size: &mut worktree.home_size,
+                    collapsed: &mut worktree.home_collapsed,
+                    hidden: Some(&mut worktree.home_hidden),
+                }
+            }
+            Node::Note(path) => self.home_places.entry(path.clone()).or_default().as_mut(),
+            Node::Changes(path) => self
+                .worktrees
+                .entry(path.clone())
+                .or_default()
+                .home_changes
+                .as_mut(),
+            Node::Review(path) => self
+                .worktrees
+                .entry(path.clone())
+                .or_default()
+                .home_review
+                .as_mut(),
+            Node::Terminal(_) => return None,
+        })
+    }
+
+    /// Every node's arrangement kept, as the plane reads it back.
+    pub fn home_places_kept(&self) -> impl Iterator<Item = (Node, NodePlace)> + '_ {
+        let repos = self.repos.iter().map(|(main, repo)| {
+            let place = NodePlace {
+                offset: repo.home_offset,
+                size: repo.home_size,
+                collapsed: repo.home_collapsed,
+                hidden: false,
+            };
+            (Node::Git(main.clone()), place)
+        });
+        let worktrees = self.worktrees.iter().flat_map(|(path, worktree)| {
+            let card = NodePlace {
+                offset: worktree.home_offset,
+                size: worktree.home_size,
+                collapsed: worktree.home_collapsed,
+                hidden: worktree.home_hidden,
+            };
+            [
+                (Node::Worktree(path.clone()), card),
+                (Node::Changes(path.clone()), worktree.home_changes.clone()),
+                (Node::Review(path.clone()), worktree.home_review.clone()),
+            ]
+        });
+        let notes = self
+            .home_places
+            .iter()
+            .map(|(path, place)| (Node::Note(path.clone()), place.clone()));
+        repos.chain(worktrees).chain(notes)
+    }
+
+    /// Forgets how the hand arranged a node — only where something is
+    /// kept: a reset makes no entry. A note's place is its own entry, and
+    /// goes whole.
+    pub fn forget_home_place(&mut self, node: &Node) {
+        let kept = match node {
+            Node::Git(main) => self.repos.contains_key(main),
+            Node::Worktree(path) | Node::Changes(path) | Node::Review(path) => {
+                self.worktrees.contains_key(path)
+            }
+            Node::Note(path) => {
+                self.home_places.remove(path);
+                false
+            }
+            Node::Terminal(_) => false,
+        };
+        if kept {
+            if let Some(place) = self.home_place_mut(node) {
+                place.reset();
+            }
+        }
+    }
+}
+
+impl NodePlace {
+    fn as_mut(&mut self) -> PlaceMut<'_> {
+        PlaceMut {
+            offset: &mut self.offset,
+            size: &mut self.size,
+            collapsed: &mut self.collapsed,
+            hidden: Some(&mut self.hidden),
+        }
+    }
+}
+
 /// A terminal as it is kept across a restart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedTerminal {
@@ -646,6 +778,51 @@ fn state_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_place_is_written_where_it_was_always_kept() {
+        let mut store = Store::default();
+        let (git, card, note) = (
+            Node::Git("/r".into()),
+            Node::Worktree("/w".into()),
+            Node::Note("/n.md".into()),
+        );
+        for node in [&git, &card, &note, &Node::Changes("/w".into())] {
+            let place = store.home_place_mut(node).unwrap();
+            *place.offset = Some((1., 2.));
+            *place.collapsed = true;
+            if let Some(hidden) = place.hidden {
+                *hidden = true;
+            }
+        }
+        assert!(store.home_place_mut(&Node::Terminal(7)).is_none());
+        // The fields of before, their names and shapes untouched.
+        assert_eq!(store.repos[Path::new("/r")].home_offset, Some((1., 2.)));
+        assert!(store.repos[Path::new("/r")].home_collapsed);
+        let worktree = &store.worktrees[Path::new("/w")];
+        assert!(worktree.home_collapsed && worktree.home_hidden);
+        assert_eq!(worktree.home_changes.offset, Some((1., 2.)));
+        assert_eq!(worktree.home_review, NodePlace::default());
+        let kept: Vec<(Node, NodePlace)> = store.home_places_kept().collect();
+        assert!(kept.contains(&(
+            git.clone(),
+            NodePlace {
+                offset: Some((1., 2.)),
+                size: None,
+                collapsed: true,
+                hidden: false,
+            }
+        )));
+        assert_eq!(kept.len(), 5);
+
+        // A reset makes no entry, and a note's goes whole.
+        store.forget_home_place(&card);
+        store.forget_home_place(&note);
+        store.forget_home_place(&Node::Worktree("/other".into()));
+        assert!(!store.worktrees[Path::new("/w")].home_hidden);
+        assert!(store.home_places.is_empty());
+        assert!(!store.worktrees.contains_key(Path::new("/other")));
+    }
 
     #[test]
     fn missing_keys_take_their_defaults() {

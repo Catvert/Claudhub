@@ -982,38 +982,14 @@ impl ClaudhubApp {
             return;
         }
         super::store::Store::update_global(cx, |store| {
-            let (home_offset, home_size) = match &node {
-                Node::Git(main) => {
-                    let repo = store.repos.entry(main.clone()).or_default();
-                    (&mut repo.home_offset, &mut repo.home_size)
-                }
-                Node::Worktree(path) => {
-                    let worktree = store.worktrees.entry(path.clone()).or_default();
-                    (&mut worktree.home_offset, &mut worktree.home_size)
-                }
-                Node::Note(path) => {
-                    let place = store.home_places.entry(path.clone()).or_default();
-                    (&mut place.offset, &mut place.size)
-                }
-                Node::Changes(path) => {
-                    let place = &mut store
-                        .worktrees
-                        .entry(path.clone())
-                        .or_default()
-                        .home_changes;
-                    (&mut place.offset, &mut place.size)
-                }
-                Node::Review(path) => {
-                    let place = &mut store.worktrees.entry(path.clone()).or_default().home_review;
-                    (&mut place.offset, &mut place.size)
-                }
-                Node::Terminal(_) => return,
+            let Some(place) = store.home_place_mut(&node) else {
+                return;
             };
             if offset.is_some() {
-                *home_offset = offset;
+                *place.offset = offset;
             }
             if size.is_some() {
-                *home_size = size;
+                *place.size = size;
             }
         });
     }
@@ -1024,28 +1000,12 @@ impl ClaudhubApp {
         let moved = &self.overview_hand.moved;
         super::store::Store::update_global(cx, |store| {
             for node in nodes {
-                let offset = moved.get(node).copied();
-                match node {
-                    Node::Git(main) => {
-                        store.repos.entry(main.clone()).or_default().home_offset = offset
-                    }
-                    Node::Worktree(path) => {
-                        store.worktrees.entry(path.clone()).or_default().home_offset = offset
-                    }
-                    Node::Note(path) => {
-                        store.home_places.entry(path.clone()).or_default().offset = offset
-                    }
-                    Node::Changes(path) => {
-                        store
-                            .worktrees
-                            .entry(path.clone())
-                            .or_default()
-                            .home_changes
-                            .offset = offset
-                    }
-                    // Never moved off a tree it is not in.
-                    Node::Review(_) => {}
-                    Node::Terminal(_) => {}
+                // Never moved off a tree it is not in.
+                if matches!(node, Node::Review(_)) {
+                    continue;
+                }
+                if let Some(place) = store.home_place_mut(node) {
+                    *place.offset = moved.get(node).copied();
                 }
             }
         });
@@ -1057,70 +1017,19 @@ impl ClaudhubApp {
             return;
         }
         self.overview_loaded = true;
-        let store = super::store::Store::global(cx);
-        let remembered = store
-            .repos
-            .iter()
-            .map(|(main, repo)| {
-                (
-                    Node::Git(main.clone()),
-                    repo.home_offset,
-                    repo.home_size,
-                    repo.home_collapsed,
-                    false,
-                )
-            })
-            .chain(store.worktrees.iter().map(|(path, worktree)| {
-                (
-                    Node::Worktree(path.clone()),
-                    worktree.home_offset,
-                    worktree.home_size,
-                    worktree.home_collapsed,
-                    worktree.home_hidden,
-                )
-            }))
-            .chain(store.worktrees.iter().map(|(path, worktree)| {
-                let place = &worktree.home_changes;
-                (
-                    Node::Changes(path.clone()),
-                    place.offset,
-                    place.size,
-                    place.collapsed,
-                    place.hidden,
-                )
-            }))
-            .chain(store.worktrees.iter().map(|(path, worktree)| {
-                let place = &worktree.home_review;
-                (
-                    Node::Review(path.clone()),
-                    place.offset,
-                    place.size,
-                    place.collapsed,
-                    place.hidden,
-                )
-            }))
-            .chain(store.home_places.iter().map(|(path, place)| {
-                (
-                    Node::Note(path.clone()),
-                    place.offset,
-                    place.size,
-                    place.collapsed,
-                    place.hidden,
-                )
-            }))
-            .collect::<Vec<_>>();
+        let remembered: Vec<_> = super::store::Store::global(cx).home_places_kept().collect();
         let hand = &mut self.overview_hand;
-        for (node, offset, size, collapsed, hidden) in remembered {
-            if let Some(offset) = offset {
+        for (node, place) in remembered {
+            if let Some(offset) = place.offset {
                 hand.moved.insert(node.clone(), offset);
             }
-            if let Some(size) = size {
+            if let Some(size) = place.size {
                 hand.sizes.insert(node.clone(), size);
             }
-            if collapsed {
+            if place.collapsed {
                 hand.collapsed.insert(node.clone());
             }
-            if hidden {
+            if place.hidden {
                 hand.hidden.insert(node);
             }
         }
@@ -1226,37 +1135,7 @@ impl ClaudhubApp {
         }
         super::store::Store::update_global(cx, |store| {
             for node in &nodes {
-                match node {
-                    Node::Git(main) => {
-                        if let Some(repo) = store.repos.get_mut(main) {
-                            repo.home_offset = None;
-                            repo.home_size = None;
-                            repo.home_collapsed = false;
-                        }
-                    }
-                    Node::Worktree(path) => {
-                        if let Some(worktree) = store.worktrees.get_mut(path) {
-                            worktree.home_offset = None;
-                            worktree.home_size = None;
-                            worktree.home_collapsed = false;
-                            worktree.home_hidden = false;
-                        }
-                    }
-                    Node::Note(path) => {
-                        store.home_places.remove(path);
-                    }
-                    Node::Changes(path) => {
-                        if let Some(worktree) = store.worktrees.get_mut(path) {
-                            worktree.home_changes = Default::default();
-                        }
-                    }
-                    Node::Review(path) => {
-                        if let Some(worktree) = store.worktrees.get_mut(path) {
-                            worktree.home_review = Default::default();
-                        }
-                    }
-                    Node::Terminal(_) => {}
-                }
+                store.forget_home_place(node);
             }
         });
         // On the boards, the view goes back to what a board opens on.
@@ -3384,33 +3263,14 @@ impl ClaudhubApp {
     pub(super) fn remember_folds(&self, node: &Node, cx: &mut Context<Self>) {
         let folded = self.overview_hand.collapsed.contains(node);
         let hidden = self.overview_hand.hidden.contains(node);
-        super::store::Store::update_global(cx, |store| match node {
-            Node::Git(main) => store.repos.entry(main.clone()).or_default().home_collapsed = folded,
-            Node::Worktree(path) => {
-                let state = store.worktrees.entry(path.clone()).or_default();
-                state.home_collapsed = folded;
-                state.home_hidden = hidden;
+        super::store::Store::update_global(cx, |store| {
+            if let Some(place) = store.home_place_mut(node) {
+                *place.collapsed = folded;
+                // The git node is never hidden: it has nowhere to keep it.
+                if let Some(kept) = place.hidden {
+                    *kept = hidden;
+                }
             }
-            Node::Note(path) => {
-                let place = store.home_places.entry(path.clone()).or_default();
-                place.collapsed = folded;
-                place.hidden = hidden;
-            }
-            Node::Changes(path) => {
-                let place = &mut store
-                    .worktrees
-                    .entry(path.clone())
-                    .or_default()
-                    .home_changes;
-                place.collapsed = folded;
-                place.hidden = hidden;
-            }
-            Node::Review(path) => {
-                let place = &mut store.worktrees.entry(path.clone()).or_default().home_review;
-                place.collapsed = folded;
-                place.hidden = hidden;
-            }
-            Node::Terminal(_) => {}
         });
     }
 
