@@ -676,7 +676,7 @@ pub fn merge_command(number: u64, how: MergeHow) -> String {
 }
 
 /// Single-quotes a value for `sh -c`: every `gh` line is one.
-pub use crate::text::single_quoted as quote;
+pub use crate::cmdline::single_quoted as quote;
 
 #[cfg(test)]
 mod tests {

@@ -1353,9 +1353,9 @@ pub fn run(
 /// the message when there is no account), stderr's tail, and the wall-clock
 /// time.
 ///
-/// The lines travel through a channel rather than being read in place — the
-/// reason `git`'s streaming does the same: a read blocked on a command that
-/// says nothing would have no ceiling, and the ceiling is the point.
+/// The following is `git::follow_lines`, `git grep`'s own, with stderr beside
+/// stdout and the stop button polled; the kill is this module's, for the whole
+/// process group.
 #[allow(clippy::type_complexity)]
 fn follow(
     mut cmd: Command,
@@ -1363,8 +1363,6 @@ fn follow(
     id: u64,
     progress: &(dyn Fn(String) + Sync),
 ) -> std::result::Result<(String, Vec<String>, String, u64), String> {
-    use std::io::BufRead;
-
     let started = std::time::Instant::now();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1384,30 +1382,8 @@ fn follow(
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn().map_err(|e| format!("{what}: {e}"))?;
 
-    let (lines, incoming) = std::sync::mpsc::sync_channel::<(bool, String)>(256);
-    let mut readers = Vec::new();
     let stdout = child.stdout.take().expect("stdout requested as piped");
     let stderr = child.stderr.take().expect("stderr requested as piped");
-    for (is_err, stream) in [
-        (false, Box::new(stdout) as Box<dyn std::io::Read + Send>),
-        (true, Box::new(stderr) as Box<dyn std::io::Read + Send>),
-    ] {
-        let lines = lines.clone();
-        readers.push(std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stream).split(b'\n') {
-                let Ok(line) = line else { break };
-                let mut line = String::from_utf8_lossy(&line).into_owned();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-                if lines.send((is_err, line)).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    drop(lines);
-
     let deadline = started + RUN_TIMEOUT;
     let mut kept: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut err_tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -1415,46 +1391,39 @@ fn follow(
     // nothing: that poll is what lets the stop button reach a worker whose
     // whole queue is this very run.
     const POLL: Duration = Duration::from_millis(250);
-    let ended = loop {
-        if stop_requested(id) {
-            stop_obeyed(id);
-            break Some(STOPPED.to_string());
-        }
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            break Some(format!(
-                "{what} did not answer within {RUN_TIMEOUT:?} and was interrupted"
-            ));
-        }
-        match incoming.recv_timeout((deadline - now).min(POLL)) {
-            Ok((is_err, line)) => {
-                let line = crate::text::strip_ansi(&line);
-                let tail = if is_err { &mut err_tail } else { &mut kept };
-                if tail.len() == COMPLAINT_KEPT {
-                    tail.pop_front();
-                }
-                tail.push_back(line.clone());
-                progress(line);
+    let heard = crate::git::follow_lines(
+        vec![
+            (false, Box::new(stdout) as Box<dyn std::io::Read + Send>),
+            (true, Box::new(stderr) as Box<dyn std::io::Read + Send>),
+        ],
+        deadline,
+        POLL,
+        || stop_requested(id),
+        |is_err, line| {
+            let line = crate::text::strip_ansi(line.strip_suffix('\r').unwrap_or(&line));
+            let tail = if is_err { &mut err_tail } else { &mut kept };
+            if tail.len() == COMPLAINT_KEPT {
+                tail.pop_front();
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            tail.push_back(line.clone());
+            progress(line);
+            true
+        },
+    );
+    // Only the stop ends it early: every line is taken.
+    let why = match heard {
+        crate::git::Heard::Closed => None,
+        crate::git::Heard::Enough => {
+            stop_obeyed(id);
+            Some(STOPPED.to_string())
         }
+        crate::git::Heard::Overran => Some(format!(
+            "{what} did not answer within {RUN_TIMEOUT:?} and was interrupted"
+        )),
     };
-    if let Some(why) = ended {
-        // The receiver goes first. A reader blocked on a full channel — a
-        // suite narrating faster than it was drained — waits in `send`, not
-        // in `read`, so killing the process does not wake it: only a closed
-        // channel does, and the join below would wait for good, taking the
-        // Tests worker with it.
-        drop(incoming);
+    if let Some(why) = why {
         kill_run(&mut child);
-        for reader in readers {
-            let _ = reader.join();
-        }
         return Err(why);
-    }
-    for reader in readers {
-        let _ = reader.join();
     }
     // The streams are closed: the process is exiting. The bounded wait is for
     // the one that closed its outputs and wedged anyway.
@@ -1981,7 +1950,7 @@ fn shell_word(part: &str) -> String {
     if quoted != part || !(expands || part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c))) {
         return quoted;
     }
-    crate::text::single_quoted(part)
+    crate::cmdline::single_quoted(part)
 }
 
 /// The arguments that narrow a JS run to `target.path`, **anchored**: neither
