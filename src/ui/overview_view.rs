@@ -213,60 +213,71 @@ impl ClaudhubApp {
         overview::plan(&self.overview_groups(), &self.overview_hand)
     }
 
-    /// What the plane holds, before it is laid out.
-    pub(super) fn overview_groups(&self) -> Vec<Group<'_>> {
-        // A worktree's nodes hang from its card, unless they say they are
-        // the repository's; a repository's note versioned on several branches
-        // is one note, shown once — the main checkout's copy first.
-        let entries = |worktree: &Path| {
-            self.canvas
-                .get(worktree)
-                .map(|entries| entries.as_slice())
-                .unwrap_or(&[])
-        };
-        let repo_notes = |repo: &crate::ui::repos::RepoState| -> Vec<PathBuf> {
-            let mut seen: Vec<(bool, std::ffi::OsString)> = Vec::new();
-            let mut notes = Vec::new();
-            let mut checkouts: Vec<_> = repo.worktrees.iter().collect();
-            checkouts.sort_by_key(|worktree| !worktree.is_main);
-            for worktree in checkouts {
-                for entry in entries(&worktree.path) {
-                    if entry.node.anchor != crate::canvas::Anchor::Repo {
-                        continue;
-                    }
-                    let key = (
-                        entry.private,
-                        entry.path.file_name().unwrap_or_default().to_os_string(),
-                    );
-                    if !seen.contains(&key) {
-                        seen.push(key);
-                        notes.push(entry.path.clone());
-                    }
+    /// A worktree's nodes read off the disk.
+    fn canvas_entries(&self, worktree: &Path) -> &[crate::ui::canvas_view::CanvasEntry] {
+        self.canvas
+            .get(worktree)
+            .map(|entries| entries.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// A repository's notes. A worktree's nodes hang from its card, unless
+    /// they say they are the repository's; a repository's note versioned on
+    /// several branches is one note, shown once — the main checkout's copy
+    /// first.
+    pub(super) fn repo_notes(&self, repo: &crate::ui::repos::RepoState) -> Vec<PathBuf> {
+        let mut seen: Vec<(bool, std::ffi::OsString)> = Vec::new();
+        let mut notes = Vec::new();
+        let mut checkouts: Vec<_> = repo.worktrees.iter().collect();
+        checkouts.sort_by_key(|worktree| !worktree.is_main);
+        for worktree in checkouts {
+            for entry in self.canvas_entries(&worktree.path) {
+                if entry.node.anchor != crate::canvas::Anchor::Repo {
+                    continue;
+                }
+                let key = (
+                    entry.private,
+                    entry.path.file_name().unwrap_or_default().to_os_string(),
+                );
+                if !seen.contains(&key) {
+                    seen.push(key);
+                    notes.push(entry.path.clone());
                 }
             }
-            notes
-        };
-        let worktree_notes = |worktree: &Path| -> Vec<PathBuf> {
-            entries(worktree)
-                .iter()
-                .filter(|entry| entry.node.anchor == crate::canvas::Anchor::Worktree)
-                .map(|entry| entry.path.clone())
-                .collect()
-        };
+        }
+        notes
+    }
+
+    /// A worktree's own notes — see `repo_notes`.
+    pub(super) fn worktree_notes(&self, worktree: &Path) -> Vec<PathBuf> {
+        self.canvas_entries(worktree)
+            .iter()
+            .filter(|entry| entry.node.anchor == crate::canvas::Anchor::Worktree)
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// What the plane holds, before it is laid out.
+    pub(super) fn overview_groups(&self) -> Vec<Group<'_>> {
+        let shown = self.focus_worktrees();
         let groups: Vec<Group> = self
-            .overview_repos()
-            .into_iter()
-            .map(|repo| (repo, self.overview_worktrees_of(repo)))
-            .map(|(repo, shown)| Group {
+            .repos
+            .iter()
+            .filter(|repo| {
+                repo.worktrees
+                    .iter()
+                    .any(|worktree| shown.contains(&worktree.path))
+            })
+            .map(|repo| Group {
                 main: &repo.main,
-                notes: repo_notes(repo),
+                notes: self.repo_notes(repo),
                 checkouts: repo
                     .worktrees
                     .iter()
                     // The worktrees not ticked are not on this plane; the git
                     // node and the repository's notes stay, being every
-                    // worktree's.
-                    .filter(|worktree| shown.contains(&worktree.path))
+                    // worktree's. `live_worktrees`' rule, the list read once.
+                    .filter(|worktree| !worktree.prunable && shown.contains(&worktree.path))
                     .map(|worktree| Checkout {
                         path: &worktree.path,
                         branch: worktree.branch.as_deref(),
@@ -282,7 +293,7 @@ impl ClaudhubApp {
                             .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.size))
                             .collect(),
                         changes: self.has_changes(&worktree.path),
-                        notes: worktree_notes(&worktree.path),
+                        notes: self.worktree_notes(&worktree.path),
                     })
                     .collect(),
             })
@@ -304,12 +315,14 @@ impl ClaudhubApp {
         // The places kept from the last session, once — the screen may come
         // up with the window, before any toggle has read them.
         self.load_overview_places(cx);
+        let frame = self.home_frame();
         // Each card carries its checkout's run button, so each checkout's
         // justfile is read — once, as the title bar reads the one on show.
-        let checkouts: Vec<PathBuf> = self
-            .overview_groups()
+        let checkouts: Vec<PathBuf> = frame
+            .live
             .iter()
-            .flat_map(|group| group.checkouts.iter().map(|c| c.path.to_path_buf()))
+            .filter(|path| frame.shown.contains(path))
+            .cloned()
             .collect();
         for checkout in &checkouts {
             self.ensure_just(checkout);
@@ -317,28 +330,27 @@ impl ClaudhubApp {
         // And the list of what each has to commit, for its changes node.
         self.ensure_changes_read(&checkouts, cx);
         match self.home_mode {
-            HomeMode::Focus => self.render_overview_focus(window, cx),
-            HomeMode::Canvas => self.render_overview_canvas(window, cx),
+            HomeMode::Focus => self.render_overview_focus(&frame, window, cx),
+            HomeMode::Canvas => self.render_overview_canvas(&frame, window, cx),
         }
     }
 
     /// The plane, beside the sidebar that chose what it shows.
     fn render_overview_canvas(
         &mut self,
+        frame: &super::focus_view::HomeFrame,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let shown = self.focus_worktrees();
         // Another choice is another plane to frame, whether the sidebar
         // made it or a worktree was picked elsewhere in the window.
-        if self.overview_framed != shown {
-            self.overview_framed = shown.clone();
+        if self.overview_framed != frame.shown {
+            self.overview_framed = frame.shown.clone();
             self.give_back_maximized();
             self.overview_fitted = false;
         }
-        let doings = self.sidebar_doings();
-        let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
-        let plane = self.render_overview_plane(&doings, window, cx);
+        let sidebar = self.render_focus_sidebar(&frame.shown, &frame.doings, cx);
+        let plane = self.render_overview_plane(&frame.doings, window, cx);
         h_flex()
             .relative()
             .flex_1()
@@ -447,7 +459,8 @@ impl ClaudhubApp {
         // An agent at work flows along the link to it, one that waits
         // pulses, and both need frames nobody else asks for. Under a
         // maximised node the links are under the veil: nothing to move.
-        let at_work = self.overview_at_work(&plan, cx);
+        let cards: Vec<PathBuf> = plan.cards.iter().map(|card| card.path.clone()).collect();
+        let at_work = self.overview_at_work(Some(&plan), &self.worktree_doings(&cards), cx);
         let moving: Vec<overview::Doing> = if self.overview_maximized.is_none() {
             at_work
                 .terminals
@@ -698,11 +711,11 @@ impl ClaudhubApp {
     pub(super) fn prepare_laid_out(
         &mut self,
         shown: &[PathBuf],
-        listed: &std::collections::HashMap<PathBuf, overview::Doing>,
+        listed: &super::focus_view::Doings,
         cx: &mut Context<Self>,
     ) -> overview::AtWork {
-        let plan = self.overview_plan();
-        let mut at_work = self.overview_at_work(&plan, cx);
+        // Every live worktree's, which `listed` is: see `HomeFrame`.
+        let mut at_work = self.overview_at_work(None, listed, cx);
         let on_screen: std::collections::HashSet<u64> = self
             .terminals
             .iter()
@@ -1355,39 +1368,38 @@ impl ClaudhubApp {
         }
     }
 
+    /// What each worktree's Claudes say, `among` the worktrees a process
+    /// could belong to: the loudest of them — one waiting on the user
+    /// before one at work, before rest, all idle too — and the hooks' word
+    /// or the guess only where none of them speaks. See
+    /// `overview::worktree_doings`.
+    pub(super) fn worktree_doings(&self, among: &[PathBuf]) -> super::focus_view::Doings {
+        overview::worktree_doings(
+            among,
+            self.claude_processes.iter().filter_map(|process| {
+                Some((
+                    process.cwd.as_path(),
+                    claude_says(process.status.as_deref()?),
+                ))
+            }),
+            |path| self.agents.get(path).map(|state| heard(&state.activity)),
+        )
+    }
+
     /// Where an agent is at work on the plane — see `overview::at_work`.
     ///
     /// **Claude's own status first** (`busy`, `waiting`, `idle`, written
     /// for its pid): the processor cannot tell a turn under way from a prompt
     /// being typed, both burn it. Then the hooks' word for the terminal's
     /// session, then — for another agent, or a Claude that writes no status —
-    /// the guess.
-    /// What the Claudes of a worktree say, `among` the worktrees a process
-    /// could belong to: the loudest of them — one waiting on the user
-    /// before one at work, before rest, all idle too — and the hooks' word
-    /// or the guess only where none of them speaks.
-    pub(super) fn worktree_doing(&self, path: &Path, among: &[PathBuf]) -> overview::Doing {
-        use overview::Doing;
-        let said: Vec<Doing> = self
-            .claude_processes
-            .iter()
-            .filter(|process| {
-                crate::agent::owning_worktree(among, &process.cwd).as_deref() == Some(path)
-            })
-            .filter_map(|process| process.status.as_deref())
-            .map(claude_says)
-            .collect();
-        if said.is_empty() {
-            return self
-                .agents
-                .get(path)
-                .map(|state| heard(&state.activity))
-                .unwrap_or(Doing::Rest);
-        }
-        overview::loudest(said)
-    }
-
-    fn overview_at_work(&self, plan: &Plan, cx: &App) -> overview::AtWork {
+    /// the guess. `plan` is the plane's, `None` on the boards; `worktrees`,
+    /// what the worktrees a guess may speak for say.
+    fn overview_at_work(
+        &self,
+        plan: Option<&Plan>,
+        worktrees: &super::focus_view::Doings,
+        cx: &App,
+    ) -> overview::AtWork {
         use overview::Doing;
         let status = |pid: Option<u32>, session: Option<&str>| {
             self.claude_processes
@@ -1401,11 +1413,12 @@ impl ClaudhubApp {
         // On the boards, every terminal of a worktree on show is: the plane's
         // own hand — a worktree hidden there, and what hangs from it — says
         // nothing of what a board shows, and its terminals lost their signal.
-        let laid_out = self.home_mode.laid_out();
         let tiles: Vec<overview::AgentTile> = self
             .terminals
             .iter()
-            .filter(|terminal| laid_out || plan.tile(terminal.view.entity_id().as_u64()).is_some())
+            .filter(|terminal| {
+                plan.is_none_or(|plan| plan.tile(terminal.view.entity_id().as_u64()).is_some())
+            })
             .map(|terminal| {
                 // The pty's child is Claude itself when the tab was launched
                 // on it; typed at a prompt, it is the pid read under the
@@ -1436,14 +1449,9 @@ impl ClaudhubApp {
             .collect();
         // The guess by the processor, for a terminal no word came from, is
         // the worktree's — every live one on the boards, for the reason above.
-        let cards: Vec<PathBuf> = if laid_out {
-            self.repos.iter().flat_map(live_worktrees).collect()
-        } else {
-            plan.cards.iter().map(|card| card.path.clone()).collect()
-        };
-        let worktrees: std::collections::HashMap<&Path, Doing> = cards
+        let worktrees: std::collections::HashMap<&Path, Doing> = worktrees
             .iter()
-            .map(|path| (path.as_path(), self.worktree_doing(path, &cards)))
+            .map(|(path, doing)| (path.as_path(), *doing))
             .collect();
         overview::at_work(&tiles, &worktrees)
     }

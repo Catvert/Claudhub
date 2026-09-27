@@ -55,8 +55,21 @@ const BOARD_BAR: &str = "focus-board-bar";
 
 /// The sidebar's width.
 const SIDEBAR_WIDTH: f32 = 260.;
-/// What each worktree's agents say, the ones at rest left out.
+/// What each worktree's agents say. Rest reads as nothing everywhere.
 pub(super) type Doings = std::collections::HashMap<PathBuf, Doing>;
+
+/// What the home screen reads of the application once a frame, and hands
+/// down: the worktrees on show and what their agents say were worked out
+/// again by each of its parts — the sidebar, the boards, the links, each
+/// board's notes —, thirty times a second while an agent works.
+pub(super) struct HomeFrame {
+    /// Every live worktree of every project, in the sidebar's order.
+    pub(super) live: Vec<PathBuf>,
+    /// The worktrees chosen in the sidebar — see `focus_worktrees`.
+    pub(super) shown: Vec<PathBuf>,
+    /// What every live worktree's Claudes say — see `worktree_doings`.
+    pub(super) doings: Doings,
+}
 /// The sidebar folded to its rail: a column of initials.
 const RAIL_WIDTH: f32 = 52.;
 /// How many of the commits a branch adds its git view lists.
@@ -75,14 +88,14 @@ impl ClaudhubApp {
     /// The focus view: the sidebar, and the worktrees on show.
     pub(super) fn render_overview_focus(
         &mut self,
+        frame: &HomeFrame,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let shown = self.focus_worktrees();
-        let doings = self.sidebar_doings();
-        let at_work = self.prepare_laid_out(&shown, &doings, cx);
+        let shown = &frame.shown;
+        let at_work = self.prepare_laid_out(shown, &frame.doings, cx);
         let gap = window.rem_size() * 0.75;
-        let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
+        let sidebar = self.render_focus_sidebar(shown, &frame.doings, cx);
         let main: AnyElement = match self.overview_zoomed.clone() {
             // A maximised node fills the middle, the sidebar staying: it is
             // how one goes elsewhere.
@@ -101,7 +114,7 @@ impl ClaudhubApp {
             None => {
                 // Their lists of changes, even if the pickers leave them out
                 // of what the home screen reads.
-                self.ensure_changes_read(&shown, cx);
+                self.ensure_changes_read(shown, cx);
                 // A wheel's slide goes on where the last frame left it.
                 let scroll = self.focus_scroll.clone();
                 self.motion(BOARD_BAR.into(), Axes::Both)
@@ -178,15 +191,16 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// What every worktree's Claudes say, loudest first: the sidebar
-    /// dresses each row as the boards dress a terminal.
-    pub(super) fn sidebar_doings(&self) -> Doings {
-        let among: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
-        among
-            .iter()
-            .map(|path| (path.clone(), self.worktree_doing(path, &among)))
-            .filter(|(_, doing)| *doing != Doing::Rest)
-            .collect()
+    /// This frame's `HomeFrame`: what every worktree's Claudes say — the
+    /// sidebar dresses each row as the boards dress a terminal — and which
+    /// are on show.
+    pub(super) fn home_frame(&self) -> HomeFrame {
+        let live: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
+        HomeFrame {
+            shown: self.shown_among(&live),
+            doings: self.worktree_doings(&live),
+            live,
+        }
     }
 
     /// The worktrees the middle shows, side by side — see
@@ -194,8 +208,16 @@ impl ClaudhubApp {
     /// the one on show, else the first of all.
     pub(super) fn focus_worktrees(&self) -> Vec<PathBuf> {
         let on_show: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
-        let primary = self.active.clone().or_else(|| on_show.first().cloned());
-        focus::shown_worktrees(&self.focus_chosen, primary.as_deref(), &on_show)
+        self.shown_among(&on_show)
+    }
+
+    /// The same, `on_show` being every live worktree.
+    fn shown_among(&self, on_show: &[PathBuf]) -> Vec<PathBuf> {
+        let primary = self
+            .active
+            .as_deref()
+            .or(on_show.first().map(PathBuf::as_path));
+        focus::shown_worktrees(&self.focus_chosen, primary, on_show)
     }
 
     /// Keeps what the sidebar chose, for the next session too.
@@ -1003,19 +1025,21 @@ impl ClaudhubApp {
             .collect()
     }
 
-    /// A worktree's notes and its repository's, the hidden ones left out.
+    /// A board's worktree's notes and its repository's, the hidden ones
+    /// left out — what its checkout holds on the plane, read for it alone
+    /// and not out of the whole plane's groups, once per board and frame.
     pub(super) fn board_notes(&self, path: &Path) -> Vec<PathBuf> {
         let hidden = &self.overview_hand.hidden;
-        let groups = self.overview_groups();
-        let group = groups
-            .iter()
-            .find(|group| group.checkouts.iter().any(|c| c.path == path));
-        let checkout = group.and_then(|group| group.checkouts.iter().find(|c| c.path == path));
-        checkout
-            .map(|checkout| checkout.notes.clone())
+        let Some(repo) = self.repos.iter().find(|repo| {
+            repo.worktrees
+                .iter()
+                .any(|worktree| worktree.path == path && !worktree.prunable)
+        }) else {
+            return Vec::new();
+        };
+        self.worktree_notes(path)
             .into_iter()
-            .flatten()
-            .chain(group.map(|group| group.notes.clone()).into_iter().flatten())
+            .chain(self.repo_notes(repo))
             .filter(|note| !hidden.contains(&Node::Note(note.clone())))
             .collect()
     }
@@ -1023,13 +1047,18 @@ impl ClaudhubApp {
     /// The note a board's home shows as its principal one — see
     /// `focus::principal_note`.
     pub(super) fn principal_note(&self, path: &Path, cx: &App) -> Option<PathBuf> {
+        self.principal_among(path, &self.board_notes(path), cx)
+    }
+
+    /// The same, among a board's notes already read.
+    fn principal_among(&self, path: &Path, notes: &[PathBuf], cx: &App) -> Option<PathBuf> {
         let pinned = super::store::Store::global(cx)
             .worktrees
             .get(path)
             .and_then(|state| state.pinned_note.clone());
-        let notes: Vec<(PathBuf, Option<String>)> = self
-            .board_notes(path)
-            .into_iter()
+        let notes: Vec<(PathBuf, Option<String>)> = notes
+            .iter()
+            .cloned()
             .map(|note| {
                 let created = self
                     .canvas_entry(&note)
@@ -1577,12 +1606,12 @@ impl ClaudhubApp {
     /// principal one until another is pressed.
     fn render_notes_view(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let principal = self.principal_note(path, cx);
+        let mut notes = self.board_notes(path);
+        let principal = self.principal_among(path, &notes, cx);
         let pinned = super::store::Store::global(cx)
             .worktrees
             .get(path)
             .and_then(|state| state.pinned_note.clone());
-        let mut notes = self.board_notes(path);
         if let Some(principal) = &principal {
             notes.retain(|note| note != principal);
             notes.insert(0, principal.clone());
