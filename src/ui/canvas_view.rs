@@ -18,7 +18,7 @@ use gpui_kit::component::{
     h_flex,
     input::{EditorState, InputEvent},
     menu::DropdownMenu as _,
-    v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
 use gpui_kit::{
     div, prelude::*, px, AnyElement, App, Context, Entity, Focusable as _, MouseButton,
@@ -699,22 +699,21 @@ impl ClaudhubApp {
             .and_then(|o| o.base.clone())
             .unwrap_or_default();
         let ahead = self.outlines.get(worktree).map_or(0, |o| o.ahead_of_base);
-        let entity = cx.entity();
         let target = worktree.to_path_buf();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (entity, target) = (entity.clone(), target.clone());
-            dialog
-                .title(tr!("merge-title", { branch: branch.clone(), base: base.clone() }))
-                .child(div().text_sm().child(tr!("merge-body", { count: ahead })))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| this.integrate(target.clone(), cx));
-                    true
-                })
-        });
-        window.defer(cx, |window, cx| window.focus_dialog(cx));
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("merge-title", { branch: branch, base: base }),
+            move || {
+                div()
+                    .text_sm()
+                    .child(tr!("merge-body", { count: ahead }))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| this.integrate(target.clone(), cx),
+            window,
+            cx,
+        );
     }
 
     /// Deletes a note, once asked: nothing else keeps its text — unless it
@@ -725,23 +724,21 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entity = cx.entity();
         let path = path.to_path_buf();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (entity, path) = (entity.clone(), path.clone());
-            dialog
-                .title(tr!("overview-note-delete-title"))
-                .child(div().text_sm().child(tr!("overview-note-delete-body")))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| this.delete_note_files(&path, cx));
-                    true
-                })
-        });
-        // See `close_node`: the buttons dispatch from the focus.
-        window.defer(cx, |window, cx| window.focus_dialog(cx));
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("overview-note-delete-title"),
+            || {
+                div()
+                    .text_sm()
+                    .child(tr!("overview-note-delete-body"))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| this.delete_note_files(&path, cx),
+            window,
+            cx,
+        );
     }
 
     /// The cross of a note, a review or a diagram: take it off the plane and
@@ -761,48 +758,42 @@ impl ClaudhubApp {
             .heading()
             .unwrap_or_else(|| path.display().to_string());
         let shared = !entry.private;
-        let entity = cx.entity();
-        let path = path.to_path_buf();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (hide, delete) = (
-                (entity.clone(), path.clone()),
-                (entity.clone(), path.clone()),
-            );
-            dialog
-                .title(tr!("overview-close-note-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(SharedString::from(name.clone())))
-                        .child(div().text_xs().child(if shared {
-                            tr!("overview-close-note-shared")
-                        } else {
-                            tr!("overview-close-note-private")
-                        })),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::choose(
+        let (entity, path) = (cx.entity(), path.to_path_buf());
+        let delete = path.clone();
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("overview-close-note-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(SharedString::from(name.clone())))
+                    .child(div().text_xs().child(if shared {
+                        tr!("overview-close-note-shared")
+                    } else {
+                        tr!("overview-close-note-private")
+                    }))
+                    .into_any_element()
+            },
+            move || {
+                let (entity, path) = (entity.clone(), delete.clone());
+                super::dialogs::choose(
                     tr!("overview-hide-button"),
                     tr!("overview-delete-file"),
                     move |_, cx| {
-                        let (entity, path) = delete.clone();
                         entity.update(cx, |this, cx| this.delete_note_files(&path, cx));
                     },
-                ))
-                .on_ok(move |_, _, cx| {
-                    let (entity, path) = hide.clone();
-                    entity.update(cx, |this, cx| {
-                        let node = Node::Note(path.clone());
-                        this.note_editors.remove(&path);
-                        this.overview_hand.hidden.insert(node.clone());
-                        this.remember_folds(&node, cx);
-                        cx.notify();
-                    });
-                    true
-                })
-        });
-        window.defer(cx, |window, cx| window.focus_dialog(cx));
+                )
+            },
+            move |this, _, cx| {
+                let node = Node::Note(path.clone());
+                this.note_editors.remove(&path);
+                this.overview_hand.hidden.insert(node.clone());
+                this.remember_folds(&node, cx);
+                cx.notify();
+            },
+            window,
+            cx,
+        );
     }
 
     /// Deletes a node's file — and a diagram's picture with it: left behind,

@@ -3444,24 +3444,21 @@ impl ClaudhubApp {
                 entity.update(cx, |this, cx| this.reconcile(worktree, true, push, cx));
             }
         };
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, worktree, rebasing) = (entity.clone(), worktree.clone(), rebasing.clone());
-            dialog
-                .title(tr!("diverge-title"))
-                .overlay_closable(false)
-                .close_button(false)
-                .child(div().text_sm().child(body.clone()))
-                .footer(super::dialogs::choose(
+        super::dialogs::ask(
+            entity,
+            tr!("diverge-title"),
+            move || div().text_sm().child(body.clone()).into_any_element(),
+            move || {
+                super::dialogs::choose(
                     tr!("diverge-merge"),
                     tr!("diverge-rebase"),
-                    rebasing,
-                ))
-                .on_ok(move |_, _window, cx| {
-                    let worktree = worktree.clone();
-                    entity.update(cx, |this, cx| this.reconcile(worktree, false, push, cx));
-                    true
-                })
-        });
+                    rebasing.clone(),
+                )
+            },
+            move |this, _, cx| this.reconcile(worktree.clone(), false, push, cx),
+            window,
+            cx,
+        );
     }
 
     /// Sends the reconciliation, under the action the failed gesture had worn:
@@ -5180,42 +5177,40 @@ impl ClaudhubApp {
         }
         let terminals = (!self.terminals.is_empty())
             .then(|| tr!("menu-reset-layout-terminals", { count: self.terminals.len() }));
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            dialog
-                .title(tr!("menu-reset-layout-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .children(terminals.clone().map(|line| div().text_sm().child(line)))
-                        .children(
-                            busy.iter()
-                                .map(|label| div().text_sm().child(label.clone())),
-                        )
-                        .when(!unsaved.is_empty(), |el| {
-                            el.child(div().text_sm().child(tr!("menu-reset-layout-unsaved")))
-                                .children(
-                                    unsaved
-                                        .iter()
-                                        .map(|path| div().text_sm().child(path.clone())),
-                                )
-                        })
-                        .child(div().text_xs().child(tr!("menu-reset-layout-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::submit(tr!("menu-reset-layout")))
-                .on_ok(move |_, window, cx| {
-                    // After the dialog has gone: the rebuild moves the focus,
-                    // and a dialog still up would take it back.
-                    let entity = entity.clone();
-                    window.defer(cx, move |window, cx| {
-                        entity.update(cx, |this, cx| this.reset_layout_now(window, cx));
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("menu-reset-layout-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .children(terminals.clone().map(|line| div().text_sm().child(line)))
+                    .children(
+                        busy.iter()
+                            .map(|label| div().text_sm().child(label.clone())),
+                    )
+                    .when(!unsaved.is_empty(), |el| {
+                        el.child(div().text_sm().child(tr!("menu-reset-layout-unsaved")))
+                            .children(
+                                unsaved
+                                    .iter()
+                                    .map(|path| div().text_sm().child(path.clone())),
+                            )
+                    })
+                    .child(div().text_xs().child(tr!("menu-reset-layout-help")))
+                    .into_any_element()
+            },
+            || super::dialogs::submit(tr!("menu-reset-layout")),
+            |_, window, cx| {
+                // After the dialog has gone: the rebuild moves the focus,
+                // and a dialog still up would take it back.
+                let entity = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    entity.update(cx, |this, cx| this.reset_layout_now(window, cx));
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     fn reset_layout_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {

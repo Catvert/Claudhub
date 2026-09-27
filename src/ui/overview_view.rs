@@ -3032,32 +3032,23 @@ impl ClaudhubApp {
                     .clone()
                     .unwrap_or_else(|| terminal.view.read(cx).label());
                 let busy = terminal.view.read(cx).busy();
-                let entity = cx.entity();
-                window.open_dialog(cx, move |dialog, _, _| {
-                    let entity = entity.clone();
-                    dialog
-                        .title(tr!("overview-close-title"))
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child(label.clone()))
-                                .when(busy, |el| {
-                                    el.child(div().text_xs().child(tr!("overview-close-busy")))
-                                }),
-                        )
-                        .overlay_closable(false)
-                        .close_button(false)
-                        .footer(super::dialogs::confirm())
-                        .on_ok(move |_, window, cx| {
-                            entity.update(cx, |this, cx| this.close_terminal(view, window, cx));
-                            true
-                        })
-                });
-                // The buttons dispatch `Confirm` and `Cancel` from the focus,
-                // and the focus is still where the cross was pressed — a
-                // terminal, which answers neither: OK did nothing. Deferred,
-                // the dialog being painted on the next frame.
-                window.defer(cx, |window, cx| window.focus_dialog(cx));
+                super::dialogs::ask(
+                    cx.entity(),
+                    tr!("overview-close-title"),
+                    move || {
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child(label.clone()))
+                            .when(busy, |el| {
+                                el.child(div().text_xs().child(tr!("overview-close-busy")))
+                            })
+                            .into_any_element()
+                    },
+                    super::dialogs::confirm,
+                    move |this, window, cx| this.close_terminal(view, window, cx),
+                    window,
+                    cx,
+                );
             }
             Node::Worktree(path) => {
                 let node = node.clone();
@@ -3076,58 +3067,53 @@ impl ClaudhubApp {
                     .flatten();
                 let entity = cx.entity();
                 let target = path.clone();
-                window.open_dialog(cx, move |dialog, _, _| {
-                    let (entity, node) = (entity.clone(), node.clone());
-                    let footer = match removable.clone() {
-                        Some(main) => {
-                            let (entity, target) = (entity.clone(), target.clone());
-                            super::dialogs::choose(
-                                tr!("overview-hide-button"),
-                                tr!("overview-remove-worktree"),
-                                move |window, cx| {
-                                    // Opened once this dialog has gone: the
-                                    // button dismisses the dialog on top when
-                                    // it is done, which would be this one.
-                                    let (entity, main, target) =
-                                        (entity.clone(), main.clone(), target.clone());
-                                    window.defer(cx, move |window, cx| {
-                                        entity.update(cx, |this, cx| {
-                                            this.confirm_remove_worktree(
-                                                main.clone(),
-                                                target.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        window.defer(cx, |window, cx| window.focus_dialog(cx));
+                let footer = move || match removable.clone() {
+                    Some(main) => {
+                        let (entity, target) = (entity.clone(), target.clone());
+                        super::dialogs::choose(
+                            tr!("overview-hide-button"),
+                            tr!("overview-remove-worktree"),
+                            move |window, cx| {
+                                // Opened once this dialog has gone: the
+                                // button dismisses the dialog on top when
+                                // it is done, which would be this one.
+                                let (entity, main, target) =
+                                    (entity.clone(), main.clone(), target.clone());
+                                window.defer(cx, move |window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.confirm_remove_worktree(
+                                            main.clone(),
+                                            target.clone(),
+                                            window,
+                                            cx,
+                                        );
                                     });
-                                },
-                            )
-                        }
-                        None => super::dialogs::submit(tr!("overview-hide-button")),
-                    };
-                    dialog
-                        .title(tr!("overview-close-worktree-title"))
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child(SharedString::from(name.clone())))
-                                .child(div().text_xs().child(tr!("overview-hide-body"))),
+                                    window.defer(cx, |window, cx| window.focus_dialog(cx));
+                                });
+                            },
                         )
-                        .overlay_closable(false)
-                        .close_button(false)
-                        .footer(footer)
-                        .on_ok(move |_, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.overview_hand.hidden.insert(node.clone());
-                                this.remember_folds(&node, cx);
-                                cx.notify();
-                            });
-                            true
-                        })
-                });
-                // See the terminal's: the buttons dispatch from the focus.
-                window.defer(cx, |window, cx| window.focus_dialog(cx));
+                    }
+                    None => super::dialogs::submit(tr!("overview-hide-button")),
+                };
+                super::dialogs::ask(
+                    cx.entity(),
+                    tr!("overview-close-worktree-title"),
+                    move || {
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child(SharedString::from(name.clone())))
+                            .child(div().text_xs().child(tr!("overview-hide-body")))
+                            .into_any_element()
+                    },
+                    footer,
+                    move |this, _, cx| {
+                        this.overview_hand.hidden.insert(node.clone());
+                        this.remember_folds(&node, cx);
+                        cx.notify();
+                    },
+                    window,
+                    cx,
+                );
             }
         }
     }
