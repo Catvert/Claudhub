@@ -16,7 +16,8 @@ pub struct RepoState {
     pub name: String,
     pub worktrees: Vec<Worktree>,
     pub branches: Vec<Branch>,
-    /// Its integration branch, read with the branches.
+    /// Where new work starts in it — `branch::start_point` —, read with the
+    /// branches.
     pub integration: Option<String>,
 }
 

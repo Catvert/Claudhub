@@ -1105,7 +1105,9 @@ initial_range` choisit au **premier** statut ; ensuite la portée appartient à
 l'utilisateur (`range_chosen`). La base vient de git (`branch::guess_base`),
 jamais d'un `main` codé en dur : **la branche dont celle-ci a le moins
 divergé** — git ne stocke aucun parent, ça se lit sur le graphe en un
-`for-each-ref %(ahead-behind:HEAD)` — et à défaut la branche d'intégration.
+`for-each-ref %(ahead-behind:HEAD)` — et à défaut la branche de développement (`dev`, `develop`), sinon celle
+d'intégration (`branch::start_point`) — celle aussi d'où part un nouveau
+worktree, à moins que le dernier ne soit parti d'ailleurs.
 Elle est demandée une fois par worktree (`Cmd::GuessBase`) et **n'est pas
 enregistrée** : le magasin garde ce qu'on a choisi, une devinette écrite y
 serait une devinette pour toujours.

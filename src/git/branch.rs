@@ -328,6 +328,25 @@ pub fn default_base(main: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Where new work starts in this repository: its development branch — a
+/// local `dev` or `develop` — when it has one, its integration branch
+/// otherwise.
+///
+/// Not `default_base`: what the remote declares is the branch releases land
+/// on, and in a repository run as git-flow — `master` for releases, `dev`
+/// for work — a new branch started there held none of the work in progress.
+pub fn start_point(main: &Path) -> Option<String> {
+    development(|name| local_exists(main, name)).or_else(|| default_base(main))
+}
+
+/// The development branch, of those `exists` says are there.
+fn development(exists: impl Fn(&str) -> bool) -> Option<String> {
+    ["dev", "develop"]
+        .into_iter()
+        .find(|name| exists(name))
+        .map(str::to_string)
+}
+
 /// A branch weighed as a comparison base: how far it stands from HEAD.
 ///
 /// `ahead` and `behind` are git's, read from HEAD's point of view: `ahead` is
@@ -405,11 +424,14 @@ fn parse_candidates(out: &str) -> Vec<Candidate> {
 ///   empty, and an empty review reads as "nothing to review" rather than as a
 ///   base badly chosen.
 ///
-/// Ties are broken by `fallback` first — the integration branch git declares,
-/// which is what one means nine times out of ten — then local before remote,
-/// then by name so that two runs answer the same thing.
+/// Ties are broken by `fallback` first — where new work starts, the
+/// development branch or else the integration branch (`start_point`), which
+/// is what one means nine times out of ten — then local before remote, then
+/// by name so that two runs answer the same thing. A branch started off
+/// `master` in a repository where `dev` holds `master` stands as far from
+/// both, and the review opened against `master` when the work goes to `dev`.
 ///
-/// And the integration branch itself compares to **nothing**: what it holds is
+/// And that branch itself compares to **nothing**: what it holds is
 /// what everything else is measured against. Without that first line, a branch
 /// merged into it reads exactly like a parent — HEAD does descend from it, by
 /// twenty commits — and `master` would open its review against the last feature
@@ -444,7 +466,7 @@ pub fn closest(candidates: &[Candidate], head: &str, fallback: Option<&str>) -> 
 /// about, and each checkout has its own.
 pub fn guess_base(dir: &Path) -> Option<String> {
     let head = current(dir).unwrap_or_default();
-    closest(&candidates(dir), &head, default_base(dir).as_deref())
+    closest(&candidates(dir), &head, start_point(dir).as_deref())
 }
 
 /// Attaches a branch with no upstream to `origin/<branch>` so the first `git
@@ -471,6 +493,20 @@ pub(crate) fn ensure_upstream(main: &Path, branch: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `dev` first, then `develop`, and nothing when neither is there.
+    #[test]
+    fn work_starts_on_the_development_branch() {
+        assert_eq!(
+            development(|name| name == "develop"),
+            Some("develop".into())
+        );
+        assert_eq!(
+            development(|name| name == "dev" || name == "develop"),
+            Some("dev".into())
+        );
+        assert_eq!(development(|_| false), None);
+    }
 
     fn candidate(name: &str, ahead: usize, behind: usize) -> Candidate {
         Candidate {

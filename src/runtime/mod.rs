@@ -1633,7 +1633,7 @@ fn in_lanes<T: Send>(
 }
 
 fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
-    let integration = branch::default_base(&main);
+    let integration = branch::start_point(&main);
     Evt::Branches {
         main,
         branches,

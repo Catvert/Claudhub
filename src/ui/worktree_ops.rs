@@ -465,7 +465,7 @@ impl ClaudhubApp {
         let Some(main) = self.creation.as_ref().map(|creation| creation.main.clone()) else {
             return true;
         };
-        let base = self.setup_base(&main);
+        let base = self.setup_base(&main, cx);
         let has_project = self.wt_project(&main).is_some();
         let branches: Vec<crate::git::Branch> = self
             .repo_of(&main)
@@ -495,6 +495,13 @@ impl ClaudhubApp {
         let from = (!setup.existing)
             .then(|| setup.from.clone().or(base))
             .flatten();
+        // The next one starts where this one does.
+        if let Some(from) = &from {
+            let (main, from) = (main.clone(), from.clone());
+            super::store::Store::update_global(cx, |store| {
+                store.repos.entry(main).or_default().last_start = Some(from);
+            });
+        }
         if !has_project {
             let planned = plan_creation(
                 &main,
@@ -525,12 +532,19 @@ impl ClaudhubApp {
         false
     }
 
-    /// Where a new worktree starts unless told otherwise: the repository's
-    /// integration branch, and without one the branch its main checkout
-    /// holds.
-    fn setup_base(&self, main: &Path) -> Option<String> {
+    /// Where a new worktree starts unless told otherwise: where the last
+    /// one of the repository started, while that branch is still there;
+    /// else where new work starts in it — its development branch, or its
+    /// integration branch (`branch::start_point`) —; else the branch its main
+    /// checkout holds.
+    fn setup_base(&self, main: &Path, cx: &App) -> Option<String> {
         let repo = self.repo_of(main)?;
-        repo.integration.clone().or_else(|| {
+        let last = super::store::Store::global(cx)
+            .repos
+            .get(main)
+            .and_then(|state| state.last_start.clone())
+            .filter(|last| repo.branches.iter().any(|branch| &branch.name == last));
+        last.or_else(|| repo.integration.clone()).or_else(|| {
             repo.branches
                 .iter()
                 .find(|branch| branch.is_head_in(main))
@@ -1283,7 +1297,7 @@ impl ClaudhubApp {
         let base = setup
             .from
             .clone()
-            .or_else(|| self.setup_base(&creation.main));
+            .or_else(|| self.setup_base(&creation.main, cx));
         let slug = setup.slug.read(cx).value().trim().to_string();
 
         let tab = |id: &'static str, label: SharedString, on: bool, existing: bool| {

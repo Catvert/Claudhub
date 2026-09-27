@@ -280,6 +280,9 @@ pub struct RepoState {
     pub home_size: Option<(f32, f32)>,
     /// The git node folded to its head.
     pub home_collapsed: bool,
+    /// Where the last new worktree of this repository started: the next one
+    /// starts there too, unless told otherwise.
+    pub last_start: Option<String>,
     /// **Legacy**: what a plugin had remembered about this repository, read
     /// once so `migrate_sentry` can pour Sentry's back into the field above,
     /// then cleared. Nothing writes it any more.
