@@ -159,11 +159,13 @@ src/
                      coloration (tree-sitter, Blade)
     history_view.rs  l'historique et son graphe peint
     branches.rs / branch_picker.rs  le sélecteur de branches et ses gestes
-    worktrees.rs / worktree_picker.rs / picker.rs  le sélecteur de worktrees
+    worktrees.rs / worktree_picker.rs  le sélecteur de worktrees
+    picker.rs        le squelette commun des deux sélecteurs (`PickerCore`)
     base_select.rs   le sélecteur de base de comparaison
     worktree_ops.rs  création guidée, tâches du projet, intégration
     run.rs / run_view.rs  le widget d'exécution : environnement `wt`, recettes
     tags.rs / stashes.rs / conflicts.rs / merge.rs / merge_view.rs
+    listed.rs        une liste lue une fois : tags, remisages
     tests_view.rs    l'arbre des tests et le run suivi
     explorer.rs / tree.rs / file_icons.rs / preview.rs
                      l'explorateur, l'éditeur intégré et ses onglets, l'aperçu
@@ -182,6 +184,8 @@ src/
     store.rs / session.rs  ce qu'on retient par worktree, et où l'on en était
     dialogs.rs / notify.rs  les boutons d'un dialogue, les bulles
     inflight.rs / repos.rs  les écritures en vol, les dépôts ouverts — testés
+    sweep.rs         les relevés périodiques : ce qu'on redemande, et quand un
+                     relevé attend encore sa réponse — pur
     shortcuts.rs / shortcuts_view.rs / vscode.rs  les touches et leur aide
     motion.rs / scroll.rs  le lissage de la molette, les barres de défilement
     theme.rs / icons.rs
@@ -217,7 +221,9 @@ table qu'un test verrouille : une commande mal rangée n'échoue pas, elle atten
   agent. Un seul : deux `fetch` se disputeraient le verrou des références.
 - **Hooks du projet** (un) : `wt new/rm/up/down`.
 - **Fond** (un) : résumés, aperçus de l'accueil, agents, `wt`, `just`, `gh`.
-  Ne doit jamais passer devant un diff qu'on vient de demander.
+  Ne doit jamais passer devant un diff qu'on vient de demander. Un relevé
+  périodique n'y repart pas tant que le précédent n'a pas répondu
+  (`ui::sweep`) : derrière une sonde lente, ils s'empilaient tous périmés.
 - **Bases** (deux) : déplier un schéma en demande plusieurs à la fois.
 - **Recherche** (un) : une recherche se **remplace**, l'identifiant d'envoi trie.
 - **Tests** (un) : un run se mesure en minutes ; le **relevé** des suites reste
@@ -488,7 +494,9 @@ l'accueil relit les projets affichés toutes les deux secondes ; la main n'y
   relancerait la demande).
 - **Un diagramme est une image et son nœud** ; le relevé ne transporte que
   l'**empreinte** des images (`files::picture_stamps`) — sinon les octets
-  traverseraient WSL toutes les deux secondes.
+  traverseraient WSL toutes les deux secondes. **Une note aussi** : le relevé
+  dit les empreintes qu'il connaît, et seul le texte de ce qui a bougé revient
+  (`files::read_notes_since`) ; une empreinte trop récente ne fait pas foi.
 - **Ce qu'un agent voit de son environnement** est une fiche Markdown
   (`ui::context`) réécrite dans le coffre et annoncée par `$CLAUDHUB_CONTEXT` ;
   **la skill** (`crate::skill`, `assets/skills/`) en apprend le format, et
@@ -624,8 +632,8 @@ lit sur `on_modifiers_changed` de la racine, toute autre frappe rompt la série
 **Les bases** (`db/`, `db.rs`, `db_query.rs`) — `sqlx`. **Une console est un
 document**, un panneau chacune ; un clic sur une table réutilise celle où l'on
 est. L'identifiant d'envoi est compté pour la **fenêtre**. `db::Cell` est un
-`Option<String>`. Un `DECIMAL` se décode par `try_get_unchecked`. Une connexion
-par requête. Le tri enveloppe la requête (`db::order_by`, par **rang**).
+`Option<Arc<str>>` : peinte sans être recopiée. Un `DECIMAL` se décode par
+`try_get_unchecked`. Une connexion par requête. Le tri enveloppe la requête (`db::order_by`, par **rang**).
 
 **Sentry** (`sentry.rs`, `ui/sentry.rs`) — le projet appartient au dépôt,
 l'organisation et le jeton à la machine. **Une réponse se lit champ par champ,
@@ -652,7 +660,10 @@ la PR d'un fork est récupérée dans `pr/<n>`.
 
 **`outside.rs`** — une liste fermée de ce qu'on fait hors du dépôt, chacun avec
 sa file. Le système d'extension est le `justfile`, le `wt.toml` et les commandes
-des réglages ; il n'y a pas de plugins.
+des réglages ; il n'y a pas de plugins. Tout programme autre que `git` se lance
+par `outside::Bounded` (stdin fermé, deux sorties lues, plafond,
+`wsl::no_console`) ; `LC_ALL=C` s'y **demande** (`in_english`), parce qu'une
+sortie lue par l'utilisateur ne doit pas perdre ses accents.
 
 **L'instance unique** (`instance.rs`) — le dossier part à la fenêtre déjà
 ouverte par une socket locale (`GenericNamespaced` : aucun fichier, pas de
