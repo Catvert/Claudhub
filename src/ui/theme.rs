@@ -265,6 +265,37 @@ pub fn toolbar_height(cx: &App) -> Pixels {
     scaled(cx, 2.7, px(32.))
 }
 
+/// A monospace family's font, as the text system resolves it.
+pub fn mono_font_id(window: &Window, family: &gpui_kit::SharedString) -> gpui_kit::FontId {
+    window.text_system().resolve_font(&gpui_kit::Font {
+        family: family.clone(),
+        features: Default::default(),
+        weight: Default::default(),
+        style: Default::default(),
+        fallbacks: None,
+    })
+}
+
+/// A character's advance in a monospace family, measured on the font actually
+/// chosen: a fixed pitch does not mean a width known in advance, and a
+/// one-pixel discrepancy shifts a column by a whole character after a hundred.
+///
+/// Should the font not answer, the fallback follows the size — a monospace
+/// cell is about six tenths of it — where a fixed seven pixels was right at
+/// one zoom only.
+pub fn mono_advance(
+    window: &Window,
+    family: &gpui_kit::SharedString,
+    size: Pixels,
+    ch: char,
+) -> Pixels {
+    window
+        .text_system()
+        .advance(mono_font_id(window, family), size, ch)
+        .map(|advance| advance.width)
+        .unwrap_or(size * 0.6)
+}
+
 /// The colour of the gutter between panels.
 ///
 /// It is the tab bar's, which `theme::apply` derives from the background by a

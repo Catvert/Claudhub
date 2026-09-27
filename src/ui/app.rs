@@ -305,7 +305,7 @@ pub struct ReviewState {
     /// staged: what the next commit would leave behind, shown under the diff
     /// so those hunks can still be added. Keyed by path because the answer
     /// arrives after a git command — the selection may have moved on.
-    pub unstaged: Option<(PathBuf, std::rc::Rc<crate::git::FileDiff>)>,
+    pub unstaged: Option<(PathBuf, std::rc::Rc<crate::ui::review::Remainder>)>,
     /// The lines selected in the diff: the anchor and the head, as indices into
     /// the flattened list. Two indices and not a sorted range, because it is the
     /// direction of the gesture that decides which one moves on the next
@@ -3091,7 +3091,10 @@ impl ClaudhubApp {
         {
             return;
         }
-        state.unstaged = Some((path, std::rc::Rc::new(diff)));
+        state.unstaged = Some((
+            path,
+            std::rc::Rc::new(crate::ui::review::Remainder::new(diff)),
+        ));
         cx.notify();
     }
 

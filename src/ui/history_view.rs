@@ -668,24 +668,10 @@ impl ClaudhubApp {
                 // frame's — the `diff_laid_out` mechanism: measure after
                 // layout, and ask for one more frame when it has moved, which
                 // settles as soon as the resize stops.
-                .child(
-                    canvas(
-                        {
-                            let entity = entity.clone();
-                            move |bounds: Bounds<Pixels>, window, cx| {
-                                entity.update(cx, |this, _| {
-                                    if (bounds.size.width - this.history_laid_out).abs() > px(0.5) {
-                                        this.history_laid_out = bounds.size.width;
-                                        window.request_animation_frame();
-                                    }
-                                });
-                            }
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .size_full(),
-                )
+                .child(crate::ui::scroll::measure_after_layout(
+                    entity.clone(),
+                    |this: &mut ClaudhubApp| &mut this.history_laid_out,
+                ))
                 .child(
                     self.scrolled(
                         "history-bar",
@@ -729,24 +715,10 @@ impl ClaudhubApp {
         // a question of its own: which way the split below runs. The width
         // above is the room left beside the gutter, and says nothing about the
         // room a second column would have.
-        let measure = canvas(
-            {
-                move |bounds: Bounds<Pixels>, window, cx| {
-                    measured.update(cx, |this, _| {
-                        let shape = this.history_shape;
-                        if (bounds.size.width - shape.width).abs() > px(0.5)
-                            || (bounds.size.height - shape.height).abs() > px(0.5)
-                        {
-                            this.history_shape = bounds.size;
-                            window.request_animation_frame();
-                        }
-                    });
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
+        let measure =
+            crate::ui::scroll::measure_after_layout(measured, |this: &mut ClaudhubApp| {
+                &mut this.history_shape
+            });
 
         // The graph alone does not say what a commit touched: the list of its
         // files goes with it, otherwise selecting a commit opens only its

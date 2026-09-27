@@ -226,7 +226,7 @@ impl DiffHighlights {
         let Some(language) = language_for_path(path) else {
             return Self::default();
         };
-        if diff.hunks.is_empty() {
+        if diff.hunks.is_empty() || side_bytes(diff) > DocumentHighlights::MAX_BYTES {
             return Self::default();
         }
 
@@ -276,6 +276,24 @@ impl DiffHighlights {
 
         Self { hunks: styles }
     }
+}
+
+/// What the two passes of `DiffHighlights::compute` would parse, in bytes: a
+/// context line once per side, a change on its own side only.
+///
+/// It runs on the interface thread when a diff arrives, and a whole-file diff
+/// of a generated file is megabytes on each side: past the preview's ceiling,
+/// the diff is left plain rather than freeze the window for a parse.
+fn side_bytes(diff: &FileDiff) -> usize {
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .map(|line| match line.kind {
+            DiffLineKind::Context => line.text.len() * 2,
+            DiffLineKind::Added | DiffLineKind::Removed => line.text.len(),
+            DiffLineKind::NoNewline => 0,
+        })
+        .sum()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -374,19 +392,19 @@ fn build_side(diff: &FileDiff, side: Side, blade: bool) -> (String, Vec<Span>) {
     (text, spans)
 }
 
-/// Redistributes the rebuilt text's styles onto the diff's lines.
-///
-/// Both lists are sorted by increasing offset, which allows a single joint walk:
-/// a style spilling from one line onto the next is cut at the boundary rather
-/// than thrown away — that is the case of a multi-line string, each piece of
-/// which has to stay coloured.
+/// Redistributes the rebuilt text's styles onto the diff's lines — `cut_runs`,
+/// along the spans `build_side` recorded, in increasing order.
 fn distribute(
     highlighted: &[(Range<usize>, HighlightStyle)],
     spans: &[Span],
     out: &mut [Vec<LineStyles>],
 ) {
-    let mut next = 0usize;
-    for span in spans {
+    let cut = cut_runs(
+        highlighted,
+        spans.iter().map(|span| span.range.clone()),
+        |style| *style != HighlightStyle::default(),
+    );
+    for (span, styles) in spans.iter().zip(cut) {
         let Some(target) = out.get_mut(span.hunk).and_then(|h| h.get_mut(span.line)) else {
             continue;
         };
@@ -395,27 +413,51 @@ fn distribute(
         // Accumulating would produce duplicated, unsorted ranges, which
         // rendering turns into a silent shift of the whole highlighting from the
         // duplicate on.
-        target.clear();
-        // Advance to the first style touching this line. Both lists being
-        // sorted, this cursor never goes back: the walk is linear and not
-        // quadratic, which matters on a diff of several thousand lines.
-        while next < highlighted.len() && highlighted[next].0.end <= span.range.start {
-            next += 1;
-        }
-        for (range, style) in &highlighted[next..] {
-            if range.start >= span.range.end {
-                break;
-            }
-            if range.end <= span.range.start || *style == HighlightStyle::default() {
-                continue;
-            }
-            let start = range.start.max(span.range.start) - span.range.start;
-            let end = range.end.min(span.range.end) - span.range.start;
-            if start < end {
-                target.push((start..end, *style));
-            }
-        }
+        *target = styles;
     }
+}
+
+/// Cuts sorted runs along sorted, disjoint spans: for every span, the runs
+/// that touch it, clipped to it and brought back to its start, those `keep`
+/// refuses left out.
+///
+/// The one walk behind three cuts — a rebuilt diff side into its lines, a
+/// document into its lines, a wrapped line into its segments. Both lists are
+/// sorted, so the cursor never goes back: the walk is linear and not
+/// quadratic, which matters on a diff of several thousand lines. A run
+/// spilling over a boundary — a multi-line string, a block comment — is cut
+/// there rather than dropped, each piece having to stay coloured. The pieces
+/// stay **sorted and disjoint**, the invariant gpui does not check.
+pub fn cut_runs<T: Clone>(
+    runs: &[(Range<usize>, T)],
+    spans: impl IntoIterator<Item = Range<usize>>,
+    keep: impl Fn(&T) -> bool,
+) -> Vec<Vec<(Range<usize>, T)>> {
+    let mut next = 0usize;
+    spans
+        .into_iter()
+        .map(|span| {
+            // Advance to the first run touching this span.
+            while next < runs.len() && runs[next].0.end <= span.start {
+                next += 1;
+            }
+            let mut pieces = Vec::new();
+            for (range, value) in &runs[next..] {
+                if range.start >= span.end {
+                    break;
+                }
+                if range.end <= span.start || !keep(value) {
+                    continue;
+                }
+                let start = range.start.max(span.start) - span.start;
+                let end = range.end.min(span.end) - span.start;
+                if start < end {
+                    pieces.push((start..end, value.clone()));
+                }
+            }
+            pieces
+        })
+        .collect()
 }
 
 /// A whole file's styles, line by line.
@@ -531,11 +573,10 @@ impl HitHighlights {
     }
 
     pub fn compute(results: &Results, theme: &HighlightTheme) -> Self {
-        let mut grammars: HashMap<&'static str, SyntaxHighlighter> = HashMap::new();
         // Blade's own highlighter is kept for exactly the same reason as the
-        // map above — it carries a PHP grammar, and building one costs tens of
-        // milliseconds. A list of two thousand view lines paid it two thousand
-        // times, which is a minute of frozen window.
+        // grammar pool — it carries a PHP grammar, and building one costs tens
+        // of milliseconds. A list of two thousand view lines paid it two
+        // thousand times, which is a minute of frozen window.
         let mut blade_grammar: Option<blade::BladeHighlighter> = None;
         let files = results
             .files
@@ -543,40 +584,44 @@ impl HitHighlights {
             .map(|file| {
                 // A Blade view is HTML and directives before it is PHP, here as
                 // everywhere else.
-                let blade = blade::is_blade(&file.path);
-                let language = language_for_path(&file.path);
-                if !blade && language.is_none() {
-                    return vec![LineStyles::new(); file.hits.len()];
+                if blade::is_blade(&file.path) {
+                    let blade = blade_grammar.get_or_insert_with(blade::BladeHighlighter::new);
+                    return file
+                        .hits
+                        .iter()
+                        .map(|hit| {
+                            let text = hit.text.trim_start();
+                            if text.is_empty() {
+                                return LineStyles::new();
+                            }
+                            nth_line(text, &blade.document_styles(text, theme), 0)
+                        })
+                        .collect();
                 }
-                file.hits
-                    .iter()
-                    .map(|hit| {
-                        let text = hit.text.trim_start();
-                        if text.is_empty() {
-                            return LineStyles::new();
-                        }
-                        if blade {
-                            let styles = blade_grammar
-                                .get_or_insert_with(blade::BladeHighlighter::new)
-                                .document_styles(text, theme);
-                            return nth_line(text, &styles, 0);
-                        }
-                        let Some(language) = language else {
-                            return LineStyles::new();
-                        };
-                        let highlighter = grammars
-                            .entry(language)
-                            .or_insert_with(|| SyntaxHighlighter::new(language));
-                        // The line first receives what its grammar needs to
-                        // recognise it: without `<?php`, PHP reads the whole
-                        // fragment as HTML text and not one colour comes out.
-                        let prologue = prologue(language, text);
-                        let full = format!("{prologue}{text}");
-                        highlighter.update(None, &Rope::from_str(&full), None);
-                        let styles = highlighter.styles(&(0..full.len()), theme);
-                        nth_line(&full, &styles, prologue.matches('\n').count())
-                    })
-                    .collect()
+                let Some(language) = language_for_path(&file.path) else {
+                    return vec![LineStyles::new(); file.hits.len()];
+                };
+                // The pool every other colouring draws from, taken once per
+                // file: see `with_grammar`.
+                with_grammar(language, |highlighter| {
+                    file.hits
+                        .iter()
+                        .map(|hit| {
+                            let text = hit.text.trim_start();
+                            if text.is_empty() {
+                                return LineStyles::new();
+                            }
+                            // The line first receives what its grammar needs to
+                            // recognise it: without `<?php`, PHP reads the whole
+                            // fragment as HTML text and not one colour comes out.
+                            let prologue = prologue(language, text);
+                            let full = format!("{prologue}{text}");
+                            highlighter.update(None, &Rope::from_str(&full), None);
+                            let styles = highlighter.styles(&(0..full.len()), theme);
+                            nth_line(&full, &styles, prologue.matches('\n').count())
+                        })
+                        .collect()
+                })
             })
             .collect();
         Self { files }
@@ -591,40 +636,17 @@ fn nth_line(text: &str, styles: &[(Range<usize>, HighlightStyle)], skip: usize) 
         .unwrap_or_default()
 }
 
-/// Redistributes a document's styles onto its lines.
-///
-/// Both lists are walked once, jointly: the styles are sorted by offset, so the
-/// cursor never goes back. A style spilling over a line break — a multi-line
-/// string, a block comment — is **cut at the boundary** rather than dropped,
-/// each piece having to stay coloured.
+/// Redistributes a document's styles onto its lines — `cut_runs`, along the
+/// line breaks.
 fn cut_into_lines(text: &str, styles: &[(Range<usize>, HighlightStyle)]) -> Vec<LineStyles> {
-    let mut out: Vec<LineStyles> = Vec::new();
-    let mut next = 0usize;
     let mut at = 0usize;
-    for line in text.split('\n') {
+    let lines = text.split('\n').map(|line| {
         let span = at..at + line.len();
         // The newline that separates them belongs to neither.
         at = span.end + 1;
-        let mut target: LineStyles = Vec::new();
-        while next < styles.len() && styles[next].0.end <= span.start {
-            next += 1;
-        }
-        for (range, style) in &styles[next..] {
-            if range.start >= span.end {
-                break;
-            }
-            if range.end <= span.start || *style == HighlightStyle::default() {
-                continue;
-            }
-            let start = range.start.max(span.start) - span.start;
-            let end = range.end.min(span.end) - span.start;
-            if start < end {
-                target.push((start..end, *style));
-            }
-        }
-        out.push(target);
-    }
-    out
+        span
+    });
+    cut_runs(styles, lines, |style| *style != HighlightStyle::default())
 }
 
 /// The grammar associated with an extension.
@@ -717,65 +739,14 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
 ///
 /// It is what makes a search hit visible **inside** coloured code: the
 /// background marks the find, the grammar keeps its text colours. Repainting the
-/// whole line would lose one or the other.
-///
-/// `with_highlights`'s two invariants hold here too, and gpui checks neither:
-/// the ranges returned are **sorted and disjoint** — the function converts them
-/// into consecutive run lengths, and an out-of-order range shifts everything
-/// after it — and the offsets are in **bytes**. `base` and `marks` have to be so
-/// as well, each on its own; they may on the other hand overlap each other,
-/// which is in fact the common case.
+/// whole line would lose one or the other. The invariants are `layer`'s.
 pub fn overlay(
     base: &[(Range<usize>, HighlightStyle)],
     marks: &[(Range<usize>, gpui_kit::Hsla)],
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    if marks.is_empty() {
-        return base.to_vec();
-    }
-    // Every boundary of both partitions: between two of them, neither the
-    // background style nor the text style changes, so the segment is uniform by
-    // construction.
-    let mut cuts: Vec<usize> = Vec::with_capacity((base.len() + marks.len()) * 2);
-    for (range, _) in base {
-        cuts.push(range.start);
-        cuts.push(range.end);
-    }
-    for (range, _) in marks {
-        cuts.push(range.start);
-        cuts.push(range.end);
-    }
-    cuts.sort_unstable();
-    cuts.dedup();
-
-    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    for pair in cuts.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        let style = base
-            .iter()
-            .find(|(range, _)| range.start <= start && end <= range.end)
-            .map(|(_, style)| *style);
-        let mark = marks
-            .iter()
-            .find(|(range, _)| range.start <= start && end <= range.end)
-            .map(|(_, color)| *color);
-        let (Some(mut style), mark) = (style.or(mark.map(|_| HighlightStyle::default())), mark)
-        else {
-            // Neither highlighting nor hit: the text stays at the ambient style,
-            // and a range with no effect has no business in the list.
-            continue;
-        };
-        if let Some(color) = mark {
-            style.background_color = Some(color);
-        }
-        // Two neighbouring segments of the same style are glued back together:
-        // `with_highlights` turns them into runs, and two identical runs side by
-        // side are a layout cost for nothing.
-        match out.last_mut() {
-            Some((last, previous)) if last.end == start && *previous == style => last.end = end,
-            _ => out.push((start..end, style)),
-        }
-    }
-    out
+    layer(base, marks, |style, color| {
+        style.background_color = Some(*color)
+    })
 }
 
 /// Underlines one range on top of an existing highlighting.
@@ -786,48 +757,103 @@ pub fn overlay(
 /// which is what makes it read as part of the word rather than a rule drawn
 /// near it.
 ///
-/// The same two invariants as `overlay`, and the same reason: sorted, disjoint,
-/// and in bytes. Unlike `overlay`, a segment the base says nothing about is
-/// **kept** when it falls in the range — here the added style is the whole
-/// point, and a line with no grammar at all must underline just the same.
+/// A line with no grammar at all underlines just the same: `layer` keeps a
+/// segment the base says nothing about when a range covers it.
 pub fn underline(
     base: &[(Range<usize>, HighlightStyle)],
     word: Range<usize>,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut cuts: Vec<usize> = Vec::with_capacity(base.len() * 2 + 2);
-    for (range, _) in base {
-        cuts.push(range.start);
-        cuts.push(range.end);
-    }
-    cuts.push(word.start);
-    cuts.push(word.end);
-    cuts.sort_unstable();
-    cuts.dedup();
+    layer(base, &[(word, ())], |style, _| {
+        style.underline = Some(gpui_kit::UnderlineStyle {
+            thickness: gpui_kit::px(1.),
+            color: None,
+            wavy: false,
+        })
+    })
+}
 
-    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    for pair in cuts.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        let inside = word.start <= start && end <= word.end;
-        let style = base
-            .iter()
-            .find(|(range, _)| range.start <= start && end <= range.end)
-            .map(|(_, style)| *style);
-        // Outside the word and unstyled: nothing to say about it, and a run
-        // with no effect has no business in the list.
-        let Some(mut style) = style.or_else(|| inside.then(HighlightStyle::default)) else {
+/// Lays `ranges` over `base`, each covered segment keeping its base style and
+/// receiving what `apply` adds — `overlay`'s background, `underline`'s rule.
+///
+/// `with_highlights`'s two invariants hold here too, and gpui checks neither:
+/// the result is **sorted and disjoint** — the function converts it into
+/// consecutive run lengths, and an out-of-order range shifts everything after
+/// it — and the offsets are in **bytes**. `base` and `ranges` have to be so as
+/// well, each on its own; they may on the other hand overlap each other, which
+/// is in fact the common case.
+///
+/// **One joint walk of both lists**, where the first version cut at every
+/// boundary and searched both lists for each piece: this runs for every visible
+/// line of every frame a search or a hover is on screen.
+pub fn layer<T>(
+    base: &[(Range<usize>, HighlightStyle)],
+    ranges: &[(Range<usize>, T)],
+    apply: impl Fn(&mut HighlightStyle, &T),
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if ranges.is_empty() {
+        return base.to_vec();
+    }
+    let mut out: Vec<(Range<usize>, HighlightStyle)> =
+        Vec::with_capacity(base.len() + ranges.len() * 2);
+    let (mut b, mut r) = (0usize, 0usize);
+    let mut at = 0usize;
+    loop {
+        // Whatever ends at or before the cursor is behind it for good: both
+        // lists are sorted, so neither cursor ever goes back.
+        while b < base.len() && base[b].0.end <= at {
+            b += 1;
+        }
+        while r < ranges.len() && ranges[r].0.end <= at {
+            r += 1;
+        }
+        let (next_base, next_range) = (base.get(b), ranges.get(r));
+        if next_base.is_none() && next_range.is_none() {
+            break;
+        }
+        let in_base = next_base.filter(|(range, _)| range.start <= at);
+        let in_range = next_range.filter(|(range, _)| range.start <= at);
+        if in_base.is_none() && in_range.is_none() {
+            // Neither highlighting nor range here: the text stays at the
+            // ambient style, and a run with no effect has no business in the
+            // list. On to the next start.
+            at = [
+                next_base.map(|(range, _)| range.start),
+                next_range.map(|(range, _)| range.start),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(at);
             continue;
-        };
-        if inside {
-            style.underline = Some(gpui_kit::UnderlineStyle {
-                thickness: gpui_kit::px(1.),
-                color: None,
-                wavy: false,
-            });
         }
+        // The segment runs until something starts or stops: between two such
+        // boundaries neither style changes, so it is uniform by construction.
+        let end = [
+            in_base.map(|(range, _)| range.end),
+            in_range.map(|(range, _)| range.end),
+            next_base
+                .filter(|_| in_base.is_none())
+                .map(|(range, _)| range.start),
+            next_range
+                .filter(|_| in_range.is_none())
+                .map(|(range, _)| range.start),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(at);
+        let mut style = in_base.map(|(_, style)| *style).unwrap_or_default();
+        if let Some((_, value)) = in_range {
+            apply(&mut style, value);
+        }
+        // Two neighbouring segments of the same style are glued back together:
+        // `with_highlights` turns them into runs, and two identical runs side by
+        // side are a layout cost for nothing.
         match out.last_mut() {
-            Some((last, previous)) if last.end == start && *previous == style => last.end = end,
-            _ => out.push((start..end, style)),
+            Some((last, previous)) if last.end == at && *previous == style => last.end = end,
+            _ => out.push((at..end, style)),
         }
+        at = end;
     }
     out
 }
@@ -923,6 +949,74 @@ mod tests {
         // The gap between the two coloured ranges is covered by the hit, and is
         // therefore not lost.
         assert!(out.iter().any(|(range, _)| range == &(4..8)));
+    }
+
+    /// The joint walk against the obvious answer, character by character: a
+    /// base with gaps, ranges straddling runs, touching, nested in one run,
+    /// running past the base's end — and an empty range, which must add
+    /// nothing.
+    #[test]
+    fn layering_matches_a_character_by_character_reading() {
+        let style = |c| HighlightStyle {
+            color: Some(c),
+            ..Default::default()
+        };
+        let base = vec![
+            (0..3, style(gpui_kit::red())),
+            (3..5, style(gpui_kit::blue())),
+            (8..12, style(gpui_kit::green())),
+            (14..15, style(gpui_kit::red())),
+        ];
+        let ranges = vec![(1..2, 1u8), (4..9, 2), (9..9, 3), (10..11, 4), (13..20, 5)];
+        let out = layer(&base, &ranges, |style, n| {
+            style.font_weight = Some(gpui_kit::FontWeight(*n as f32 * 100.))
+        });
+        let at = |list: &[(Range<usize>, HighlightStyle)], i: usize| {
+            list.iter()
+                .find(|(range, _)| range.contains(&i))
+                .map(|(_, s)| *s)
+        };
+        for i in 0..22 {
+            let mut expected = at(&base, i);
+            if let Some((_, n)) = ranges.iter().find(|(range, _)| range.contains(&i)) {
+                let mut s = expected.unwrap_or_default();
+                s.font_weight = Some(gpui_kit::FontWeight(*n as f32 * 100.));
+                expected = Some(s);
+            }
+            assert_eq!(at(&out, i), expected, "offset {i}: {out:?}");
+        }
+        let mut previous = 0;
+        for (range, _) in &out {
+            assert!(
+                range.start >= previous && range.start < range.end,
+                "{out:?}"
+            );
+            previous = range.end;
+        }
+        // Neighbours of one style are one run.
+        for pair in out.windows(2) {
+            assert!(pair[0].0.end != pair[1].0.start || pair[0].1 != pair[1].1);
+        }
+    }
+
+    /// A run straddling two spans is cut at the boundary and each piece kept,
+    /// brought back to its span's start; what `keep` refuses is left out, and
+    /// a span nothing touches is an empty list, not a missing one.
+    #[test]
+    fn runs_are_cut_along_the_spans() {
+        let runs = vec![(0..4, 'a'), (6..10, 'b'), (12..20, 'c')];
+        let cut = cut_runs(&runs, [2..8, 8..9, 10..12, 12..14], |_| true);
+        assert_eq!(
+            cut,
+            vec![
+                vec![(0..2, 'a'), (4..6, 'b')],
+                vec![(0..1, 'b')],
+                vec![],
+                vec![(0..2, 'c')],
+            ]
+        );
+        let kept = cut_runs(&runs, std::iter::once(0..20), |c| *c != 'b');
+        assert_eq!(kept, vec![vec![(0..4, 'a'), (12..20, 'c')]]);
     }
 
     /// With no hit, nothing changes: that is the case for almost every line of
@@ -1282,6 +1376,31 @@ mod tests {
             }
         }
         assert!(!highlights.line(0, 1).is_empty());
+    }
+
+    /// Past the ceiling, counted on both sides together, a diff is left plain:
+    /// the parse would run on the interface thread. Context counts twice — it
+    /// is parsed once per side.
+    #[test]
+    fn a_diff_past_the_ceiling_is_left_plain() {
+        let half = "x".repeat(DocumentHighlights::MAX_BYTES / 2 + 1);
+        let context = diff(vec![line(DiffLineKind::Context, &half)]);
+        assert!(side_bytes(&context) > DocumentHighlights::MAX_BYTES);
+        let highlights = DiffHighlights::compute(
+            Path::new("src/x.rs"),
+            &context,
+            &HighlightTheme::default_dark(),
+        );
+        assert!(highlights.is_empty());
+        // Below it, nothing changes.
+        let added = diff(vec![line(DiffLineKind::Added, "let x = 1;")]);
+        assert!(side_bytes(&added) <= DocumentHighlights::MAX_BYTES);
+        assert!(!DiffHighlights::compute(
+            Path::new("src/x.rs"),
+            &added,
+            &HighlightTheme::default_dark()
+        )
+        .is_empty());
     }
 
     #[test]

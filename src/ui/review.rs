@@ -92,8 +92,9 @@ struct DirRow {
     /// chain: collapsing `app/Http` and collapsing `app/Http/Livewire` are two
     /// different gestures, but a merged chain only offers one.
     path: Rc<PathBuf>,
-    /// What is displayed: one segment, or the merged chain.
-    label: String,
+    /// What is displayed: one segment, or the merged chain. Shared, as the
+    /// file's name is below.
+    label: gpui_kit::SharedString,
     depth: usize,
     collapsed: bool,
     /// Every file of the subtree, including those a collapse hides: ticking a
@@ -117,8 +118,11 @@ struct FileRow {
     paths: Rc<[PathBuf]>,
     /// Depth in the tree. Zero in the flat list.
     depth: usize,
-    name: String,
-    directory: String,
+    /// Shared strings, made when the list is rebuilt: the render hands them
+    /// out for every visible row of every frame, and a `String` was copied
+    /// each time.
+    name: gpui_kit::SharedString,
+    directory: gpui_kit::SharedString,
     /// git's two codes, the index's then the working tree's: it is the exact
     /// information, and it fits in two characters where a single checkbox would
     /// have to lie about partially staged files.
@@ -146,18 +150,63 @@ impl FileRow {
         self.submodule.is_none() && self.staged && !matches!(self.worktree, StatusCode::Unmodified)
     }
 
-    fn codes(&self) -> String {
+    /// Asked for every visible row of every frame: a single code is a static
+    /// string, and only the rare file with two allocates.
+    fn codes(&self) -> gpui_kit::SharedString {
         let index = self.index.letter();
         let worktree = self.worktree.letter();
         if self.untracked {
             "?".into()
         } else if index.trim().is_empty() {
-            worktree.to_string()
+            worktree.into()
         } else if worktree.trim().is_empty() {
-            index.to_string()
+            index.into()
         } else {
-            format!("{index}{worktree}")
+            format!("{index}{worktree}").into()
         }
+    }
+}
+
+/// The unstaged remainder of a partially staged file — see
+/// `render_unstaged_panel` — flattened when it arrives.
+///
+/// The panel is painted on every frame of the diff above it, and asked for
+/// the whole file it holds thousands of lines: it is a virtualised list, and
+/// its texts are shared strings made once, as the diff's are.
+pub struct Remainder {
+    /// As git told it: staging a hunk builds its patch from here.
+    pub diff: crate::git::FileDiff,
+    rows: Vec<RemainderRow>,
+}
+
+enum RemainderRow {
+    Header {
+        hunk: usize,
+        text: gpui_kit::SharedString,
+    },
+    /// The sign and the text, in one string.
+    Line {
+        kind: crate::git::DiffLineKind,
+        text: gpui_kit::SharedString,
+    },
+}
+
+impl Remainder {
+    pub fn new(diff: crate::git::FileDiff) -> Self {
+        let mut rows = Vec::new();
+        for (hunk, lines) in diff.hunks.iter().enumerate() {
+            rows.push(RemainderRow::Header {
+                hunk,
+                text: lines.header.clone().into(),
+            });
+            rows.extend(lines.lines.iter().map(|line| RemainderRow::Line {
+                kind: line.kind,
+                // The diff's own sign, a real minus included: the two views
+                // sit one above the other.
+                text: format!("{}{}", crate::ui::diff_view::sign(line.kind), line.text).into(),
+            }));
+        }
+        Self { diff, rows }
     }
 }
 
@@ -526,6 +575,7 @@ impl ClaudhubApp {
             // never enable a parent commit, even while its files are shown.
             let staged = state.status.staged().count();
             let shown = shown_rows(&flat, &query, tree, &state.collapsed);
+            let files = Rc::new(FileOrder::of(&shown));
             state.row_cache.insert(
                 range.clone(),
                 RowCache {
@@ -535,6 +585,7 @@ impl ClaudhubApp {
                     show_gitlinks,
                     shown,
                     staged,
+                    files,
                 },
             );
         }
@@ -542,6 +593,7 @@ impl ClaudhubApp {
         Some(RowsView {
             shown: cache.shown.clone(),
             staged: cache.staged,
+            files: cache.files.clone(),
         })
     }
 
@@ -551,17 +603,10 @@ impl ClaudhubApp {
     /// files, and the arrows must not open a file the list does not show — the
     /// next one would then be impossible to find by eye. The search counts the
     /// same way: it is the same list.
-    fn visible_files(&mut self, range: &DiffRange, cx: &gpui_kit::App) -> Vec<PathBuf> {
-        let Some(view) = self.rows_view(range, cx) else {
-            return Vec::new();
-        };
-        view.shown
-            .iter()
-            .filter_map(|row| match row {
-                Row::File(file) => Some(file.path().to_path_buf()),
-                _ => None,
-            })
-            .collect()
+    fn visible_files(&mut self, range: &DiffRange, cx: &gpui_kit::App) -> Rc<FileOrder> {
+        self.rows_view(range, cx)
+            .map(|view| view.files)
+            .unwrap_or_default()
     }
 
     /// Brings the list onto a file.
@@ -602,11 +647,11 @@ impl ClaudhubApp {
         let current = state
             .selected
             .as_ref()
-            .and_then(|path| files.iter().position(|file| file == path));
-        let Some(index) = step_index(current, delta, files.len()) else {
+            .and_then(|path| files.rank.get(path).copied());
+        let Some(index) = step_index(current, delta, files.paths.len()) else {
             return;
         };
-        let Some(path) = files.get(index).cloned() else {
+        let Some(path) = files.paths.get(index).cloned() else {
             return;
         };
         self.open_file(worktree, path, range, cx);
@@ -625,9 +670,7 @@ impl ClaudhubApp {
     ) -> Option<(usize, usize)> {
         let worktree = self.active.clone()?;
         let range = self.review.get(&worktree)?.range.clone();
-        let files = self.visible_files(&range, cx);
-        let rank = files.iter().position(|file| file == path)? + 1;
-        Some((rank, files.len()))
+        self.visible_files(&range, cx).position(path)
     }
 
     /// The changes panel's bar: what one does to the repository, then the
@@ -1326,13 +1369,13 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let Some((path, diff)) = self
+        let Some((path, remainder)) = self
             .active_review()
             .and_then(|state| state.unstaged.clone())
         else {
             return;
         };
-        let Some(hunk) = diff.hunks.get(hunk) else {
+        let Some(hunk) = remainder.diff.hunks.get(hunk) else {
             return;
         };
         let (repository, path) = self.active_review().unwrap().status.file_location(&path);
@@ -1369,63 +1412,31 @@ impl ClaudhubApp {
         {
             return None;
         }
-        let (kept, diff) = state.unstaged.clone()?;
-        if kept != path || diff.hunks.is_empty() {
+        let (kept, remainder) = state.unstaged.clone()?;
+        if kept != path || remainder.diff.hunks.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
         let colors = crate::ui::theme::DiffColors::of(cx);
         let mono = theme.mono_font_family.clone();
         let font_size = gpui_kit::px(crate::ui::settings::Settings::global(cx).diff_font_size);
-        let count = diff.hunks.len();
-
-        let hunks = diff.hunks.iter().enumerate().map(|(ix, hunk)| {
-            v_flex()
-                .child(
-                    h_flex()
-                        .px_2()
-                        .gap_2()
-                        .items_center()
-                        .bg(colors.hunk_bg)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(hunk.header.clone()),
-                        )
-                        .child(
-                            Button::new(("stage-remainder", ix))
-                                .ghost()
-                                .small()
-                                .icon(icon("plus"))
-                                .label(tr!("diff-unstaged-add"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.stage_remainder_hunk(ix, cx);
-                                })),
-                        ),
-                )
-                .children(hunk.lines.iter().map(|line| {
-                    use crate::git::DiffLineKind;
-                    let (bg, fg, sign) = match line.kind {
-                        DiffLineKind::Added => (Some(colors.added_bg), Some(colors.added_fg), "+"),
-                        DiffLineKind::Removed => {
-                            (Some(colors.removed_bg), Some(colors.removed_fg), "-")
-                        }
-                        DiffLineKind::Context => (None, None, " "),
-                        DiffLineKind::NoNewline => (None, None, "\\"),
-                    };
-                    div()
-                        .px_2()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .when_some(bg, |el, bg| el.bg(bg))
-                        .when_some(fg, |el, fg| el.text_color(fg))
-                        .child(format!("{sign}{}", line.text))
-                }))
-        });
+        let count = remainder.diff.hunks.len();
+        // One fixed height for every row, headers included, as in the diff
+        // above: the list reserves exactly what it is told. The panel is as
+        // tall as its rows up to its cap, and scrolls past it.
+        let line_height = crate::ui::diff_view::line_height(font_size);
+        let rows = remainder.rows.len();
+        let height = (line_height * rows as f32).min(gpui_kit::px(240.));
+        let entity = cx.entity();
+        let list = uniform_list("unstaged-remainder", rows, move |visible, _window, cx| {
+            visible
+                .map(|ix| render_remainder_row(&remainder, ix, &colors, line_height, &entity, cx))
+                .collect::<Vec<_>>()
+        })
+        .w_full()
+        .h(height)
+        .font_family(mono)
+        .text_size(font_size);
 
         Some(
             v_flex()
@@ -1463,17 +1474,67 @@ impl ClaudhubApp {
                                 })),
                         ),
                 )
-                .child(
-                    div()
-                        .id("unstaged-remainder")
-                        .max_h(gpui_kit::px(240.))
-                        .overflow_y_scroll()
-                        .font_family(mono)
-                        .text_size(font_size)
-                        .child(v_flex().children(hunks)),
-                )
+                .child(list)
                 .into_any_element(),
         )
+    }
+}
+
+/// One row of the remainder panel: a hunk's header and its button, or a line.
+fn render_remainder_row(
+    remainder: &Remainder,
+    index: usize,
+    colors: &DiffColors,
+    line_height: gpui_kit::Pixels,
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
+    match remainder.rows.get(index) {
+        Some(RemainderRow::Header { hunk, text }) => {
+            let (hunk, entity) = (*hunk, entity.clone());
+            h_flex()
+                .h(line_height)
+                .w_full()
+                .px_2()
+                .gap_2()
+                .items_center()
+                .bg(colors.hunk_bg)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text.clone()),
+                )
+                .child(
+                    Button::new(("stage-remainder", hunk))
+                        .ghost()
+                        .small()
+                        .icon(icon("plus"))
+                        .label(tr!("diff-unstaged-add"))
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.stage_remainder_hunk(hunk, cx));
+                        }),
+                )
+                .into_any_element()
+        }
+        Some(RemainderRow::Line { kind, text }) => {
+            let (bg, fg) = crate::ui::diff_view::line_colors(*kind, colors);
+            h_flex()
+                .h(line_height)
+                .w_full()
+                .px_2()
+                .items_center()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .when_some(bg, |el, bg| el.bg(bg))
+                .when_some(fg, |el, fg| el.text_color(fg))
+                .child(text.clone())
+                .into_any_element()
+        }
+        None => div().into_any_element(),
     }
 }
 
@@ -2272,8 +2333,8 @@ fn rows_for_repository(
                 let row = FileRow {
                     paths: Rc::from(vec![path.clone()]),
                     depth,
-                    name: file.file_name(),
-                    directory: file.directory(),
+                    name: file.file_name().into(),
+                    directory: file.directory().into(),
                     index: file.index,
                     worktree: file.worktree,
                     submodule: file.submodule,
@@ -2364,8 +2425,8 @@ fn rows_for_repository(
                 Row::File(FileRow {
                     paths: Rc::from(vec![f.path.clone()]),
                     depth: 0,
-                    name: crate::git::status::file_name(&f.path),
-                    directory: crate::git::status::directory(&f.path),
+                    name: crate::git::status::file_name(&f.path).into(),
+                    directory: crate::git::status::directory(&f.path).into(),
                     index: if f.removed == 0 {
                         StatusCode::Added
                     } else if f.added == 0 {
@@ -2459,7 +2520,7 @@ fn flush(
                 let inside: Vec<&FileRow> = leaves.iter().map(|index| &files[*index]).collect();
                 out.push(Row::Dir(DirRow {
                     path: Rc::new(crate::wslpath::join(repository, path)),
-                    label,
+                    label: label.into(),
                     depth: repository_depth + depth,
                     collapsed,
                     paths: inside
@@ -2475,7 +2536,7 @@ fn flush(
                 file.depth = repository_depth + depth;
                 // The folder is carried by the row above: repeating it on every
                 // file is exactly the noise the tree removes.
-                file.directory.clear();
+                file.directory = gpui_kit::SharedString::default();
                 out.push(Row::File(file));
             }
         }
@@ -2544,12 +2605,48 @@ pub struct RowCache {
     shown: Rc<Vec<Row>>,
     /// Files staged in the active repository, excluding child indexes.
     staged: usize,
+    files: Rc<FileOrder>,
 }
 
-/// A range's rows as the view reads them back: one `Rc` clone and a count.
+/// A range's rows as the view reads them back: `Rc` clones and a count.
 struct RowsView {
     shown: Rc<Vec<Row>>,
     staged: usize,
+    files: Rc<FileOrder>,
+}
+
+/// The files a list shows, in its order, and where each one stands in it.
+///
+/// Built with the rows, not per frame: the diff's bar asks for the reviewed
+/// file's rank on every frame, and walking the list for it copied every path
+/// it held.
+#[derive(Default)]
+struct FileOrder {
+    paths: Vec<PathBuf>,
+    /// A path's **first** rank: a partly staged file is listed twice, and the
+    /// arrows walk from the first.
+    rank: std::collections::HashMap<PathBuf, usize>,
+}
+
+impl FileOrder {
+    fn of(shown: &[Row]) -> Self {
+        let mut order = Self::default();
+        for row in shown {
+            if let Row::File(file) = row {
+                order
+                    .rank
+                    .entry(file.path().to_path_buf())
+                    .or_insert(order.paths.len());
+                order.paths.push(file.path().to_path_buf());
+            }
+        }
+        order
+    }
+
+    /// A path's one-based rank and the list's length, as the bar shows them.
+    fn position(&self, path: &Path) -> Option<(usize, usize)> {
+        Some((self.rank.get(path)? + 1, self.paths.len()))
+    }
 }
 
 #[cfg(test)]
@@ -2938,8 +3035,9 @@ mod tests {
                         .file_name()
                         .unwrap()
                         .to_string_lossy()
-                        .into_owned(),
-                    directory: String::new(),
+                        .into_owned()
+                        .into(),
+                    directory: Default::default(),
                     index: StatusCode::Modified,
                     worktree: StatusCode::Unmodified,
                     submodule: None,
@@ -3077,6 +3175,63 @@ mod tests {
         // Files never added form their own group: ticking them does not mean the
         // same thing as for a file already tracked.
         assert_eq!(groups_of(&rows), vec![Group::Tracked, Group::Untracked]);
+    }
+
+    /// The remainder is flattened once, headers among their lines, each line
+    /// carrying the diff's own sign — the real minus, not git's hyphen.
+    #[test]
+    fn the_remainder_is_flattened_with_the_diffs_signs() {
+        use crate::git::{DiffLine, DiffLineKind, Hunk};
+        let line = |kind, text: &str| DiffLine {
+            kind,
+            old_no: None,
+            new_no: None,
+            text: text.into(),
+            cr: false,
+        };
+        let remainder = Remainder::new(crate::git::FileDiff {
+            hunks: vec![Hunk {
+                header: "@@ -1,2 +1,2 @@".into(),
+                old_start: 1,
+                new_start: 1,
+                lines: vec![
+                    line(DiffLineKind::Context, "a"),
+                    line(DiffLineKind::Removed, "b"),
+                    line(DiffLineKind::Added, "c"),
+                ],
+            }],
+            binary: false,
+            empty: false,
+        });
+        let texts: Vec<String> = remainder
+            .rows
+            .iter()
+            .map(|row| match row {
+                RemainderRow::Header { hunk, text } => format!("{hunk}:{text}"),
+                RemainderRow::Line { text, .. } => text.to_string(),
+            })
+            .collect();
+        assert_eq!(texts, vec!["0:@@ -1,2 +1,2 @@", " a", "−b", "+c"]);
+    }
+
+    /// The rank the diff's bar shows is the file's first place in the list the
+    /// arrows walk: a partly staged file, listed twice, counts twice in the
+    /// total and ranks where it first appears.
+    #[test]
+    fn a_file_ranks_where_the_list_first_shows_it() {
+        let status = status(vec![
+            file("a.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("moitie.rs", StatusCode::Modified, StatusCode::Modified),
+            file("z.rs", StatusCode::Untracked, StatusCode::Untracked),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
+        let order = FileOrder::of(&rows);
+        let walked: Vec<&Path> = files_of(&rows).iter().map(|file| file.path()).collect();
+        assert_eq!(order.paths, walked);
+        assert_eq!(order.position(Path::new("a.rs")), Some((1, 4)));
+        assert_eq!(order.position(Path::new("moitie.rs")), Some((2, 4)));
+        assert_eq!(order.position(Path::new("z.rs")), Some((4, 4)));
+        assert_eq!(order.position(Path::new("absent.rs")), None);
     }
 
     #[test]

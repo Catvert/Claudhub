@@ -526,13 +526,7 @@ impl TerminalView {
         if unknown.is_empty() {
             return;
         }
-        let font_id = window.text_system().resolve_font(&gpui_kit::Font {
-            family: self.font_family.clone(),
-            features: Default::default(),
-            weight: Default::default(),
-            style: Default::default(),
-            fallbacks: None,
-        });
+        let font_id = crate::ui::theme::mono_font_id(window, &self.font_family);
         let width = f32::from(self.cell.width);
         for ch in unknown {
             let on_grid = window
@@ -556,19 +550,8 @@ impl TerminalView {
         }
         self.bounds = bounds;
 
-        let font = gpui_kit::Font {
-            family: self.font_family.clone(),
-            features: Default::default(),
-            weight: Default::default(),
-            style: Default::default(),
-            fallbacks: None,
-        };
-        let font_id = window.text_system().resolve_font(&font);
-        let cell_width = window
-            .text_system()
-            .advance(font_id, self.font_size, 'M')
-            .map(|s| s.width)
-            .unwrap_or(self.font_size * 0.6);
+        let cell_width =
+            crate::ui::theme::mono_advance(window, &self.font_family, self.font_size, 'M');
         let line_height = window.line_height().max(px(1.));
 
         self.cell = gpui_kit::size(cell_width.max(px(1.)), line_height);
