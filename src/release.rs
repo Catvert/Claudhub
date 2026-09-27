@@ -13,16 +13,10 @@
 //! interface** against its own `CARGO_PKG_VERSION`: in remote mode it is the
 //! server that fetches, and the version that matters is the window's.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 
 /// The repository the binaries come from.
 const REPO: &str = "Catvert/Claudhub";
-
-/// Beyond this, the check is abandoned: it runs on the network queue, and a
-/// hung request would keep a fetch waiting.
-const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The latest published release: its version and the page holding the files.
 pub struct Latest {
@@ -34,22 +28,22 @@ pub struct Latest {
 
 /// Asks GitHub for the latest published release. A subprocess-free network
 /// call: never on the interface thread.
+///
+/// Through `outside`'s HTTP request, the one every view's call takes: its
+/// shared agent, its ceiling, and a refusal read rather than dropped — a
+/// rate limit says so in the body, where a bare status said "403".
 pub fn check() -> Result<Latest> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .into();
-    let mut response = agent
-        .get(&url)
+    let text = crate::outside::Cap::Http {
+        method: "GET".into(),
+        url: url.clone(),
         // Asked for explicitly: GitHub serves other shapes to other Accepts.
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .with_context(|| url.clone())?;
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .with_context(|| format!("unreadable answer from {url}"))?;
+        headers: vec![("Accept".into(), "application/vnd.github+json".into())],
+        body: None,
+        secret: None,
+    }
+    .run()
+    .map_err(anyhow::Error::msg)?;
     parse(&text).with_context(|| format!("unexpected answer from {url}"))
 }
 
