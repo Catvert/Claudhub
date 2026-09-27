@@ -500,11 +500,36 @@ impl Session {
         let env = state::env(&vars);
         let cwd = self.probe_cwd(slug);
         let config = &self.app.project.config;
-        let up = config
+        // `[status] up` and each `[status.info]`, all at once, each with the
+        // probe's ceiling: one after the other, a container that does not
+        // answer held the single background worker ten seconds per line.
+        let probe = config
             .status
             .up
             .as_ref()
-            .map(|status| succeeds_within(&tmpl::render(status, &vars), &cwd, &env));
+            .map(|status| tmpl::render(status, &vars));
+        let lines: Vec<(String, String)> = config
+            .status
+            .info
+            .iter()
+            .map(|(name, command)| (name.clone(), tmpl::render(command, &vars)))
+            .collect();
+        let (up, info) = std::thread::scope(|scope| {
+            let (cwd, env) = (&cwd, &env);
+            let up = probe
+                .as_deref()
+                .map(|line| scope.spawn(move || succeeds_within(line, cwd, env)));
+            let info: Vec<_> = lines
+                .iter()
+                .map(|(name, line)| (name, scope.spawn(move || capture_within(line, cwd, env))))
+                .collect();
+            (
+                up.map(|probe| probe.join().unwrap_or(false)),
+                info.into_iter()
+                    .map(|(name, value)| (name.clone(), value.join().unwrap_or_default()))
+                    .collect::<Vec<_>>(),
+            )
+        });
         // The same two guards `App::links` applies to the static address: a
         // template left unresolved is not an address, and a missing label is
         // `wt`'s own default.
@@ -521,18 +546,6 @@ impl Session {
                     .unwrap_or_else(|| "application".into()),
             })
             .into_iter()
-            .collect();
-        // `[status.info]`, each with the probe's ceiling: they run on the same
-        // single worker, and one reading a `.env` through a container that
-        // does not answer would hold the scan the way the probe did.
-        let info = config
-            .status
-            .info
-            .iter()
-            .map(|(name, command)| {
-                let value = capture_within(&tmpl::render(command, &vars), &cwd, &env);
-                (name.clone(), value)
-            })
             .collect();
         crate::runtime::protocol::WtWorktree {
             up,

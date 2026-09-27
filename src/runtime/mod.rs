@@ -1771,17 +1771,21 @@ fn wt_scan(targets: Vec<(PathBuf, PathBuf)>) -> Vec<Evt> {
     // and the state read, three times per worktree of the scan.
     let mut sessions: std::collections::HashMap<PathBuf, Option<crate::wt::Session>> =
         std::collections::HashMap::new();
-    let states = targets
-        .into_iter()
-        .filter_map(|(main, worktree)| {
-            let session = sessions
-                .entry(main.clone())
-                .or_insert_with(|| crate::wt::Session::open(&main))
-                .as_ref()?;
-            let slug = session.slug_of(&worktree)?;
-            Some((worktree, session.state_of(&slug)))
-        })
-        .collect();
+    let mut project_of = std::collections::HashMap::new();
+    for (main, worktree) in &targets {
+        sessions
+            .entry(main.clone())
+            .or_insert_with(|| crate::wt::Session::open(main));
+        project_of.insert(worktree.clone(), main.clone());
+    }
+    // The worktrees side by side, like the cards: each runs its project's
+    // probes, and one after the other a dozen of them add up.
+    let worktrees = targets.into_iter().map(|(_, worktree)| worktree).collect();
+    let states = in_lanes(worktrees, |worktree| {
+        let session = sessions.get(project_of.get(worktree)?)?.as_ref()?;
+        let slug = session.slug_of(worktree)?;
+        Some(session.state_of(&slug))
+    });
     vec![Evt::WtStates { states }]
 }
 
