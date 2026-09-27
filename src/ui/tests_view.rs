@@ -1088,7 +1088,8 @@ impl ClaudhubApp {
         // each: the panel is asked for by turning the toggle on, and a tab
         // that took the centre back thirty times a second would be taking it
         // from whatever one moved to since.
-        if first {
+        // On the home screen, the board's Tests tab shows it itself.
+        if first && !self.overview {
             self.travel_to_panel(crate::ui::panels::CastPanel::NAME, window, cx);
         }
         cx.notify();

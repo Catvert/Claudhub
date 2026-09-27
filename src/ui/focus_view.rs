@@ -1676,6 +1676,9 @@ impl ClaudhubApp {
         let theme = cx.theme().clone();
         let tree = self.render_pest_in(true, window, cx);
         let run = self.render_test_run(window, cx).into_any_element();
+        // The browser a run drives, above the run, while it is streamed: the
+        // editor shows it in a panel of the centre, which a board has not.
+        let cast = self.cast_open().then(|| self.render_cast(window, cx));
         let boxed = |el: gpui_kit::Div| {
             el.h_full()
                 .overflow_hidden()
@@ -1685,7 +1688,15 @@ impl ClaudhubApp {
                 .bg(theme.background)
         };
         let start = boxed(v_flex().size_full()).child(tree).into_any_element();
-        let end = boxed(v_flex().size_full()).child(run).into_any_element();
+        let end = match cast {
+            Some(cast) => v_flex()
+                .size_full()
+                .gap_2()
+                .child(boxed(v_flex().flex_grow(3.).flex_basis(px(0.)).min_h(px(160.))).child(cast))
+                .child(boxed(v_flex().flex_grow(2.).flex_basis(px(0.)).min_h(px(120.))).child(run))
+                .into_any_element(),
+            None => boxed(v_flex().size_full()).child(run).into_any_element(),
+        };
         self.two_sides(path, "tests", TESTS_LIST_WIDTH, start, end, cx)
     }
 
