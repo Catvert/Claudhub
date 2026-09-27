@@ -192,6 +192,44 @@ impl Render for SubmoduleCommitDraft {
 }
 
 impl ClaudhubApp {
+    /// Points the diff at one commit — from the history, a tag, a stash: its
+    /// range, nothing selected, the previous commit's block and lists
+    /// forgotten, and its own block asked for. The range comes back for the
+    /// caller to ask its files: the history's line mode already has its patch.
+    pub(super) fn show_commit(
+        &mut self,
+        worktree: &Path,
+        id: String,
+        parent: Option<String>,
+    ) -> Option<DiffRange> {
+        let state = self.review.get_mut(worktree)?;
+        let range = DiffRange::Commit {
+            id: id.clone(),
+            parent,
+        };
+        state.commit = Some(id.clone());
+        state.commit_detail = None;
+        state.range = range.clone();
+        state.selected = None;
+        state.diff = None;
+        state.diff_selection = None;
+        // Another commit's diffs are of no further use: keeping them would
+        // swell the state by one range per commit looked at.
+        state
+            .files
+            .retain(|kept, _| !matches!(kept, DiffRange::Commit { .. }));
+        state
+            .pending_files
+            .retain(|kept| !matches!(kept, DiffRange::Commit { .. }));
+        // The block above the diff wants the full message, which neither the
+        // history's one-line format nor a tag or a stash row carries.
+        self.git.send(Cmd::LoadCommitDetail {
+            worktree: worktree.to_path_buf(),
+            id,
+        });
+        Some(range)
+    }
+
     fn reveal_submodule(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(state) = self.active_review_mut() else {
             return;

@@ -401,31 +401,10 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let range = crate::git::DiffRange::Commit {
-            id: id.clone(),
-            parent: Some(format!("{id}^")),
-        };
-        let Some(state) = self.review.get_mut(&worktree) else {
+        let parent = Some(format!("{id}^"));
+        let Some(range) = self.show_commit(&worktree, id, parent) else {
             return;
         };
-        state.commit = Some(id.clone());
-        state.commit_detail = None;
-        state.range = range.clone();
-        state.selected = None;
-        state.diff = None;
-        state.diff_selection = None;
-        // Another commit's diffs are of no further use, exactly as when opening
-        // one from the history.
-        state
-            .files
-            .retain(|kept, _| !matches!(kept, crate::git::DiffRange::Commit { .. }));
-        state
-            .pending_files
-            .retain(|kept| !matches!(kept, crate::git::DiffRange::Commit { .. }));
-        // The block above the diff: a tag's commit is not in the loaded history,
-        // and its message has to be read on its own account.
-        self.git
-            .send(crate::runtime::Cmd::LoadCommitDetail { worktree, id });
         self.ensure_files(range, cx);
         cx.notify();
     }

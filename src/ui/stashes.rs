@@ -382,29 +382,12 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let range = crate::git::DiffRange::Commit {
-            id: hash.clone(),
-            parent: Some(format!("{hash}^")),
-        };
-        let Some(state) = self.review.get_mut(&worktree) else {
+        // The block above the diff comes with it: a stash's message says what
+        // the work was taken from, which is exactly what one asks a stash.
+        let parent = Some(format!("{hash}^"));
+        let Some(range) = self.show_commit(&worktree, hash, parent) else {
             return;
         };
-        state.commit = Some(hash.clone());
-        state.commit_detail = None;
-        state.range = range.clone();
-        state.selected = None;
-        state.diff = None;
-        state.diff_selection = None;
-        state
-            .files
-            .retain(|kept, _| !matches!(kept, crate::git::DiffRange::Commit { .. }));
-        state
-            .pending_files
-            .retain(|kept| !matches!(kept, crate::git::DiffRange::Commit { .. }));
-        // The block above the diff: a stash's message says what the work was
-        // taken from, which is exactly what one asks a stash.
-        self.git
-            .send(crate::runtime::Cmd::LoadCommitDetail { worktree, id: hash });
         self.ensure_files(range, cx);
         cx.notify();
     }
