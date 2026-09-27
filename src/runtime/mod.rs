@@ -788,21 +788,29 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         },
 
         // — Writes ——————————————————————————————————————————————————————
-        Cmd::Stage { worktree, paths } => write_then_refresh(worktree, Action::Stage, |dir| {
-            repo::stage(dir, &paths).map(|_| String::new())
-        }),
-        Cmd::Unstage { worktree, paths } => write_then_refresh(worktree, Action::Unstage, |dir| {
-            repo::unstage(dir, &paths).map(|_| String::new())
-        }),
-        Cmd::Discard { worktree, paths } => write_then_refresh(worktree, Action::Discard, |dir| {
-            repo::discard(dir, &paths).map(|_| String::new())
-        }),
-        Cmd::Delete { worktree, paths } => write_then_refresh(worktree, Action::Delete, |dir| {
-            repo::clean(dir, &paths).map(|_| String::new())
-        }),
-        Cmd::RollbackAll { worktree } => write_then_refresh(worktree, Action::Discard, |dir| {
-            repo::rollback_all(dir).map(|_| String::new())
-        }),
+        Cmd::Stage { worktree, paths } => write_then_refresh(
+            worktree,
+            Action::Stage,
+            quiet(|dir| repo::stage(dir, &paths)),
+        ),
+        Cmd::Unstage { worktree, paths } => write_then_refresh(
+            worktree,
+            Action::Unstage,
+            quiet(|dir| repo::unstage(dir, &paths)),
+        ),
+        Cmd::Discard { worktree, paths } => write_then_refresh(
+            worktree,
+            Action::Discard,
+            quiet(|dir| repo::discard(dir, &paths)),
+        ),
+        Cmd::Delete { worktree, paths } => write_then_refresh(
+            worktree,
+            Action::Delete,
+            quiet(|dir| repo::clean(dir, &paths)),
+        ),
+        Cmd::RollbackAll { worktree } => {
+            write_then_refresh(worktree, Action::Discard, quiet(repo::rollback_all))
+        }
         Cmd::ApplyHunk {
             worktree,
             patch,
@@ -813,9 +821,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             } else {
                 Action::Stage
             };
-            write_then_refresh(worktree, action, |dir| {
-                repo::apply_patch(dir, &patch, reverse).map(|_| String::new())
-            })
+            write_then_refresh(
+                worktree,
+                action,
+                quiet(|dir| repo::apply_patch(dir, &patch, reverse)),
+            )
         }
         Cmd::Commit {
             worktree,
@@ -884,11 +894,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             if push { Action::Push } else { Action::Pull },
             |dir| repo::reconcile(dir, rebase, push),
         ),
-        Cmd::Checkout { worktree, branch } => {
-            write_then_refresh(worktree, Action::Checkout, |dir| {
-                repo::checkout(dir, &branch).map(|_| String::new())
-            })
-        }
+        Cmd::Checkout { worktree, branch } => write_then_refresh(
+            worktree,
+            Action::Checkout,
+            quiet(|dir| repo::checkout(dir, &branch)),
+        ),
         // Status re-read **even on failure**, like a stash that conflicts: a
         // pick that stops on a conflict has written its markers into the
         // files and `CHERRY_PICK_HEAD` beside them, and it is the status that
@@ -907,15 +917,21 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             worktree,
             name,
             from,
-        } => write_then_refresh(worktree, Action::Branch, |dir| {
-            repo::create_branch(dir, &name, from.as_deref()).map(|_| String::new())
-        }),
-        Cmd::DeleteBranch { main, name, force } => branch_written(main, Action::Branch, |main| {
-            repo::delete_branch(main, &name, force).map(|_| String::new())
-        }),
-        Cmd::RenameBranch { main, from, to } => branch_written(main, Action::Branch, |main| {
-            repo::rename_branch(main, &from, &to).map(|_| String::new())
-        }),
+        } => write_then_refresh(
+            worktree,
+            Action::Branch,
+            quiet(|dir| repo::create_branch(dir, &name, from.as_deref())),
+        ),
+        Cmd::DeleteBranch { main, name, force } => branch_written(
+            main,
+            Action::Branch,
+            quiet(|main| repo::delete_branch(main, &name, force)),
+        ),
+        Cmd::RenameBranch { main, from, to } => branch_written(
+            main,
+            Action::Branch,
+            quiet(|main| repo::rename_branch(main, &from, &to)),
+        ),
         Cmd::DeleteRemoteBranch { main, name } => branch_written(main, Action::Branch, |main| {
             repo::delete_remote_branch(main, &name)
         }),
@@ -949,9 +965,9 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                 }
             },
         ),
-        Cmd::DeleteTag { worktree, name } => tag_written(worktree, Action::Tag, |dir| {
-            tags::delete(dir, &name).map(|_| String::new())
-        }),
+        Cmd::DeleteTag { worktree, name } => {
+            tag_written(worktree, Action::Tag, quiet(|dir| tags::delete(dir, &name)))
+        }
         Cmd::DeleteRemoteTag { worktree, name } => tag_written(worktree, Action::PushTag, |dir| {
             tags::delete_remote(dir, &name)
         }),
@@ -989,9 +1005,7 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             hash,
             branch,
         } => stash_written(worktree, |dir| stash::branch(dir, &name, &hash, &branch)),
-        Cmd::StashClear { worktree } => {
-            stash_written(worktree, |dir| stash::clear(dir).map(|_| String::new()))
-        }
+        Cmd::StashClear { worktree } => stash_written(worktree, quiet(stash::clear)),
         // The four that can stop half-way, all re-read **even on failure**, for
         // the cherry-pick's reason: a merge or a rebase that conflicts — and a
         // `--continue` that reaches the next conflicting commit — exits
@@ -1040,9 +1054,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             worktree,
             path,
             ours,
-        } => write_then_refresh(worktree, Action::Resolve, |dir| {
-            repo::resolve(dir, &path, ours).map(|_| String::new())
-        }),
+        } => write_then_refresh(
+            worktree,
+            Action::Resolve,
+            quiet(|dir| repo::resolve(dir, &path, ours)),
+        ),
         Cmd::ReadMerge { worktree, path } => {
             let result = repo::stages(&worktree, &path).map_err(|e| format!("{e:#}"));
             vec![Evt::MergeStages {
@@ -1055,9 +1071,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             worktree,
             path,
             content,
-        } => write_then_refresh(worktree, Action::Resolve, |dir| {
-            repo::resolve_with(dir, &path, &content).map(|_| String::new())
-        }),
+        } => write_then_refresh(
+            worktree,
+            Action::Resolve,
+            quiet(|dir| repo::resolve_with(dir, &path, &content)),
+        ),
 
         // — The world outside the repository ————————————————————————————
         // No `Done`/`Failed` for a request of the outside world: it is not an
@@ -1208,9 +1226,11 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             path,
             content,
             expect,
-        } => write_then_refresh(worktree, Action::Write, |dir| {
-            crate::files::write(dir, &path, &content, expect).map(|_| String::new())
-        }),
+        } => write_then_refresh(
+            worktree,
+            Action::Write,
+            quiet(|dir| crate::files::write(dir, &path, &content, expect)),
+        ),
         Cmd::FileOp { worktree, op } => write_then_refresh(worktree, Action::FileOp, |dir| {
             crate::files::apply(dir, &op).map(|_| op.target().display().to_string())
         }),
@@ -1641,8 +1661,6 @@ fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
     }
 }
 
-/// Deletes a branch and re-reads the list: the panel shows it, and nothing else
-/// would tell it the branch has gone.
 /// A write that touches a repository's refs, followed by a fresh branch list.
 ///
 /// The counterpart of `write_then_refresh` one floor up: what these commands
@@ -1655,18 +1673,13 @@ fn branch_written(
     action: Action,
     f: impl FnOnce(&Path) -> anyhow::Result<String>,
 ) -> Vec<Evt> {
-    match shielded(|| f(&main)) {
-        Ok(output) => {
-            let mut evts = vec![done(None, action, output)];
-            evts.extend(
-                branch::list(&main)
-                    .ok()
-                    .map(|list| branches_evt(main, list)),
-            );
-            evts
-        }
-        Err(e) => vec![fail(None, action, e)],
-    }
+    written(main, false, action, Refresh::OnSuccess, f, |main| {
+        branch::list(&main)
+            .ok()
+            .map(|list| branches_evt(main, list))
+            .into_iter()
+            .collect()
+    })
 }
 
 /// The periodic fetch. Silence when it succeeds, and a trace when it does not.
@@ -1951,6 +1964,55 @@ fn shielded(op: impl FnOnce() -> Result<String>) -> Result<String> {
     })
 }
 
+/// When a write's lists are read again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Refresh {
+    /// After a success only: a write that failed changed nothing.
+    OnSuccess,
+    /// Whatever happened: a write stopped half-way — on a conflict — has
+    /// changed the working tree all the same.
+    Always,
+}
+
+/// The one skeleton of every write: the operation shielded from a panic, its
+/// `Done` or `Failed`, then what `then` reads again of what it changed.
+///
+/// `named` says whether the answer names `dir` as its worktree: a branch
+/// belongs to the repository, and its writes name none.
+fn written(
+    dir: PathBuf,
+    named: bool,
+    action: Action,
+    refresh: Refresh,
+    op: impl FnOnce(&Path) -> Result<String>,
+    then: impl FnOnce(PathBuf) -> Vec<Evt>,
+) -> Vec<Evt> {
+    let worktree = named.then(|| dir.clone());
+    let outcome = shielded(|| op(&dir));
+    let reread = outcome.is_ok() || refresh == Refresh::Always;
+    let mut evts = vec![match outcome {
+        Ok(output) => done(worktree, action, output),
+        Err(e) => fail(worktree, action, e),
+    }];
+    if reread {
+        evts.extend(then(dir));
+    }
+    evts
+}
+
+/// A write with nothing to report: its `Done` carries an empty output.
+fn quiet<T>(op: impl FnOnce(&Path) -> Result<T>) -> impl FnOnce(&Path) -> Result<String> {
+    move |dir| op(dir).map(|_| String::new())
+}
+
+/// The worktree's status read again, when it can be.
+fn status_read(worktree: PathBuf) -> Vec<Evt> {
+    match status::status(&worktree) {
+        Ok(status) => vec![Evt::Status { worktree, status }],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Every write is followed by a re-read of the status: that is what keeps the
 /// review panel accurate without the view having to know which command touches
 /// what. The cost is one more `git status` per action triggered by hand.
@@ -1959,16 +2021,7 @@ fn write_then_refresh(
     action: Action,
     op: impl FnOnce(&Path) -> Result<String>,
 ) -> Vec<Evt> {
-    match shielded(|| op(&worktree)) {
-        Ok(output) => {
-            let mut evts = vec![done(Some(worktree.clone()), action, output)];
-            if let Ok(status) = status::status(&worktree) {
-                evts.push(Evt::Status { worktree, status });
-            }
-            evts
-        }
-        Err(e) => vec![fail(Some(worktree), action, e)],
-    }
+    written(worktree, true, action, Refresh::OnSuccess, op, status_read)
 }
 
 /// The same, with the status re-read whether the write succeeded or not.
@@ -1982,14 +2035,7 @@ fn write_then_refresh_anyway(
     action: Action,
     op: impl FnOnce(&Path) -> Result<String>,
 ) -> Vec<Evt> {
-    let mut evts = vec![match shielded(|| op(&worktree)) {
-        Ok(output) => done(Some(worktree.clone()), action, output),
-        Err(e) => fail(Some(worktree.clone()), action, e),
-    }];
-    if let Ok(status) = status::status(&worktree) {
-        evts.push(Evt::Status { worktree, status });
-    }
-    evts
+    written(worktree, true, action, Refresh::Always, op, status_read)
 }
 
 /// Every tag write is followed by a re-read of the tag list, for the reason
@@ -2003,17 +2049,13 @@ fn tag_written(
     action: Action,
     op: impl FnOnce(&Path) -> Result<String>,
 ) -> Vec<Evt> {
-    match shielded(|| op(&worktree)) {
-        Ok(output) => {
-            let main = main_of(&worktree);
-            let mut evts = vec![done(Some(worktree.clone()), action, output)];
-            if let Ok(tags) = tags::list(&worktree) {
-                evts.push(Evt::Tags { main, tags });
-            }
-            evts
-        }
-        Err(e) => vec![fail(Some(worktree), action, e)],
-    }
+    written(worktree, true, action, Refresh::OnSuccess, op, |worktree| {
+        let main = main_of(&worktree);
+        tags::list(&worktree)
+            .map(|tags| Evt::Tags { main, tags })
+            .into_iter()
+            .collect()
+    })
 }
 
 /// Every stash write is followed by a re-read of **both** the status and the
@@ -2026,19 +2068,22 @@ fn tag_written(
 /// the review panel showing the tree as it was before, which is the one state
 /// it certainly is not in.
 fn stash_written(worktree: PathBuf, op: impl FnOnce(&Path) -> Result<String>) -> Vec<Evt> {
-    let outcome = shielded(|| op(&worktree));
-    let main = main_of(&worktree);
-    let mut evts = vec![match outcome {
-        Ok(output) => done(Some(worktree.clone()), Action::Stash, output),
-        Err(e) => fail(Some(worktree.clone()), Action::Stash, e),
-    }];
-    if let Ok(stashes) = stash::list(&worktree) {
-        evts.push(Evt::Stashes { main, stashes });
-    }
-    if let Ok(status) = status::status(&worktree) {
-        evts.push(Evt::Status { worktree, status });
-    }
-    evts
+    written(
+        worktree,
+        true,
+        Action::Stash,
+        Refresh::Always,
+        op,
+        |worktree| {
+            let main = main_of(&worktree);
+            let mut evts: Vec<Evt> = stash::list(&worktree)
+                .map(|stashes| Evt::Stashes { main, stashes })
+                .into_iter()
+                .collect();
+            evts.extend(status_read(worktree));
+            evts
+        },
+    )
 }
 
 /// The main repository a checkout belongs to, which is what keys the tag and
@@ -2169,6 +2214,58 @@ mod tests {
             other => panic!("unexpected events: {other:?}"),
         }
         assert_eq!(panic_message(&"literal"), "literal");
+    }
+
+    /// A failed write is read again only when its failure may have changed
+    /// something — a stash pop that conflicts, not a stage git refused — and
+    /// a branch write names no worktree.
+    #[test]
+    fn a_failed_write_is_read_again_only_when_asked_to() {
+        let refused = |refresh, named| {
+            let mut read = false;
+            let evts = written(
+                worktree(),
+                named,
+                Action::Stage,
+                refresh,
+                |_| Err(anyhow::anyhow!("refused")),
+                |_| {
+                    read = true;
+                    Vec::new()
+                },
+            );
+            let named = matches!(
+                evts.as_slice(),
+                [Evt::Failed {
+                    worktree: Some(_),
+                    ..
+                }]
+            );
+            (read, named)
+        };
+        assert_eq!(refused(Refresh::OnSuccess, true), (false, true));
+        assert_eq!(refused(Refresh::Always, true), (true, true));
+        assert_eq!(refused(Refresh::OnSuccess, false), (false, false));
+
+        let evts = written(
+            worktree(),
+            true,
+            Action::Stage,
+            Refresh::OnSuccess,
+            quiet(|_| Ok(42)),
+            |_| {
+                vec![Evt::VaultWritten {
+                    worktree: worktree(),
+                }]
+            },
+        );
+        assert!(
+            matches!(
+                evts.as_slice(),
+                [Evt::Done { output, .. }, Evt::VaultWritten { .. }] if output.is_empty()
+            ),
+            "{evts:?}"
+        );
     }
 
     /// The answer carries the ticket of the command it answers, success or
