@@ -225,8 +225,8 @@ src/
     focus_view.rs   la vue par défaut de l'accueil : la barre latérale des
                     worktrees (ou son rail), et ceux choisis côte à côte,
                     chacun sur son tableau, et les vues sous ses onglets
-    summary_view.rs les onglets d'un tableau, et son Accueil : ce qui attend
-                    la main, l'état en cartes, les terminaux en sous-onglets
+    summary_view.rs les onglets d'un tableau, et son Accueil : l'état en
+                    cartes, les terminaux en sous-onglets
     overview_view.rs l'accueil peint : nœuds, liens, gestes du plan, notes
     revive.rs       les terminaux qui survivent à la fenêtre : quelle session
                     Claude un onglet porte, la commande qui la reprend — pur
@@ -689,20 +689,18 @@ worktree.
   — c'est la rangée des tableaux qui défile, jamais un tableau seul — et ce
   qu'il tient dans l'instant est **rangé par worktree**.
   **Un tableau, ce sont des onglets et une seule vue** (`ui::summary_view`,
-  `ui::focus`) : **Accueil**, Git, Revue, note principale, TODO, agents.
-  **L'Accueil répond à « qu'est-ce qui m'attend ici » avant « qu'est-ce
-  qu'il y a »** : en tête un bandeau de ce qui attend la main — la question
-  d'un agent, un conflit, une CI rouge, des commits à tirer, des fichiers à
-  valider, des remarques, des commits à pousser —, chacun avec le bouton qui
-  le traite, et aucun bandeau quand tout est calme (`focus::attention`) ;
-  dessous, à gauche l'état des choses (ce qui attend un commit, la revue,
-  les tâches, la note principale, ce qui tourne), à droite la branche, sa
-  PR et sa CI, et sous elles **les terminaux eux-mêmes**, un sous-onglet
-  chacun (`focus::shown_terminal`) : un agent se travaille, il ne se lit
-  pas en résumé — il y a eu un aperçu de ses dernières lignes. Le titre
+  `ui::focus`) : **Accueil**, Git, Revue, note principale, TODO, terminaux.
+  **L'Accueil**, ce sont deux colonnes : à gauche l'état des choses (la
+  branche, sa PR et sa CI, ce qui attend un commit, la revue, les tâches,
+  la note principale, ce qui tourne), à droite **les terminaux eux-mêmes**,
+  nus — sans la fenêtre des tableaux —, un sous-onglet chacun qui se ferme
+  par sa croix (`focus::shown_terminal`) : un agent se travaille, il ne se
+  lit pas en résumé. Il y a eu un aperçu de ses dernières lignes, et un
+  bandeau « À traiter » qui redisait ce que les cartes disaient. Le titre
   d'une carte ouvre son onglet, un geste simple se fait sur la carte, une
   carte vide dit ce qui la remplit ; « Exécution » ne liste que ce qui
-  tourne, le widget du titre lançant le reste.
+  tourne, le widget du titre lançant le reste. L'onglet Terminaux fait
+  défiler ses terminaux, jamais la barre d'onglets.
   La PR et la CI ne sont lues que pour le worktree regardé, l'état GitHub
   n'en suivant qu'un ; l'onglet choisi est retenu par
   worktree (`focus_view`), l'Accueil à défaut. Il y a eu des colonnes de

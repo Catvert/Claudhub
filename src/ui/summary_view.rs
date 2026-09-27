@@ -1,14 +1,11 @@
 //! A board's tabs, and its home: the digest of a worktree in one screen.
 //!
-//! The home answers « what waits for me here » before « what is in here ».
-//! At the top, a strip of what waits for the hand — an agent's question, a
-//! conflict, a failed CI run, commits to pull, files to commit, remarks,
-//! commits to push —, each with the button that deals with it, and no strip
-//! at all when all is quiet (`focus::attention`). Under it two columns: on
-//! the left the state of things — what waits for a commit, the review, the
-//! to-do list, the principal note, what runs —; on the right the branch,
-//! its pull request and CI, and under them **the terminals themselves**, a
-//! sub-tab each: an agent is worked with, not read about.
+//! Two columns: on the left the state of things — the branch, its pull
+//! request and CI, what waits for a commit, the review, the to-do list, the
+//! principal note, what runs —; on the right **the terminals themselves**,
+//! a sub-tab each, bare — no window round them: an agent is worked with,
+//! not read about. There was a strip of what waited for the hand over the
+//! columns; it said again what the cards under it said.
 //!
 //! A card's title opens its tab, the whole of it; what is done in one
 //! gesture is done on the card — a task ticked or added, a recipe started,
@@ -24,13 +21,12 @@ use gpui_kit::component::{
     menu::DropdownMenu as _,
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
-use gpui_kit::{div, prelude::*, px, AnyElement, Context, Hsla, SharedString, Window};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, Focusable as _, SharedString, Window};
 
-use crate::runtime::{Action, Cmd};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
-use crate::ui::focus::{self, Attention, View};
+use crate::ui::focus::{self, View};
 use crate::ui::focus_view::view_name;
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
@@ -45,9 +41,6 @@ const HOME_COMMITS: usize = 5;
 const HOME_FILES: usize = 8;
 /// The review's heaviest files the home draws a bar for.
 const HOME_HEAVIEST: usize = 6;
-/// The least height of the home's terminal: under it, the columns scroll.
-const HOME_TERMINAL_MIN: f32 = 320.;
-
 impl ClaudhubApp {
     /// A board's tabs — the home first —, each saying what waits in it,
     /// and at the right what adds one more.
@@ -224,7 +217,6 @@ impl ClaudhubApp {
                 self.ensure_files(range, cx);
             }
         }
-        let strip = self.render_attention(path, at_work, cx);
         let left = v_flex()
             .id("focus-home-left")
             .flex_grow(2.)
@@ -233,6 +225,7 @@ impl ClaudhubApp {
             .h_full()
             .gap_3()
             .overflow_y_scroll()
+            .child(self.home_branch(path, cx))
             .child(self.home_to_commit(path, cx))
             .child(self.home_review(path, cx))
             .child(self.home_tasks(path, cx))
@@ -243,20 +236,10 @@ impl ClaudhubApp {
             .flex_basis(px(0.))
             .min_w(px(360.))
             .h_full()
-            .gap_3()
-            .child(div().flex_none().w_full().child(self.home_branch(path, cx)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(HOME_TERMINAL_MIN))
-                    .w_full()
-                    .child(self.home_terminals(path, at_work, window, cx)),
-            );
+            .child(self.home_terminals(path, at_work, window, cx));
         v_flex()
             .id(SharedString::from(format!("focus-home-{}", path.display())))
             .size_full()
-            .gap_3()
-            .children(strip)
             .child(
                 h_flex()
                     .flex_1()
@@ -334,182 +317,6 @@ impl ClaudhubApp {
                     .children(actions),
             )
             .child(body)
-            .into_any_element()
-    }
-
-    /// What waits for the hand, a line each with the button that deals with
-    /// it — see `focus::attention`. `None` when all is quiet.
-    fn render_attention(
-        &mut self,
-        path: &Path,
-        at_work: &overview::AtWork,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let terminals = self.board_terminals(path);
-        let status = self.review.get(path).map(|state| &state.status);
-        let upstream = self
-            .outlines
-            .get(path)
-            .and_then(|outline| outline.upstream)
-            .unwrap_or((0, 0));
-        let on_show = self.active.as_deref() == Some(path);
-        let facts = focus::Facts {
-            waiting: terminals
-                .iter()
-                .copied()
-                .filter(|id| at_work.terminals.get(id) == Some(&Doing::Waiting))
-                .collect(),
-            conflicts: status.map_or(0, |status| status.conflicted().count()),
-            ci_failed: on_show
-                && self
-                    .github
-                    .runs
-                    .first()
-                    .is_some_and(|run| run.stage() == crate::github::Stage::Failed),
-            behind: upstream.1,
-            ahead: upstream.0,
-            uncommitted: self.summaries.get(path).map_or(0, |summary| summary.files),
-            remarks: self.open_findings(path).len(),
-        };
-        let items = focus::attention(&facts);
-        if items.is_empty() {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let lines: Vec<AnyElement> = items
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| self.attention_line(path, index, item, &theme, cx))
-            .collect();
-        Some(
-            v_flex()
-                .flex_none()
-                .w_full()
-                .p_3()
-                .gap_1p5()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.warning.opacity(0.5))
-                .bg(theme.warning.opacity(0.06))
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .child(icon("bell").xsmall().text_color(theme.warning))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child(tr!("focus-attention-title")),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .flex_wrap()
-                        .gap_x_4()
-                        .gap_y_1()
-                        .children(lines),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// One thing that waits: its glyph and words, and its button.
-    fn attention_line(
-        &self,
-        path: &Path,
-        index: usize,
-        item: Attention,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let worktree = path.to_path_buf();
-        let (glyph, tint, text): (&str, Hsla, SharedString) = match &item {
-            Attention::Waiting(id) => (
-                "bot",
-                theme.danger,
-                tr!("focus-attention-waiting", { name: self.card_name(&Node::Terminal(*id), cx).1 }),
-            ),
-            Attention::Conflicts(count) => (
-                "triangle-alert",
-                theme.danger,
-                tr!("focus-attention-conflicts", { count: *count }),
-            ),
-            Attention::CiFailed => ("circle-x", theme.danger, tr!("focus-attention-ci")),
-            Attention::Behind(count) => (
-                "arrow-down-to-line",
-                theme.warning,
-                tr!("focus-attention-behind", { count: *count }),
-            ),
-            Attention::Uncommitted(count) => (
-                "git-commit-horizontal",
-                theme.warning,
-                tr!("focus-attention-uncommitted", { count: *count }),
-            ),
-            Attention::Remarks(count) => (
-                "file-text",
-                theme.info,
-                tr!("focus-home-remarks", { count: *count }),
-            ),
-            Attention::Ahead(count) => (
-                "arrow-up-from-line",
-                theme.success,
-                tr!("focus-attention-ahead", { count: *count }),
-            ),
-        };
-        let label = match &item {
-            Attention::Waiting(_) => tr!("focus-attention-reply"),
-            Attention::Conflicts(_) => tr!("focus-attention-resolve"),
-            Attention::CiFailed | Attention::Remarks(_) => tr!("focus-attention-see"),
-            Attention::Behind(_) => tr!("focus-attention-pull"),
-            Attention::Uncommitted(_) => tr!("focus-attention-commit"),
-            Attention::Ahead(_) => tr!("focus-attention-push"),
-        };
-        let busy = match &item {
-            Attention::Behind(_) => self.is_running(Some(path), Action::Pull),
-            Attention::Ahead(_) => self.is_running(Some(path), Action::Push),
-            _ => false,
-        };
-        let run_url = self.github.runs.first().map(|run| run.url.clone());
-        h_flex()
-            .gap_1p5()
-            .items_center()
-            .child(icon(glyph).xsmall().text_color(tint))
-            .child(div().text_sm().child(text))
-            .child(
-                Button::new(("focus-attention", index))
-                    .xsmall()
-                    .ghost()
-                    .label(label)
-                    .loading(busy)
-                    .disabled(busy)
-                    .on_click(cx.listener(move |this, _, window, cx| match &item {
-                        Attention::Waiting(id) => this.reply_to(&worktree, *id, window, cx),
-                        Attention::Conflicts(_) | Attention::Uncommitted(_) => {
-                            this.show_board_view(&worktree, View::Git, cx)
-                        }
-                        Attention::Remarks(_) => this.show_board_view(&worktree, View::Review, cx),
-                        Attention::CiFailed => {
-                            if let Some(url) = &run_url {
-                                cx.open_url(url);
-                            }
-                        }
-                        Attention::Behind(_) => {
-                            let cmd = Cmd::Pull {
-                                worktree: worktree.clone(),
-                            };
-                            this.start(Some(worktree.clone()), Action::Pull, cmd, cx);
-                        }
-                        Attention::Ahead(_) => {
-                            let cmd = Cmd::Push {
-                                worktree: worktree.clone(),
-                                force_with_lease: false,
-                            };
-                            this.start(Some(worktree.clone()), Action::Push, cmd, cx);
-                        }
-                    })),
-            )
             .into_any_element()
     }
 
@@ -593,6 +400,21 @@ impl ClaudhubApp {
                     }))
                     .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
                     .child(div().min_w_0().truncate().child(name))
+                    .child(
+                        Button::new(("focus-home-terminal-close", *id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("x"))
+                            .tooltip(tr!("overview-close"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.ask_close_terminal(
+                                    gpui_kit::EntityId::from(pressed),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
                     .into_any_element(),
             );
         }
@@ -648,13 +470,38 @@ impl ClaudhubApp {
                 .iter()
                 .find(|terminal| terminal.view.entity_id().as_u64() == id)
         }) {
+            // Bare: its name is its sub-tab's, and a window round a
+            // terminal that fills the column had nothing to fold or move.
             Some(terminal) => {
+                let view = terminal.view.clone();
                 let doing = at_work
                     .terminals
-                    .get(&terminal.view.entity_id().as_u64())
+                    .get(&view.entity_id().as_u64())
                     .copied()
                     .unwrap_or(Doing::Rest);
-                self.render_tile(terminal, None, 1., doing, window, cx)
+                let focused = view.focus_handle(cx).contains_focused(window, cx);
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .rounded(theme.radius_lg)
+                            .overflow_hidden()
+                            .bg(theme.background)
+                            .border_1()
+                            .border_color(theme.border)
+                            // `v_flex`: the terminal's `size_full` resolves
+                            // against a definite height. Cached, as on the
+                            // boards: see `render_tile`.
+                            .child(v_flex().flex_1().min_h_0().child(
+                                view.cached(gpui_kit::StyleRefinement::default().size_full()),
+                            )),
+                    )
+                    .child(super::overview_view::tile_outline(
+                        doing, focused, 1., &theme,
+                    ))
+                    .into_any_element()
             }
             None => {
                 let worktree = path.to_path_buf();

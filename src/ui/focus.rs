@@ -62,69 +62,6 @@ pub fn principal_note(
         .map(|(path, _)| path.clone())
 }
 
-/// What a worktree's home reads to say what waits for the hand.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Facts {
-    /// The terminals whose agent asks something.
-    pub waiting: Vec<u64>,
-    /// Files git holds in conflict.
-    pub conflicts: usize,
-    /// The branch's last CI run failed.
-    pub ci_failed: bool,
-    /// Commits the upstream has and the branch has not, and the reverse.
-    pub behind: usize,
-    pub ahead: usize,
-    /// Files waiting for a commit.
-    pub uncommitted: usize,
-    /// Review remarks not yet resolved.
-    pub remarks: usize,
-}
-
-/// A thing that waits for the hand, as the home's strip says it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Attention {
-    /// An agent asks something, in this terminal.
-    Waiting(u64),
-    Conflicts(usize),
-    CiFailed,
-    /// Commits to pull.
-    Behind(usize),
-    Uncommitted(usize),
-    Remarks(usize),
-    /// Commits to push.
-    Ahead(usize),
-}
-
-/// What waits for the hand, the most pressing first: what nothing goes on
-/// without — an agent's question, a conflict — then what breaks, then what
-/// is due. Empty when all is quiet, and the strip is not drawn.
-pub fn attention(facts: &Facts) -> Vec<Attention> {
-    let mut out: Vec<Attention> = facts
-        .waiting
-        .iter()
-        .map(|id| Attention::Waiting(*id))
-        .collect();
-    if facts.conflicts > 0 {
-        out.push(Attention::Conflicts(facts.conflicts));
-    }
-    if facts.ci_failed {
-        out.push(Attention::CiFailed);
-    }
-    if facts.behind > 0 {
-        out.push(Attention::Behind(facts.behind));
-    }
-    if facts.uncommitted > 0 {
-        out.push(Attention::Uncommitted(facts.uncommitted));
-    }
-    if facts.remarks > 0 {
-        out.push(Attention::Remarks(facts.remarks));
-    }
-    if facts.ahead > 0 {
-        out.push(Attention::Ahead(facts.ahead));
-    }
-    out
-}
-
 /// The files of a review that weigh most — `(path, added, removed)` —, the
 /// heaviest first, at most `count`, each with its share of the heaviest's
 /// weight: what a bar beside its name is drawn at.
@@ -439,32 +376,6 @@ mod tests {
     fn a_board_opens_on_its_home() {
         assert_eq!(view_of(None), View::Home);
         assert_eq!(view_of(Some(View::Todo)), View::Todo);
-    }
-
-    /// The pressing first; nothing when all is quiet.
-    #[test]
-    fn what_waits_comes_most_pressing_first() {
-        assert!(attention(&Facts::default()).is_empty());
-        let facts = Facts {
-            waiting: vec![7],
-            conflicts: 0,
-            ci_failed: true,
-            behind: 3,
-            ahead: 1,
-            uncommitted: 2,
-            remarks: 4,
-        };
-        assert_eq!(
-            attention(&facts),
-            vec![
-                Attention::Waiting(7),
-                Attention::CiFailed,
-                Attention::Behind(3),
-                Attention::Uncommitted(2),
-                Attention::Remarks(4),
-                Attention::Ahead(1),
-            ]
-        );
     }
 
     /// The heaviest first, each against the heaviest.

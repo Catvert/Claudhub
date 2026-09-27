@@ -1289,11 +1289,9 @@ impl ClaudhubApp {
             .clone();
         *spans.borrow_mut() = vec![(0., 0.)];
         let column_min = super::settings::Settings::global(cx).terminal.column_min;
-        // Terminals stand side by side, each never under the least width.
-        let least_width = match view {
-            View::Terminals => column_min * self.board_terminals(path).len().max(1) as f32,
-            _ => column_min,
-        };
+        // The terminals' tab scrolls its terminals, not the board: the tabs
+        // stay in view.
+        let least_width = column_min;
         let tabs = self.render_board_tabs(path, view, at_work, cx);
         let shown = self.render_board_view(path, view, at_work, window, cx);
         let measure = canvas(
@@ -1774,7 +1772,8 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The terminals view: every terminal of the worktree side by side.
+    /// The terminals view: every terminal of the worktree side by side,
+    /// scrolling sideways when they outgrow it.
     fn render_terminals_view(
         &self,
         path: &Path,
@@ -1830,9 +1829,13 @@ impl ClaudhubApp {
                 )
             })
             .collect();
+        // They scroll sideways inside the view, each never under the least
+        // width, and the tabs above them stay where they are.
         h_flex()
+            .id("focus-terminals")
             .size_full()
             .gap_2()
+            .overflow_x_scroll()
             .children(tiles)
             .into_any_element()
     }
