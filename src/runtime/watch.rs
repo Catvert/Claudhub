@@ -11,6 +11,7 @@
 //! showing files that are no longer modified.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -58,10 +59,45 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Translate its events back to the checkout the UI actually watches.
 type GitWatches = HashMap<PathBuf, Vec<GitDir>>;
 
+/// What the translation thread reads events against, kept by the orders
+/// thread as checkouts are watched and left.
+#[derive(Default)]
+struct Watches {
+    git: GitWatches,
+    /// Each watched checkout's node folders, to the checkout. Built once per
+    /// watch: looked for on every path of every event, the two folders were
+    /// two paths built for each watched checkout, each time.
+    canvas: HashMap<PathBuf, PathBuf>,
+}
+
+impl Watches {
+    fn insert(&mut self, checkout: PathBuf, git_dirs: Vec<GitDir>) {
+        for folder in canvas_folders(&checkout) {
+            self.canvas.insert(folder, checkout.clone());
+        }
+        self.git.insert(checkout, git_dirs);
+    }
+
+    fn remove(&mut self, checkout: &Path) {
+        self.git.remove(checkout);
+        for folder in canvas_folders(checkout) {
+            self.canvas.remove(&folder);
+        }
+    }
+
+    /// The checkout whose node folder this path is, if it is one.
+    fn canvas_folder_of(&self, path: &Path) -> Option<&PathBuf> {
+        self.canvas.get(path)
+    }
+}
+
 /// A git directory whose events belong to a checkout, and how much of it does.
 #[derive(Debug, Clone, PartialEq)]
 struct GitDir {
     path: PathBuf,
+    /// How many components `path` has, counted once: the innermost directory
+    /// is picked for every path of every event.
+    depth: usize,
     /// The common directory of a linked worktree: its references are this
     /// checkout's too, its `HEAD` and `index` are the main checkout's.
     shared: bool,
@@ -91,7 +127,7 @@ impl Watcher {
         let (raw_tx, raw_rx) = mpsc::channel();
         let mut debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
         let (order_tx, order_rx) = mpsc::channel::<Order>();
-        let git_watches = Arc::new(Mutex::new(GitWatches::new()));
+        let git_watches = Arc::new(Mutex::new(Watches::default()));
         let order_git_watches = git_watches.clone();
         let rewatch = order_tx.clone();
 
@@ -220,7 +256,7 @@ impl Watcher {
                     let mut replan: HashSet<PathBuf> = HashSet::new();
                     let mappings = git_watches.lock().unwrap_or_else(|e| e.into_inner());
                     for event in &events {
-                        for path in interesting_paths(event, &mappings) {
+                        for path in interesting_paths(event, &mappings.git) {
                             if known.insert(path.clone()) {
                                 batch.paths.push(path);
                             }
@@ -230,12 +266,12 @@ impl Watcher {
                         // unseen until the sweep.
                         if changes_content(&event.kind) {
                             for path in &event.paths {
-                                if let Some(checkout) = canvas_folder_of(path, mappings.keys()) {
-                                    replan.insert(checkout);
+                                if let Some(checkout) = mappings.canvas_folder_of(path) {
+                                    replan.insert(checkout.clone());
                                 }
                             }
                         }
-                        for listing in listings(event, &mappings) {
+                        for listing in listings(event, &mappings.git) {
                             if listing.folder {
                                 replan.insert(listing.checkout.clone());
                             }
@@ -336,7 +372,7 @@ fn event_paths(path: &Path, mappings: &GitWatches) -> Vec<PathBuf> {
         if let Some((dir, relative)) = git_dirs
             .iter()
             .filter_map(|dir| path.strip_prefix(&dir.path).ok().map(|rel| (dir, rel)))
-            .max_by_key(|(dir, _)| dir.path.components().count())
+            .max_by_key(|(dir, _)| dir.depth)
         {
             metadata = true;
             let interesting = if dir.shared {
@@ -414,17 +450,6 @@ fn canvas_folders(checkout: &Path) -> [PathBuf; 2] {
     [root.join(crate::canvas::NOTES), root]
 }
 
-/// The checkout whose node folder this path is, if it is one.
-fn canvas_folder_of<'a>(
-    path: &Path,
-    checkouts: impl IntoIterator<Item = &'a PathBuf>,
-) -> Option<PathBuf> {
-    checkouts
-        .into_iter()
-        .find(|checkout| canvas_folders(checkout).iter().any(|folder| folder == path))
-        .cloned()
-}
-
 /// True for an event likely to change what `git status` answers.
 ///
 /// The decisive filter is `Access`: inotify reports every **opening** of a
@@ -461,27 +486,48 @@ fn is_interesting(path: &Path) -> bool {
     interesting_git_path(Path::new(inside))
 }
 
+///
+/// Read by components and not as text: a path per event, and the text was a
+/// copy of each with its separators rewritten.
 fn interesting_git_path(path: &Path) -> bool {
-    let inside = path.to_string_lossy().replace('\\', "/");
     // Locks are created then destroyed by every git command: they announce a
     // write that has not happened yet.
-    if inside.ends_with(".lock") {
+    if is_lock(path) {
         return false;
     }
-    inside == "HEAD"
-        || inside == "index"
-        || inside == "ORIG_HEAD"
-        || inside == "MERGE_HEAD"
-        || inside == "packed-refs"
-        || inside.starts_with("refs/")
+    match first_component(path) {
+        Some((name, false)) => ["HEAD", "index", "ORIG_HEAD", "MERGE_HEAD", "packed-refs"]
+            .iter()
+            .any(|file| name == *file),
+        Some((name, true)) => name == "refs",
+        None => false,
+    }
 }
 
 /// What a linked worktree reads in the common directory: the references only.
 /// Its `HEAD` and `index` are the main checkout's, whose every commit would
 /// otherwise refresh this one too.
 fn interesting_shared_path(path: &Path) -> bool {
-    let inside = path.to_string_lossy().replace('\\', "/");
-    !inside.ends_with(".lock") && (inside == "packed-refs" || inside.starts_with("refs/"))
+    !is_lock(path)
+        && match first_component(path) {
+            Some((name, false)) => name == "packed-refs",
+            Some((name, true)) => name == "refs",
+            None => false,
+        }
+}
+
+fn is_lock(path: &Path) -> bool {
+    path.as_os_str().as_encoded_bytes().ends_with(b".lock")
+}
+
+/// The first name of a path inside a git directory, and whether anything
+/// follows it — `refs` alone is a folder, `refs/heads/main` a reference.
+fn first_component(path: &Path) -> Option<(&OsStr, bool)> {
+    let mut parts = path.components();
+    match parts.next()? {
+        Component::Normal(name) => Some((name, parts.next().is_some())),
+        _ => None,
+    }
 }
 
 /// True if this path is on a Windows drive mounted by WSL.
@@ -629,6 +675,7 @@ fn add_git_dir(dir: PathBuf, shared: bool, plan: &mut WatchPlan) {
     let refs = dir.join("refs");
     let worktrees = dir.join("worktrees");
     plan.git_dirs.push(GitDir {
+        depth: dir.components().count(),
         path: dir.clone(),
         shared,
     });
@@ -978,20 +1025,22 @@ mod tests {
     /// the plan again — so the next note written in it is seen.
     #[test]
     fn the_node_folders_are_watched_and_their_birth_replans() {
-        let checkouts = [PathBuf::from("/r"), PathBuf::from("/r-a")];
+        let mut watches = Watches::default();
+        for checkout in ["/r", "/r-a"] {
+            watches.insert(PathBuf::from(checkout), Vec::new());
+        }
+        let of = |watches: &Watches, path: &str| watches.canvas_folder_of(Path::new(path)).cloned();
         assert_eq!(
-            canvas_folder_of(Path::new("/r-a/.claudhub/notes"), &checkouts),
+            of(&watches, "/r-a/.claudhub/notes"),
             Some(PathBuf::from("/r-a"))
         );
-        assert_eq!(
-            canvas_folder_of(Path::new("/r/.claudhub"), &checkouts),
-            Some(PathBuf::from("/r"))
-        );
-        assert_eq!(
-            canvas_folder_of(Path::new("/r/.claudhub/notes/x.md"), &checkouts),
-            None
-        );
-        assert_eq!(canvas_folder_of(Path::new("/r/src"), &checkouts), None);
+        assert_eq!(of(&watches, "/r/.claudhub"), Some(PathBuf::from("/r")));
+        assert_eq!(of(&watches, "/r/.claudhub/notes/x.md"), None);
+        assert_eq!(of(&watches, "/r/src"), None);
+        // A checkout left takes its folders with it, and only its own.
+        watches.remove(Path::new("/r"));
+        assert_eq!(of(&watches, "/r/.claudhub"), None);
+        assert_eq!(of(&watches, "/r-a/.claudhub"), Some(PathBuf::from("/r-a")));
 
         let root =
             std::env::temp_dir().join(format!("claudhub-canvas-watch-{}", std::process::id()));
