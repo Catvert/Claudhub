@@ -46,8 +46,8 @@ const HOME_NOTE_LINES: usize = 14;
 const HOME_COMMITS: usize = 5;
 /// The files waiting for a commit the home lists.
 const HOME_FILES: usize = 8;
-/// The review's heaviest files the home draws a bar for.
-const HOME_HEAVIEST: usize = 6;
+/// The height the review's list of files scrolls within.
+const HOME_REVIEW_HEIGHT: f32 = 240.;
 impl ClaudhubApp {
     /// A board's tabs — the home first —, each saying what waits in it,
     /// and at the right what adds one more.
@@ -269,6 +269,37 @@ impl ClaudhubApp {
             .size_full()
             .child(sides)
             .into_any_element()
+    }
+
+    /// A file pressed on a card: the git tab on `face` — the changes or the
+    /// review —, the diff on that file. The worktree becomes the one on
+    /// show: the editor's panels those faces are speak only of it.
+    fn open_from_home(
+        &mut self,
+        path: &Path,
+        file: std::path::PathBuf,
+        face: GitFace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active.as_deref() != Some(path) {
+            self.select_worktree(path.to_path_buf(), window, cx);
+        }
+        let range = match face {
+            GitFace::Changes => Some(crate::git::DiffRange::Working),
+            GitFace::Review => self.review.get(path).and_then(|state| {
+                super::review::branch_panel_range(
+                    state.base.as_deref(),
+                    state.review_point.as_ref(),
+                    state.since_review,
+                )
+            }),
+            GitFace::History | GitFace::Pr => None,
+        };
+        if let Some(range) = range {
+            self.open_file(path.to_path_buf(), file, range, cx);
+        }
+        self.show_git_face(path, face, cx);
     }
 
     /// A card of the home: its title — which opens `tab` — what it says of
@@ -1051,9 +1082,11 @@ impl ClaudhubApp {
                 .into_any_element()
         } else {
             let more = files.len().saturating_sub(HOME_FILES);
-            v_flex()
-                .gap_0p5()
-                .children(files.into_iter().take(HOME_FILES).map(|file| {
+            let rows: Vec<AnyElement> = files
+                .into_iter()
+                .take(HOME_FILES)
+                .enumerate()
+                .map(|(index, file)| {
                     let tint = if file.is_untracked() {
                         crate::git::StatusCode::Untracked
                     } else if file.is_unstaged() {
@@ -1061,10 +1094,24 @@ impl ClaudhubApp {
                     } else {
                         file.index
                     };
+                    let (board, pressed) = (path.to_path_buf(), file.path.clone());
                     h_flex()
+                        .id(("focus-home-change", index))
                         .gap_1p5()
                         .items_center()
                         .text_xs()
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.list_hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_from_home(
+                                &board,
+                                pressed.clone(),
+                                GitFace::Changes,
+                                window,
+                                cx,
+                            );
+                        }))
                         .child(crate::ui::file_icons::file_icon(&file.path, cx))
                         .child(
                             div()
@@ -1074,7 +1121,12 @@ impl ClaudhubApp {
                                 .text_color(super::theme::status_color(tint, cx))
                                 .child(SharedString::from(file.path.display().to_string())),
                         )
-                }))
+                        .into_any_element()
+                })
+                .collect();
+            v_flex()
+                .gap_0p5()
+                .children(rows)
                 .when(more > 0, |el| {
                     el.child(
                         div()
@@ -1158,16 +1210,35 @@ impl ClaudhubApp {
                         )
                         .into_any_element(),
                 );
-                for (file, added, removed, share) in focus::heaviest(files, HOME_HEAVIEST) {
+                // Every file, the heaviest first, in a list that scrolls: a
+                // press opens its review.
+                let mut listed: Vec<AnyElement> = Vec::new();
+                for (index, (file, added, removed, share)) in
+                    focus::heaviest(files, files.len()).into_iter().enumerate()
+                {
                     let name = file
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    rows.push(
+                    let (board, pressed) = (path.to_path_buf(), file.clone());
+                    listed.push(
                         h_flex()
+                            .id(("focus-home-review-file", index))
                             .gap_2()
                             .items_center()
                             .text_xs()
+                            .rounded(theme.radius)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.list_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_from_home(
+                                    &board,
+                                    pressed.clone(),
+                                    GitFace::Review,
+                                    window,
+                                    cx,
+                                );
+                            }))
                             .child(
                                 div()
                                     .flex_none()
@@ -1205,6 +1276,15 @@ impl ClaudhubApp {
                             .into_any_element(),
                     );
                 }
+                rows.push(
+                    v_flex()
+                        .id("focus-home-review-files")
+                        .max_h(px(HOME_REVIEW_HEIGHT))
+                        .overflow_y_scroll()
+                        .gap_0p5()
+                        .children(listed)
+                        .into_any_element(),
+                );
             }
             None if self.active.as_deref() != Some(path) => rows.push(
                 div()
