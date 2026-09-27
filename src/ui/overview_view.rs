@@ -1398,10 +1398,14 @@ impl ClaudhubApp {
                 .and_then(|process| process.status.as_deref())
                 .map(claude_says)
         };
+        // On the boards, every terminal of a worktree on show is: the plane's
+        // own hand — a worktree hidden there, and what hangs from it — says
+        // nothing of what a board shows, and its terminals lost their signal.
+        let laid_out = self.home_mode.laid_out();
         let tiles: Vec<overview::AgentTile> = self
             .terminals
             .iter()
-            .filter(|terminal| plan.tile(terminal.view.entity_id().as_u64()).is_some())
+            .filter(|terminal| laid_out || plan.tile(terminal.view.entity_id().as_u64()).is_some())
             .map(|terminal| {
                 // The pty's child is Claude itself when the tab was launched
                 // on it; typed at a prompt, it is the pid read under the
@@ -1430,11 +1434,16 @@ impl ClaudhubApp {
                 }
             })
             .collect();
-        let cards: Vec<PathBuf> = plan.cards.iter().map(|card| card.path.clone()).collect();
-        let worktrees: std::collections::HashMap<&Path, Doing> = plan
-            .cards
+        // The guess by the processor, for a terminal no word came from, is
+        // the worktree's — every live one on the boards, for the reason above.
+        let cards: Vec<PathBuf> = if laid_out {
+            self.repos.iter().flat_map(live_worktrees).collect()
+        } else {
+            plan.cards.iter().map(|card| card.path.clone()).collect()
+        };
+        let worktrees: std::collections::HashMap<&Path, Doing> = cards
             .iter()
-            .map(|card| (card.path.as_path(), self.worktree_doing(&card.path, &cards)))
+            .map(|path| (path.as_path(), self.worktree_doing(path, &cards)))
             .collect();
         overview::at_work(&tiles, &worktrees)
     }
