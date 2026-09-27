@@ -287,9 +287,7 @@ impl ClaudhubApp {
                             .get(&worktree.path)
                             .and_then(|outline| outline.base.as_deref()),
                         terminals: self
-                            .terminals
-                            .iter()
-                            .filter(|terminal| terminal.worktree == worktree.path)
+                            .terminals_of(&worktree.path)
                             .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.size))
                             .collect(),
                         changes: self.has_changes(&worktree.path),
@@ -806,11 +804,7 @@ impl ClaudhubApp {
                 boxed(kept(overview::CARD), card)
             }
             Node::Terminal(id) => {
-                let Some(terminal) = self
-                    .terminals
-                    .iter()
-                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)
-                else {
+                let Some(terminal) = self.terminal(*id) else {
                     return div().into_any_element();
                 };
                 let doing = at_work
@@ -875,11 +869,7 @@ impl ClaudhubApp {
                 let delta = (dx / zoom, dy / zoom);
                 match &node {
                     Node::Terminal(id) => {
-                        if let Some(terminal) = self
-                            .terminals
-                            .iter_mut()
-                            .find(|t| t.view.entity_id().as_u64() == *id)
-                        {
+                        if let Some(terminal) = self.terminal_mut(*id) {
                             terminal.size =
                                 overview::resized(terminal.size, delta, overview::MIN_TILE);
                         }
@@ -904,11 +894,7 @@ impl ClaudhubApp {
                 let (_, dy) = moved(last);
                 match &node {
                     Node::Terminal(id) => {
-                        if let Some(terminal) = self
-                            .terminals
-                            .iter_mut()
-                            .find(|t| t.view.entity_id().as_u64() == *id)
-                        {
+                        if let Some(terminal) = self.terminal_mut(*id) {
                             terminal.column_height =
                                 (terminal.column_height + dy).max(overview::MIN_COLUMN_TILE);
                         }
@@ -1123,11 +1109,7 @@ impl ClaudhubApp {
             self.overview_hand.collapsed.remove(node);
             self.overview_hand.hidden.remove(node);
             if let Node::Terminal(id) = node {
-                if let Some(terminal) = self
-                    .terminals
-                    .iter_mut()
-                    .find(|t| t.view.entity_id().as_u64() == *id)
-                {
+                if let Some(terminal) = self.terminal_mut(*id) {
                     terminal.size = overview::Tile::default().size();
                 }
             }
@@ -2660,11 +2642,7 @@ impl ClaudhubApp {
 
     /// Gives a terminal's card its next preset size.
     fn cycle_tile(&mut self, view: gpui_kit::EntityId, cx: &mut Context<Self>) {
-        if let Some(terminal) = self
-            .terminals
-            .iter_mut()
-            .find(|terminal| terminal.view.entity_id() == view)
-        {
+        if let Some(terminal) = self.terminal_mut(view.as_u64()) {
             terminal.size = overview::Tile::nearest(terminal.size).next().size();
             cx.notify();
         }
@@ -2683,11 +2661,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(terminal) = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id() == view)
-        else {
+        let Some(terminal) = self.terminal(view.as_u64()) else {
             return;
         };
         let (view, panel) = (terminal.view.clone(), terminal.panel.clone());
@@ -2951,11 +2925,7 @@ impl ClaudhubApp {
         }
         // A terminal maximised is one to type in.
         if let Node::Terminal(id) = node {
-            if let Some(terminal) = self
-                .terminals
-                .iter()
-                .find(|t| t.view.entity_id().as_u64() == *id)
-            {
+            if let Some(terminal) = self.terminal(*id) {
                 window.focus(&terminal.view.focus_handle(cx), cx);
             }
         }
@@ -2966,11 +2936,7 @@ impl ClaudhubApp {
     /// one, being the only kind that carries its own.
     fn node_size(&self, node: &Node) -> Option<(f32, f32)> {
         match node {
-            Node::Terminal(id) => self
-                .terminals
-                .iter()
-                .find(|t| t.view.entity_id().as_u64() == *id)
-                .map(|t| t.size),
+            Node::Terminal(id) => self.terminal(*id).map(|t| t.size),
             _ => self.overview_hand.sizes.get(node).copied(),
         }
     }
@@ -2979,11 +2945,7 @@ impl ClaudhubApp {
     fn set_node_size(&mut self, node: &Node, size: Option<(f32, f32)>) {
         match node {
             Node::Terminal(id) => {
-                if let Some(terminal) = self
-                    .terminals
-                    .iter_mut()
-                    .find(|t| t.view.entity_id().as_u64() == *id)
-                {
+                if let Some(terminal) = self.terminal_mut(*id) {
                     terminal.size = size.unwrap_or_else(|| overview::Tile::default().size());
                 }
             }
@@ -3018,11 +2980,7 @@ impl ClaudhubApp {
             }
             Node::Note(path) => self.close_home_note(path, window, cx),
             Node::Terminal(id) => {
-                let Some(terminal) = self
-                    .terminals
-                    .iter()
-                    .find(|t| t.view.entity_id().as_u64() == *id)
-                else {
+                let Some(terminal) = self.terminal(*id) else {
                     return;
                 };
                 let view = terminal.view.entity_id();

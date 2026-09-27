@@ -395,12 +395,7 @@ impl ClaudhubApp {
     fn reply_to(&mut self, path: &Path, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.home_terminal.insert(path.to_path_buf(), id);
         self.show_board_view(path, View::Home, cx);
-        if let Some(view) = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id().as_u64() == id)
-            .map(|terminal| terminal.view.clone())
-        {
+        if let Some(view) = self.terminal(id).map(|terminal| terminal.view.clone()) {
             super::dialogs::focus_field(&view, window, cx);
         }
     }
@@ -418,9 +413,7 @@ impl ClaudhubApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let terminals: Vec<(u64, Option<String>)> = self
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == path)
+            .terminals_of(path)
             .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.session.clone()))
             .collect();
         let waiting: Vec<(u64, bool)> = terminals
@@ -535,11 +528,7 @@ impl ClaudhubApp {
                         this.show_board_view(&every, View::Terminals, cx);
                     })),
             );
-        let body = match shown.and_then(|id| {
-            self.terminals
-                .iter()
-                .find(|terminal| terminal.view.entity_id().as_u64() == id)
-        }) {
+        let body = match shown.and_then(|id| self.terminal(id)) {
             // Bare: its name is its sub-tab's, and a window round a
             // terminal that fills the column had nothing to fold or move.
             Some(terminal) => {

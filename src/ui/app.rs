@@ -5139,6 +5139,24 @@ impl ClaudhubApp {
 }
 
 impl ClaudhubApp {
+    /// The open terminal whose view has this id — the id a node, a tab or a
+    /// board keeps of it. A worktree's are `terminals_of`.
+    pub(super) fn terminal(&self, id: u64) -> Option<&super::terminal_view::OpenTerminal> {
+        self.terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id().as_u64() == id)
+    }
+
+    /// The same, to change it.
+    pub(super) fn terminal_mut(
+        &mut self,
+        id: u64,
+    ) -> Option<&mut super::terminal_view::OpenTerminal> {
+        self.terminals
+            .iter_mut()
+            .find(|terminal| terminal.view.entity_id().as_u64() == id)
+    }
+
     pub(super) fn active_path(&self) -> Option<PathBuf> {
         self.active.clone()
     }

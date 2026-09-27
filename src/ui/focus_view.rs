@@ -905,11 +905,7 @@ impl ClaudhubApp {
             .get(path)
             .copied()
             .filter(|summary| !summary.is_empty());
-        let terminals = self
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == path)
-            .count();
+        let terminals = self.terminals_of(path).count();
         let diff = super::theme::DiffColors::of(cx);
         let open = path.to_path_buf();
         let volume = summary.map(|summary| {
@@ -1018,9 +1014,7 @@ impl ClaudhubApp {
 
     /// A worktree's terminals, in the order they were opened.
     pub(super) fn board_terminals(&self, path: &Path) -> Vec<u64> {
-        self.terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == path)
+        self.terminals_of(path)
             .map(|terminal| terminal.view.entity_id().as_u64())
             .collect()
     }
@@ -1817,10 +1811,7 @@ impl ClaudhubApp {
         let tiles: Vec<AnyElement> = ids
             .iter()
             .filter_map(|id| {
-                let terminal = self
-                    .terminals
-                    .iter()
-                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)?;
+                let terminal = self.terminal(*id)?;
                 let doing = at_work
                     .terminals
                     .get(id)
@@ -1904,9 +1895,7 @@ impl ClaudhubApp {
             Node::Worktree(path) => ("git-branch", self.project_label(path).1),
             Node::Terminal(id) => (
                 "square-terminal",
-                self.terminals
-                    .iter()
-                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)
+                self.terminal(*id)
                     .map(|terminal| {
                         terminal
                             .name

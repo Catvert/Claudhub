@@ -2242,11 +2242,7 @@ impl ClaudhubApp {
 
     /// What a terminal's tab says: the name given by hand, or the program.
     pub(super) fn terminal_label(&self, view: gpui_kit::EntityId, cx: &App) -> SharedString {
-        let Some(terminal) = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id() == view)
-        else {
+        let Some(terminal) = self.terminal(view.as_u64()) else {
             return SharedString::default();
         };
         terminal
@@ -2266,11 +2262,7 @@ impl ClaudhubApp {
         name: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(terminal) = self
-            .terminals
-            .iter_mut()
-            .find(|terminal| terminal.view.entity_id() == view)
-        else {
+        let Some(terminal) = self.terminal_mut(view.as_u64()) else {
             return;
         };
         let name = name.trim();
@@ -2314,9 +2306,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let busy = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id() == view)
+            .terminal(view.as_u64())
             .map(|terminal| terminal.view.clone())
             .filter(|terminal| terminal.read(cx).busy());
         let Some(terminal) = busy else {
@@ -2440,9 +2430,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let doomed: Vec<gpui_kit::EntityId> = self
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == worktree)
+            .terminals_of(worktree)
             .map(|terminal| terminal.view.entity_id())
             .collect();
         for view in doomed {
@@ -2462,9 +2450,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let doomed = self
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == worktree)
+            .terminals_of(worktree)
             .find(|terminal| terminal.view.read(cx).focus_handle(cx).is_focused(window))
             .or_else(|| self.terminals_of(worktree).next_back())
             .map(|terminal| terminal.view.entity_id());
@@ -2910,9 +2896,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let panel = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id() == view.entity_id())
+            .terminal(view.entity_id().as_u64())
             .map(|terminal| terminal.panel.clone());
         if let Some(panel) = panel {
             crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
@@ -2948,9 +2932,7 @@ impl ClaudhubApp {
     /// after quitting one is the normal gesture when the conversation has got
     /// bogged down.
     fn agent_terminal(&self, worktree: &Path, cx: &App) -> Option<Entity<TerminalView>> {
-        self.terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == worktree)
+        self.terminals_of(worktree)
             .rev()
             .find(|terminal| {
                 let view = terminal.view.read(cx);
