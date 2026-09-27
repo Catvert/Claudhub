@@ -170,25 +170,15 @@ fn parse(json: &str) -> Result<Snapshot> {
         .context("just's dump has no recipes")?;
     let recipes = recipes
         .values()
-        .filter(|recipe| {
-            !recipe
-                .get("private")
-                .and_then(|p| p.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|recipe| !crate::json::flag(recipe, "private"))
         .filter_map(|recipe| {
             Some(Recipe {
-                name: recipe.get("name")?.as_str()?.to_string(),
-                doc: recipe
-                    .get("doc")
-                    .and_then(|doc| doc.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                params: recipe
-                    .get("parameters")
-                    .and_then(|params| params.as_array())
-                    .map(|params| params.iter().filter_map(parameter).collect())
-                    .unwrap_or_default(),
+                name: crate::json::string(recipe, "name")?.to_string(),
+                doc: crate::json::text(recipe, "doc"),
+                params: crate::json::items(recipe, "parameters")
+                    .iter()
+                    .filter_map(parameter)
+                    .collect(),
             })
         })
         .collect();
@@ -198,22 +188,19 @@ fn parse(json: &str) -> Result<Snapshot> {
         // runs. It may well be private — a justfile is free to start with an
         // underscore — and it stays the default all the same: it is what the
         // command does, and the button says what the command does.
-        default: root
-            .get("first")
-            .and_then(|first| first.as_str())
-            .map(str::to_string),
+        default: crate::json::string(&root, "first").map(str::to_string),
     })
 }
 
 /// One parameter, written as `just --list` writes it.
 fn parameter(param: &serde_json::Value) -> Option<String> {
-    let name = param.get("name")?.as_str()?;
-    let prefix = match param.get("kind").and_then(|kind| kind.as_str()) {
+    let name = crate::json::string(param, "name")?;
+    let prefix = match crate::json::string(param, "kind") {
         Some("star") => "*",
         Some("plus") => "+",
         _ => "",
     };
-    Some(match param.get("default").and_then(|d| d.as_str()) {
+    Some(match crate::json::string(param, "default") {
         Some(default) => format!("{prefix}{name}=\"{default}\""),
         None => format!("{prefix}{name}"),
     })

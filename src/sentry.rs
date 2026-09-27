@@ -26,6 +26,8 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 
+use crate::json;
+
 /// Sentry's public API. A self-hosted instance says so in the settings, which
 /// is the only thing that changes.
 pub const DEFAULT_HOST: &str = "https://sentry.io";
@@ -251,11 +253,9 @@ fn escape(text: &str) -> String {
 // — What the API returns ————————————————————————————————————————————
 //
 // **Read field by field, never deserialised into a struct** — every answer,
-// not only the frames (see `collect_frames` for what it cost there).
-// `#[serde(default)]` covers a field that is *absent*; one that is present and
-// `null` fails the whole struct, and a struct is one row of a list: a single
-// issue with a `null` culprit or permalink emptied the whole page. Only the
-// outer array is demanded — an answer that is not one is not Sentry's.
+// not only the frames (see `collect_frames` for what it cost there), through
+// `crate::json`, where the rule is written. Only the outer array is demanded —
+// an answer that is not one is not Sentry's.
 
 /// The answer's outer list. Anything but an array is a response we cannot
 /// read, which is the one failure worth an error.
@@ -264,64 +264,32 @@ fn list_of(json: &str, what: &str) -> Result<Vec<serde_json::Value>> {
         .with_context(|| format!("unreadable Sentry response ({what})"))
 }
 
-/// A text field: absent, `null` and not-a-string all read as empty.
-fn text_of(value: &serde_json::Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// A list field: absent, `null` and not-a-list all read as empty.
-fn items_of<'a>(value: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
-    value
-        .get(key)
-        .and_then(|value| value.as_array())
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-}
-
-/// A number, which Sentry writes as a **string** in the issue list and as a
-/// number elsewhere: both are read, otherwise half the responses fail.
-fn as_u64(value: &serde_json::Value) -> u64 {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(0)
-}
-
-/// A number field, absent or `null` reading as zero.
-fn count_of(value: &serde_json::Value, key: &str) -> u64 {
-    value.get(key).map(as_u64).unwrap_or(0)
-}
-
 /// Reads a project's issue list.
 pub fn parse_issues(json: &str) -> Result<Vec<Issue>> {
     Ok(list_of(json, "issues")?
         .iter()
         .filter(|issue| issue.is_object())
         .map(|issue| {
-            let title = text_of(issue, "title");
+            let title = json::text(issue, "title");
             let metadata = issue.get("metadata").unwrap_or(&serde_json::Value::Null);
-            let kind = text_of(metadata, "type");
+            let kind = json::text(metadata, "type");
             Issue {
-                id: text_of(issue, "id"),
-                short_id: text_of(issue, "shortId"),
+                id: json::text(issue, "id"),
+                short_id: json::text(issue, "shortId"),
                 // The kind alone when the metadata has one: the title repeats
                 // it with the message glued on, and the two are two things —
                 // the class that was raised, and what it said.
                 kind: if kind.is_empty() { title.clone() } else { kind },
-                value: text_of(metadata, "value"),
+                value: json::text(metadata, "value"),
                 title,
-                culprit: text_of(issue, "culprit"),
-                level: text_of(issue, "level"),
-                status: text_of(issue, "status"),
-                count: count_of(issue, "count"),
-                users: count_of(issue, "userCount"),
-                first_seen: text_of(issue, "firstSeen"),
-                last_seen: text_of(issue, "lastSeen"),
-                permalink: text_of(issue, "permalink"),
+                culprit: json::text(issue, "culprit"),
+                level: json::text(issue, "level"),
+                status: json::text(issue, "status"),
+                count: json::count(issue, "count"),
+                users: json::count(issue, "userCount"),
+                first_seen: json::text(issue, "firstSeen"),
+                last_seen: json::text(issue, "lastSeen"),
+                permalink: json::text(issue, "permalink"),
             }
         })
         .collect())
@@ -339,13 +307,13 @@ pub fn parse_event(json: &str) -> Result<Option<Event>> {
     };
     let mut frames = Vec::new();
     let mut crumbs = Vec::new();
-    for entry in items_of(raw, "entries") {
+    for entry in json::items(raw, "entries") {
         let data = entry.get("data").unwrap_or(&serde_json::Value::Null);
         // Both shapes exist depending on the SDK that sent the event, and
         // handling only one gives an empty trace on half the projects.
-        match text_of(entry, "type").as_str() {
+        match json::text(entry, "type").as_str() {
             "exception" => {
-                for value in items_of(data, "values") {
+                for value in json::items(data, "values") {
                     collect_frames(value.get("stacktrace"), &mut frames);
                 }
             }
@@ -355,12 +323,12 @@ pub fn parse_event(json: &str) -> Result<Option<Event>> {
         }
     }
     Ok(Some(Event {
-        message: text_of(raw, "message"),
-        tags: items_of(raw, "tags")
+        message: json::text(raw, "message"),
+        tags: json::items(raw, "tags")
             .iter()
             .map(|tag| Tag {
-                key: text_of(tag, "key"),
-                value: text_of(tag, "value"),
+                key: json::text(tag, "key"),
+                value: json::text(tag, "value"),
             })
             .filter(|tag| !tag.key.is_empty())
             .collect(),
@@ -379,20 +347,11 @@ pub fn parse_event(json: &str) -> Result<Option<Event>> {
 /// stack between them. Read this way, a null is simply a field that is not
 /// there, which is what it means.
 fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) {
-    let Some(list) = stacktrace
-        .and_then(|s| s.get("frames"))
-        .and_then(|f| f.as_array())
-    else {
+    let Some(stacktrace) = stacktrace else {
         return;
     };
-    for value in list {
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
+    for value in json::items(stacktrace, "frames") {
+        let text = |key: &str| json::text(value, key);
         // The first of the three that says anything: Sentry names a frame by a
         // path, by an absolute path, or by a module, depending on the SDK.
         let filename = [text("filename"), text("absPath"), text("module")]
@@ -404,29 +363,20 @@ fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) 
         }
         // `context` is a list of `[number, source]` pairs; anything not of that
         // shape is ignored rather than failing the read of the whole trace.
-        let context = value
-            .get("context")
-            .and_then(|context| context.as_array())
-            .map(|pairs| {
-                pairs
-                    .iter()
-                    .filter_map(|pair| {
-                        let pair = pair.as_array()?;
-                        let line = as_u64(pair.first()?) as usize;
-                        let text = pair.get(1)?.as_str().unwrap_or_default().to_string();
-                        Some((line, text))
-                    })
-                    .collect()
+        let context = json::items(value, "context")
+            .iter()
+            .filter_map(|pair| {
+                let pair = pair.as_array()?;
+                let line = json::number(pair.first()?).unwrap_or(0) as usize;
+                let text = pair.get(1)?.as_str().unwrap_or_default().to_string();
+                Some((line, text))
             })
-            .unwrap_or_default();
+            .collect();
         out.push(Frame {
             filename,
             function: text("function"),
-            line: value.get("lineNo").map(as_u64).unwrap_or(0) as usize,
-            in_app: value
-                .get("inApp")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
+            line: json::count(value, "lineNo") as usize,
+            in_app: json::flag(value, "inApp"),
             context,
         });
     }
@@ -434,18 +384,10 @@ fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) 
 
 /// The **last** breadcrumbs: they are the ones describing the second before.
 fn collect_crumbs(data: &serde_json::Value, out: &mut Vec<Crumb>) {
-    let Some(list) = data.get("values").and_then(|v| v.as_array()) else {
-        return;
-    };
+    let list = json::items(data, "values");
     let start = list.len().saturating_sub(CRUMBS);
     for value in &list[start..] {
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
+        let text = |key: &str| json::text(value, key);
         let crumb = Crumb {
             message: {
                 let message = text("message");
@@ -472,26 +414,25 @@ fn collect_crumbs(data: &serde_json::Value, out: &mut Vec<Crumb>) {
 pub fn parse_tags(json: &str) -> Result<Vec<Spread>> {
     Ok(list_of(json, "tags")?
         .iter()
-        .filter(|spread| items_of(spread, "topValues").len() > 1)
+        .filter(|spread| json::items(spread, "topValues").len() > 1)
         .map(|spread| {
-            let total = count_of(spread, "totalValues");
-            let name = text_of(spread, "name");
+            let total = json::count(spread, "totalValues");
+            let name = json::text(spread, "name");
             Spread {
                 name: if name.is_empty() {
-                    text_of(spread, "key")
+                    json::text(spread, "key")
                 } else {
                     name
                 },
-                values: items_of(spread, "topValues")
+                values: json::items(spread, "topValues")
                     .iter()
                     .map(|value| {
-                        let share =
-                            match total {
-                                0 => 0,
-                                total => (count_of(value, "count").saturating_mul(100) / total)
-                                    .min(100) as u8,
-                            };
-                        (text_of(value, "value"), share)
+                        let share = match total {
+                            0 => 0,
+                            total => (json::count(value, "count").saturating_mul(100) / total)
+                                .min(100) as u8,
+                        };
+                        (json::text(value, "value"), share)
                     })
                     .collect(),
             }

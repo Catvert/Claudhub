@@ -56,13 +56,8 @@ pub fn check() -> Result<Latest> {
 /// Reads the two fields the bar needs out of the release JSON.
 fn parse(json: &str) -> Result<Latest> {
     let release: serde_json::Value = serde_json::from_str(json)?;
-    let tag = release
-        .get("tag_name")
-        .and_then(|tag| tag.as_str())
-        .context("no tag_name")?;
-    let url = release
-        .get("html_url")
-        .and_then(|url| url.as_str())
+    let tag = crate::json::string(&release, "tag_name").context("no tag_name")?;
+    let url = crate::json::string(&release, "html_url")
         // The list page shows the same files one click further.
         .map(str::to_string)
         .unwrap_or_else(|| format!("https://github.com/{REPO}/releases"));

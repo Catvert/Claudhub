@@ -29,6 +29,7 @@ pub mod files;
 pub mod git;
 pub mod github;
 pub mod instance;
+pub mod json;
 pub mod just;
 pub mod logging;
 pub mod lsp;

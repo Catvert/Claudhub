@@ -496,17 +496,9 @@ pub fn parse_claude_process(text: &str) -> Option<ClaudeProcess> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     Some(ClaudeProcess {
         pid: u32::try_from(value.get("pid")?.as_u64()?).ok()?,
-        session: value.get("sessionId")?.as_str()?.to_string(),
-        cwd: PathBuf::from(
-            value
-                .get("cwd")
-                .and_then(|cwd| cwd.as_str())
-                .unwrap_or_default(),
-        ),
-        status: value
-            .get("status")
-            .and_then(|status| status.as_str())
-            .map(str::to_string),
+        session: crate::json::string(&value, "sessionId")?.to_string(),
+        cwd: PathBuf::from(crate::json::text(&value, "cwd")),
+        status: crate::json::string(&value, "status").map(str::to_string),
     })
 }
 

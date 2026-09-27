@@ -614,10 +614,7 @@ fn pump_frames(stdout: std::process::ChildStdout, frames: &(dyn Fn(Frame) + Sync
         let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let kind = message
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let kind = crate::json::string(&message, "type").unwrap_or_default();
         if kind != "frame" {
             // The relay's other lines — its Playwright server coming up, the
             // browser attaching and letting go. They paint nothing, and they
@@ -629,18 +626,13 @@ fn pump_frames(stdout: std::process::ChildStdout, frames: &(dyn Fn(Frame) + Sync
             }
             continue;
         }
-        let Some(data) = message.get("data").and_then(serde_json::Value::as_str) else {
+        let Some(data) = crate::json::string(&message, "data") else {
             continue;
         };
         let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
             continue;
         };
-        let number = |key| {
-            message
-                .get(key)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or_default() as u32
-        };
+        let number = |key| crate::json::count(&message, key) as u32;
         frames(Frame {
             jpeg,
             width: number("width"),
@@ -690,8 +682,8 @@ fn vitest_rows(json: &str, worktree: &Path) -> Vec<Test> {
     entries
         .iter()
         .filter_map(|entry| {
-            let name = entry.get("name")?.as_str()?.to_string();
-            let file = entry.get("file")?.as_str()?;
+            let name = crate::json::string(entry, "name")?.to_string();
+            let file = crate::json::string(entry, "file")?;
             let file = Path::new(file)
                 .strip_prefix(worktree)
                 .ok()
@@ -1598,12 +1590,9 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
     };
-    let Some(files) = root.get("testResults").and_then(|list| list.as_array()) else {
-        return Vec::new();
-    };
     let mut outcomes = Vec::new();
-    for file in files {
-        let Some(path) = file.get("name").and_then(|name| name.as_str()) else {
+    for file in crate::json::items(&root, "testResults") {
+        let Some(path) = crate::json::string(file, "name") else {
             continue;
         };
         let rel = Path::new(path)
@@ -1612,26 +1601,18 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
             .and_then(|rel| rel.to_str())
             .unwrap_or(path)
             .to_string();
-        let Some(cases) = file
-            .get("assertionResults")
-            .and_then(|list| list.as_array())
-        else {
-            continue;
-        };
-        for case in cases {
-            let Some(name) = case.get("fullName").and_then(|name| name.as_str()) else {
+        for case in crate::json::items(file, "assertionResults") {
+            let Some(name) = crate::json::string(case, "fullName") else {
                 continue;
             };
-            let status = match case.get("status").and_then(|status| status.as_str()) {
+            let status = match crate::json::string(case, "status") {
                 Some("passed") => Status::Passed,
                 Some("failed") => Status::Failed,
                 // "pending", "todo", "skipped", "disabled" — not run.
                 _ => Status::Skipped,
             };
-            let message = case
-                .get("failureMessages")
-                .and_then(|list| list.as_array())
-                .and_then(|list| list.first())
+            let message = crate::json::items(case, "failureMessages")
+                .first()
                 .and_then(|message| message.as_str())
                 .map(|message| crate::text::strip_ansi(message.trim()))
                 .unwrap_or_default();
@@ -1654,10 +1635,7 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
                 file: rel.clone(),
                 line,
                 cases: 1,
-                time_ms: case
-                    .get("duration")
-                    .and_then(|duration| duration.as_u64())
-                    .unwrap_or(0),
+                time_ms: crate::json::count(case, "duration"),
             });
         }
     }

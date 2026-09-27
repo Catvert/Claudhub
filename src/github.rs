@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::json;
+
 /// How many runs the branch list asks for. Twenty is a branch's recent
 /// history: past that one is reading the project's, which is what the web
 /// page is for.
@@ -295,41 +297,32 @@ impl Step {
 /// jobs that all say otherwise.
 pub fn run_state(out: &str) -> Option<(String, String)> {
     let root: Value = serde_json::from_str(out.trim()).ok()?;
-    let status = root.get("status").and_then(Value::as_str)?;
-    Some((status.to_string(), text(&root, "conclusion")))
+    let status = json::string(&root, "status")?;
+    Some((status.to_string(), json::text(&root, "conclusion")))
 }
 
 /// The jobs `gh run view --json jobs` answers with.
 pub fn parse_jobs(out: &str) -> Result<Vec<Job>, String> {
     let root: Value = serde_json::from_str(out.trim()).map_err(|why| why.to_string())?;
-    let jobs = root
-        .get("jobs")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    Ok(jobs
+    Ok(json::items(&root, "jobs")
         .iter()
         .map(|job| Job {
-            id: job.get("databaseId").and_then(Value::as_u64).unwrap_or(0),
-            name: text(job, "name"),
-            status: text(job, "status"),
-            conclusion: text(job, "conclusion"),
-            started_at: text(job, "startedAt"),
-            completed_at: text(job, "completedAt"),
-            url: text(job, "url"),
-            steps: job
-                .get("steps")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
+            id: json::count(job, "databaseId"),
+            name: json::text(job, "name"),
+            status: json::text(job, "status"),
+            conclusion: json::text(job, "conclusion"),
+            started_at: json::text(job, "startedAt"),
+            completed_at: json::text(job, "completedAt"),
+            url: json::text(job, "url"),
+            steps: json::items(job, "steps")
                 .iter()
                 .map(|step| Step {
-                    number: step.get("number").and_then(Value::as_u64).unwrap_or(0),
-                    name: text(step, "name"),
-                    status: text(step, "status"),
-                    conclusion: text(step, "conclusion"),
-                    started_at: text(step, "startedAt"),
-                    completed_at: text(step, "completedAt"),
+                    number: json::count(step, "number"),
+                    name: json::text(step, "name"),
+                    status: json::text(step, "status"),
+                    conclusion: json::text(step, "conclusion"),
+                    started_at: json::text(step, "startedAt"),
+                    completed_at: json::text(step, "completedAt"),
                 })
                 .collect(),
         })
@@ -445,23 +438,13 @@ pub fn parse_threads(out: &str) -> Result<Vec<Thread>, String> {
     Ok(nodes
         .iter()
         .map(|thread| Thread {
-            id: text(thread, "id"),
-            path: text(thread, "path"),
-            line: thread.get("line").and_then(Value::as_u64),
-            original_line: thread.get("originalLine").and_then(Value::as_u64),
-            resolved: thread
-                .get("isResolved")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            outdated: thread
-                .get("isOutdated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            comments: thread
-                .pointer("/comments/nodes")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
+            id: json::text(thread, "id"),
+            path: json::text(thread, "path"),
+            line: thread.get("line").and_then(json::number),
+            original_line: thread.get("originalLine").and_then(json::number),
+            resolved: json::flag(thread, "isResolved"),
+            outdated: json::flag(thread, "isOutdated"),
+            comments: json::items(thread.get("comments").unwrap_or(&Value::Null), "nodes")
                 .iter()
                 .map(|comment| Comment {
                     // A deleted account answers `null`: GitHub shows "ghost".
@@ -470,8 +453,8 @@ pub fn parse_threads(out: &str) -> Result<Vec<Thread>, String> {
                         .and_then(Value::as_str)
                         .unwrap_or("ghost")
                         .to_string(),
-                    body: text(comment, "body"),
-                    url: text(comment, "url"),
+                    body: json::text(comment, "body"),
+                    url: json::text(comment, "url"),
                 })
                 .collect(),
         })
@@ -634,15 +617,6 @@ pub fn worktree_of<'a>(pr: &PrHead, worktrees: &'a [Checkout]) -> Option<&'a Pat
 }
 
 // — Plumbing ————————————————————————————————————————————————————————
-
-/// A string field, empty when it is absent **or null**.
-fn text(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
 
 /// The command that answers a review thread.
 ///
