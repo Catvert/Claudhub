@@ -173,6 +173,13 @@ pub struct Explorer {
     tree: tree::Tree,
     /// The displayed tree, rebuilt on every collapse and never in a render.
     pub rows: Rc<Vec<tree::Entry>>,
+    /// The tree a search reduces `files` to, and the search it was read for.
+    ///
+    /// The same reason as `tree`, on the search's side: matching every path
+    /// and building the subset is a fifth of a second on a hundred thousand
+    /// files, and a chevron pressed on a result changes none of it. Read again
+    /// by `set_query` and by a new list (`set_files`), never by a fold.
+    searched: Option<(String, tree::Tree)>,
     /// The folders the user opened.
     ///
     /// Opened and not collapsed, unlike the review list: this tree is the
@@ -283,6 +290,7 @@ impl Default for Explorer {
             files: Rc::new(Vec::new()),
             tree: tree::Tree::default(),
             rows: Rc::new(Vec::new()),
+            searched: None,
             expanded: std::collections::HashSet::new(),
             collapsed: std::collections::HashSet::new(),
             stash: None,
@@ -332,6 +340,7 @@ impl Explorer {
         self.unexplored = unexplored;
         self.tree = tree::Tree::with_dirs(&files, &self.dirs);
         self.files = Rc::new(files);
+        self.searched = None;
         self.rebuild();
     }
 
@@ -396,14 +405,22 @@ impl Explorer {
             // be visible, and the search would look as if it had found nothing.
             // Which is why the folds read the other way round here — what is
             // remembered is the folders one shut, not the ones one opened.
-            let keep: Vec<usize> = self.hits().collect();
-            // `dirs` and not `unexplored`, as `set_files` builds the whole
-            // tree: a directory whose contents have arrived leaves the
-            // unexplored list, and telling the subset that it is a file draws
-            // it twice — once as the folder its children make, once as a leaf
-            // of its own.
-            tree::Tree::subset(&self.files, &keep, &self.dirs)
-                .rows(tree::Folds::OpenBut(&self.collapsed))
+            if self
+                .searched
+                .as_ref()
+                .is_none_or(|(query, _)| *query != self.query)
+            {
+                let keep: Vec<usize> = self.hits().collect();
+                // `dirs` and not `unexplored`, as `set_files` builds the whole
+                // tree: a directory whose contents have arrived leaves the
+                // unexplored list, and telling the subset that it is a file
+                // draws it twice — once as the folder its children make, once
+                // as a leaf of its own.
+                let subset = tree::Tree::subset(&self.files, &keep, &self.dirs);
+                self.searched = Some((self.query.clone(), subset));
+            }
+            let (_, subset) = self.searched.as_ref().expect("read above");
+            subset.rows(tree::Folds::OpenBut(&self.collapsed))
         };
         self.dimmed = Rc::new(rows.iter().map(|entry| self.is_ignored(entry)).collect());
         self.rows = Rc::new(rows);
@@ -4334,6 +4351,36 @@ mod tests {
         explorer.set_query(String::new());
         assert!(!explorer.is_open(Path::new("src/ui")));
         assert!(explorer.row_of(Path::new("src/ui/app.rs")).is_none());
+    }
+
+    /// The searched tree is kept across folds, and read again for a new list:
+    /// a file arriving under a search must show without retyping it.
+    #[test]
+    fn a_new_list_is_searched_again() {
+        let mut explorer = Explorer::default();
+        let listed = |files: &[&str]| files.iter().map(PathBuf::from).collect::<Vec<_>>();
+        explorer.set_files(
+            listed(&["src/ui/app.rs"]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        explorer.set_query("home".into());
+        assert!(explorer.row_of(Path::new("src/ui/home.rs")).is_none());
+        explorer.set_files(
+            listed(&["src/ui/app.rs", "src/ui/home.rs"]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(explorer.row_of(Path::new("src/ui/home.rs")).is_some());
+        // A fold reads the kept tree.
+        explorer.set_open(Path::new("src/ui"), false);
+        explorer.rebuild();
+        assert!(explorer.row_of(Path::new("src/ui/home.rs")).is_none());
+        explorer.set_open(Path::new("src/ui"), true);
+        explorer.rebuild();
+        assert!(explorer.row_of(Path::new("src/ui/home.rs")).is_some());
     }
 
     /// The bar's fold button, both halves: shutting everything is worth a
