@@ -900,7 +900,7 @@ impl ClaudhubApp {
                 let board = path.to_path_buf();
                 Button::new("focus-home-create-pr")
                     .xsmall()
-                    .primary()
+                    .ghost()
                     .icon(icon("git-pull-request"))
                     .label(tr!("focus-home-create-pr"))
                     .on_click(cx.listener(move |this, _, _, cx| {
