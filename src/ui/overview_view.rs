@@ -1506,7 +1506,7 @@ fn claude_says(status: &str) -> overview::Doing {
 }
 
 /// What the hooks, or the guess, say of a worktree.
-fn heard(activity: &crate::agent::Activity) -> overview::Doing {
+pub(super) fn heard(activity: &crate::agent::Activity) -> overview::Doing {
     match activity {
         crate::agent::Activity::Working => overview::Doing::Working,
         crate::agent::Activity::Waiting(_) => overview::Doing::Waiting,
@@ -1549,7 +1549,7 @@ pub(super) fn outline_rounded(
             .border_color(if focused { theme.ring } else { theme.border })
             .into_any_element();
     }
-    let (work, asks) = (theme.warning, theme.danger);
+    let tint = super::theme::doing_color(doing, theme).unwrap_or(theme.border);
     let width = (1.5 * zoom).clamp(1., 2.5);
     let seconds = flow_seconds();
     canvas(
@@ -1577,24 +1577,24 @@ pub(super) fn outline_rounded(
                 overview::Doing::Waiting => {
                     let breath = overview::breath(seconds, PULSE_PERIOD);
                     if let Some(path) = stroke(width * 4., None) {
-                        window.paint_path(path, asks.opacity(0.06 + 0.16 * breath));
+                        window.paint_path(path, tint.opacity(0.06 + 0.16 * breath));
                     }
                     if let Some(path) = stroke(width, None) {
-                        window.paint_path(path, asks.opacity(0.5 + 0.5 * breath));
+                        window.paint_path(path, tint.opacity(0.5 + 0.5 * breath));
                     }
                 }
                 _ => {
                     if let Some(path) = stroke(width * 4., None) {
-                        window.paint_path(path, work.opacity(0.14));
+                        window.paint_path(path, tint.opacity(0.14));
                     }
                     if let Some(path) = stroke(width, None) {
-                        window.paint_path(path, work.opacity(0.35));
+                        window.paint_path(path, tint.opacity(0.35));
                     }
                     let (dash, gap) = ((7. * zoom).max(4.), (9. * zoom).max(5.));
                     let marching =
                         overview::marching_round(length, seconds * 30. * zoom, dash, gap);
                     if let Some(path) = stroke(width, Some(&overview::dash_array(&marching))) {
-                        window.paint_path(path, work);
+                        window.paint_path(path, tint);
                     }
                 }
             }

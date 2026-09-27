@@ -30,6 +30,7 @@ use crate::ui::focus::{self, GitFace, View};
 use crate::ui::focus_view::{tab_name, view_name};
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
+use crate::ui::overview_view::heard;
 
 /// The least width of the home: its two columns side by side, and the
 /// gap between them.
@@ -48,6 +49,31 @@ const HOME_COMMITS: usize = 5;
 const HOME_FILES: usize = 8;
 /// The height the review's list of files scrolls within.
 const HOME_REVIEW_HEIGHT: f32 = 240.;
+
+/// A tab of a board — a view, or a terminal under the home's —: lit, it
+/// stands on the card's ground in its border; unlit, muted, lit under the
+/// pointer.
+fn tab_pill(
+    tab: gpui_kit::Stateful<gpui_kit::Div>,
+    lit: bool,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    tab.gap_1p5()
+        .items_center()
+        .cursor_pointer()
+        .rounded(theme.radius)
+        .text_sm()
+        .when(lit, |el| {
+            el.bg(theme.background)
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.foreground)
+        })
+        .when(!lit, |el| {
+            el.text_color(theme.muted_foreground)
+                .hover(|style| style.bg(theme.list_hover))
+        })
+}
 
 /// The review card's tree, for the range and the folds it was built under.
 /// Built once per file list — `ReviewState::rows_changed` drops it — and per
@@ -117,52 +143,35 @@ impl ClaudhubApp {
                 };
                 // The agents' tab wears the loudest of them.
                 let signal = (tab == View::Terminals)
-                    .then(|| match loudest {
-                        Doing::Working => Some(theme.warning),
-                        Doing::Waiting => Some(theme.danger),
-                        Doing::Rest => None,
-                    })
+                    .then(|| super::theme::doing_color(loudest, &theme))
                     .flatten();
                 let board = path.to_path_buf();
-                h_flex()
-                    .id(SharedString::from(format!("focus-tab-{tab:?}")))
-                    .flex_none()
-                    .h(super::theme::bar_height(cx))
-                    .px_3()
-                    .gap_1p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .rounded(theme.radius)
-                    .text_sm()
-                    .when(lit, |el| {
-                        el.bg(theme.background)
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_color(theme.foreground)
-                    })
-                    .when(!lit, |el| {
-                        el.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.show_board_view(&board, tab, cx);
-                    }))
-                    .child(
-                        icon(glyph)
-                            .xsmall()
-                            .when(lit, |icon| icon.text_color(theme.ring)),
-                    )
-                    .child(title)
-                    .children(count.map(|count| {
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(count.to_string()))
-                    }))
-                    .children(
-                        signal.map(|tint| div().flex_none().size(px(6.)).rounded_full().bg(tint)),
-                    )
-                    .into_any_element()
+                tab_pill(
+                    h_flex()
+                        .id(SharedString::from(format!("focus-tab-{tab:?}")))
+                        .flex_none()
+                        .h(super::theme::bar_height(cx))
+                        .px_3(),
+                    lit,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_board_view(&board, tab, cx);
+                }))
+                .child(
+                    icon(glyph)
+                        .xsmall()
+                        .when(lit, |icon| icon.text_color(theme.ring)),
+                )
+                .child(title)
+                .children(count.map(|count| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(count.to_string()))
+                }))
+                .children(signal.map(|tint| div().flex_none().size(px(6.)).rounded_full().bg(tint)))
+                .into_any_element()
             })
             .collect();
         let detail = self.view_detail(path, view, cx);
@@ -428,57 +437,42 @@ impl ClaudhubApp {
             let activity = session
                 .as_deref()
                 .and_then(|session| self.agents.session(session));
-            let tint = match (activity, doing) {
-                (_, Doing::Waiting) | (Some(crate::agent::Activity::Waiting(_)), _) => theme.danger,
-                (_, Doing::Working) | (Some(crate::agent::Activity::Working), _) => theme.warning,
-                (Some(crate::agent::Activity::Finished), _) => theme.success,
-                _ => theme.muted_foreground.opacity(0.5),
-            };
+            // A question first, from either, then work; what finished says
+            // so once nothing else speaks.
+            let loud = overview::loudest([doing, activity.map_or(Doing::Rest, heard)]);
+            let tint = super::theme::doing_color(loud, &theme)
+                .or_else(|| activity.and_then(|a| super::theme::activity_color(a, &theme)))
+                .unwrap_or(theme.muted_foreground.opacity(0.5));
             let lit = shown == Some(*id);
             let (board, pressed) = (path.to_path_buf(), *id);
             tabs.push(
-                h_flex()
-                    .id(("focus-home-terminal-tab", *id as usize))
-                    .flex_none()
-                    .max_w(px(220.))
-                    .h(super::theme::bar_height(cx))
-                    .px_2()
-                    .gap_1p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .rounded(theme.radius)
-                    .text_sm()
-                    .when(lit, |el| {
-                        el.bg(theme.background)
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_color(theme.foreground)
-                    })
-                    .when(!lit, |el| {
-                        el.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reply_to(&board, pressed, window, cx);
-                    }))
-                    .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
-                    .child(div().min_w_0().truncate().child(name))
-                    .child(
-                        Button::new(("focus-home-terminal-close", *id as usize))
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("x"))
-                            .tooltip(tr!("overview-close"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.ask_close_terminal(
-                                    gpui_kit::EntityId::from(pressed),
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .into_any_element(),
+                tab_pill(
+                    h_flex()
+                        .id(("focus-home-terminal-tab", *id as usize))
+                        .flex_none()
+                        .max_w(px(220.))
+                        .h(super::theme::bar_height(cx))
+                        .px_2(),
+                    lit,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.reply_to(&board, pressed, window, cx);
+                }))
+                .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
+                .child(div().min_w_0().truncate().child(name))
+                .child(
+                    Button::new(("focus-home-terminal-close", *id as usize))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("x"))
+                        .tooltip(tr!("overview-close"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.ask_close_terminal(gpui_kit::EntityId::from(pressed), window, cx);
+                        })),
+                )
+                .into_any_element(),
             );
         }
         let worktree = path.to_path_buf();
@@ -1189,12 +1183,7 @@ impl ClaudhubApp {
                         .gap_1p5()
                         .text_xs()
                         .child(tr!("home-files", { count: files }))
-                        .child(div().text_color(diff.added_fg).child(format!("+{added}")))
-                        .child(
-                            div()
-                                .text_color(diff.removed_fg)
-                                .child(format!("−{removed}")),
-                        )
+                        .children(super::theme::volume(added, removed, &diff))
                         .into_any_element(),
                 );
                 // Every file, as a tree: what the card says of a branch is
@@ -1207,19 +1196,8 @@ impl ClaudhubApp {
                 let guide = super::theme::indent_guide(cx);
                 let (entity, board) = (cx.entity(), path.to_path_buf());
                 let (hover, radius) = (theme.list_hover, theme.radius);
-                let (added_fg, removed_fg) = (diff.added_fg, diff.removed_fg);
-                let counts = move |added: usize, removed: usize| {
-                    [
-                        div()
-                            .flex_none()
-                            .text_color(added_fg)
-                            .child(format!("+{added}")),
-                        div()
-                            .flex_none()
-                            .text_color(removed_fg)
-                            .child(format!("−{removed}")),
-                    ]
-                };
+                let counts =
+                    move |added: usize, removed: usize| super::theme::volume(added, removed, &diff);
                 rows.push(
                     gpui_kit::uniform_list(
                         "focus-home-review-files",

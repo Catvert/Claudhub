@@ -906,31 +906,8 @@ impl ClaudhubApp {
             .copied()
             .filter(|summary| !summary.is_empty());
         let terminals = self.terminals_of(path).count();
-        let diff = super::theme::DiffColors::of(cx);
         let open = path.to_path_buf();
-        let volume = summary.map(|summary| {
-            h_flex()
-                .flex_none()
-                .gap_1()
-                .when(summary.added > 0, |el| {
-                    el.child(
-                        div()
-                            .text_color(diff.added_fg)
-                            .child(format!("+{}", focus::short_count(summary.added))),
-                    )
-                })
-                .when(summary.removed > 0, |el| {
-                    el.child(
-                        div()
-                            .text_color(diff.removed_fg)
-                            .child(format!("−{}", focus::short_count(summary.removed))),
-                    )
-                })
-                // A rename or a binary moves no line: the files, then.
-                .when(summary.added == 0 && summary.removed == 0, |el| {
-                    el.child(SharedString::from(summary.files.to_string()))
-                })
-        });
+        let volume = summary.map(|summary| super::topbar::volume_short(summary, cx));
         h_flex()
             .id(SharedString::from(format!("focus-row-{}", path.display())))
             .relative()
@@ -1293,34 +1270,25 @@ impl ClaudhubApp {
             })
             .map(|_| crate::github::unresolved(&self.github.view_threads).len())
             .filter(|open| *open > 0);
-        let buttons: Vec<AnyElement> = GitFace::ALL
-            .into_iter()
-            .map(|each| {
-                let (glyph, name) = git_face_name(each);
-                let count = match each {
-                    GitFace::Changes => files,
-                    GitFace::Pr => threads,
-                    GitFace::History | GitFace::Review => None,
-                };
-                let label = match count {
-                    Some(count) => SharedString::from(format!("{name} {count}")),
-                    None => name,
-                };
-                let board = path.to_path_buf();
-                Button::new(SharedString::from(format!("focus-git-{each:?}")))
-                    .ghost()
-                    .small()
-                    .icon(icon(glyph))
-                    .label(label)
-                    .selected(each == face)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.git_face.insert(board.clone(), each);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let bar = h_flex().flex_none().gap_1().children(buttons);
+        let faces = GitFace::ALL.map(|each| {
+            let (glyph, name) = git_face_name(each);
+            let count = match each {
+                GitFace::Changes => files,
+                GitFace::Pr => threads,
+                GitFace::History | GitFace::Review => None,
+            };
+            (each, glyph, name, count)
+        });
+        let bar = face_bar(
+            path,
+            "focus-git",
+            faces,
+            face,
+            |this, board, face| {
+                this.git_face.insert(board, face);
+            },
+            cx,
+        );
         let body = match face {
             GitFace::Changes => self.render_git_changes(path, window, cx),
             GitFace::History => self.render_git_history(path, window, cx),
@@ -1345,31 +1313,30 @@ impl ClaudhubApp {
             .and_then(|state| state.todo.as_ref())
             .map(|todo| todo.tasks.len() - todo.done())
             .filter(|open| *open > 0);
-        let buttons: Vec<AnyElement> = [NotesFace::Notes, NotesFace::Todo]
-            .into_iter()
-            .map(|each| {
-                let (glyph, name) = match each {
-                    NotesFace::Notes => ("sticky-note", tr!("focus-tab-notes")),
-                    NotesFace::Todo => ("check-check", tr!("todo-title")),
-                };
-                let label = match (each, open_tasks) {
-                    (NotesFace::Todo, Some(open)) => SharedString::from(format!("{name} {open}")),
-                    _ => name,
-                };
-                let board = path.to_path_buf();
-                Button::new(SharedString::from(format!("focus-notes-{each:?}")))
-                    .ghost()
-                    .small()
-                    .icon(icon(glyph))
-                    .label(label)
-                    .selected(each == face)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.notes_face.insert(board.clone(), each);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
+        let faces = [
+            (
+                NotesFace::Notes,
+                "sticky-note",
+                tr!("focus-tab-notes"),
+                None,
+            ),
+            (
+                NotesFace::Todo,
+                "check-check",
+                tr!("todo-title"),
+                open_tasks,
+            ),
+        ];
+        let bar = face_bar(
+            path,
+            "focus-notes",
+            faces,
+            face,
+            |this, board, face| {
+                this.notes_face.insert(board, face);
+            },
+            cx,
+        );
         let body = match face {
             NotesFace::Notes => self.render_notes_view(path, cx),
             NotesFace::Todo => self.render_todo_view(path, cx),
@@ -1377,7 +1344,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .gap_2()
-            .child(h_flex().flex_none().gap_1().children(buttons))
+            .child(bar)
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
     }
@@ -1917,6 +1884,40 @@ impl ClaudhubApp {
     }
 }
 
+/// The bar of a tab's faces: each its glyph, its name and what waits in it,
+/// the one `shown` lit; a press shows another on `board` — `choose`.
+fn face_bar<F: Copy + PartialEq + std::fmt::Debug + 'static>(
+    board: &Path,
+    id: &'static str,
+    faces: impl IntoIterator<Item = (F, &'static str, SharedString, Option<usize>)>,
+    shown: F,
+    choose: fn(&mut ClaudhubApp, PathBuf, F),
+    cx: &mut Context<ClaudhubApp>,
+) -> gpui_kit::Div {
+    let buttons: Vec<AnyElement> = faces
+        .into_iter()
+        .map(|(each, glyph, name, count)| {
+            let label = match count {
+                Some(count) => SharedString::from(format!("{name} {count}")),
+                None => name,
+            };
+            let board = board.to_path_buf();
+            Button::new(SharedString::from(format!("{id}-{each:?}")))
+                .ghost()
+                .small()
+                .icon(icon(glyph))
+                .label(label)
+                .selected(each == shown)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    choose(this, board.clone(), each);
+                    cx.notify();
+                }))
+                .into_any_element()
+        })
+        .collect();
+    h_flex().flex_none().gap_1().children(buttons)
+}
+
 /// A face of the git tab's glyph and name.
 fn git_face_name(face: GitFace) -> (&'static str, SharedString) {
     match face {
@@ -1978,7 +1979,7 @@ pub(super) fn edge_signal(
     theme: &gpui_kit::component::Theme,
 ) -> Option<AnyElement> {
     let doing = doing.copied().filter(|doing| *doing != Doing::Rest)?;
-    let (work, asks) = (theme.warning, theme.danger);
+    let tint = super::theme::doing_color(doing, theme)?;
     let seconds = super::overview_view::flow_seconds();
     Some(
         canvas(
@@ -2000,12 +2001,12 @@ pub(super) fn edge_signal(
                 match doing {
                     Doing::Waiting => {
                         let breath = overview::breath(seconds, super::overview_view::PULSE_PERIOD);
-                        window.paint_quad(bar(0., height, asks.opacity(0.35 + 0.65 * breath)));
+                        window.paint_quad(bar(0., height, tint.opacity(0.35 + 0.65 * breath)));
                     }
                     _ => {
-                        window.paint_quad(bar(0., height, work.opacity(0.3)));
+                        window.paint_quad(bar(0., height, tint.opacity(0.3)));
                         if let Some((top, bottom)) = focus::edge_run(height, seconds) {
-                            window.paint_quad(bar(top, bottom, work));
+                            window.paint_quad(bar(top, bottom, tint));
                         }
                     }
                 }
