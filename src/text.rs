@@ -49,6 +49,29 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// The longest head of `text` that fits in `max` **bytes** without cutting a
+/// character in two — a slice cut on raw bytes is no longer valid UTF-8, and
+/// panics. `str::floor_char_boundary` is the same thing, not stable at this
+/// crate's `rust-version`.
+pub fn head_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// `text` at most `max` **characters** long, the cut said by an ellipsis.
+pub fn ellipsized(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
 /// A fenced block the text cannot close: one backtick more than its longest
 /// run, and never fewer than three. `language` follows the opening fence, and
 /// may be empty.
@@ -135,6 +158,22 @@ mod tests {
             strip_ansi("\u{1b}]2;pest\u{1b}\\  PASS  Tests\\Unit"),
             "  PASS  Tests\\Unit"
         );
+    }
+
+    /// A two-byte character straddling the limit goes whole, never halved.
+    #[test]
+    fn a_cut_in_bytes_falls_between_two_characters() {
+        assert_eq!(head_bytes("short", 10), "short");
+        assert_eq!(head_bytes("abé", 3), "ab");
+        assert_eq!(head_bytes("abé", 4), "abé");
+        assert_eq!(head_bytes("éé", 1), "");
+    }
+
+    #[test]
+    fn a_cut_in_characters_says_so() {
+        assert_eq!(ellipsized("été", 3), "été");
+        assert_eq!(ellipsized("étés", 3), "été…");
+        assert_eq!(ellipsized("", 0), "");
     }
 
     #[test]

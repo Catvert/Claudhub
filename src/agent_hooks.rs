@@ -170,11 +170,7 @@ pub fn signal_of(value: &Value) -> Option<Signal> {
 }
 
 fn cap(message: &str) -> String {
-    let line = message.lines().next().unwrap_or("");
-    match line.char_indices().nth(MESSAGE_CAP) {
-        Some((cut, _)) => format!("{}…", &line[..cut]),
-        None => line.to_string(),
-    }
+    crate::text::ellipsized(message.lines().next().unwrap_or(""), MESSAGE_CAP)
 }
 
 /// Where the hooks write: `$HOME/.claudhub/agents`.

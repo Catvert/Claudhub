@@ -43,7 +43,11 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// prefixes the team has given itself. An instruction written here would
 /// impose them on every repository, which is exactly what we do not want.
 pub fn prompt(recent: &[String], diff: &str) -> String {
-    let (diff, truncated) = truncate(diff, MAX_DIFF);
+    // On a character boundary: an accented diff cut on raw bytes would no
+    // longer be valid UTF-8.
+    let kept = crate::text::head_bytes(diff, MAX_DIFF);
+    let truncated = kept.len() < diff.len();
+    let diff = kept;
     let mut out = String::with_capacity(diff.len() + 1024);
     out.push_str(
         "You are writing the message of the commit these staged changes will produce.\n\n\
@@ -78,21 +82,6 @@ pub fn prompt(recent: &[String], diff: &str) -> String {
     }
     out.push('\n');
     out
-}
-
-/// Cuts at `max` **bytes, on a character boundary**.
-///
-/// On raw bytes, an accented diff would be cut in the middle of a character
-/// and the slice would no longer be valid UTF-8.
-fn truncate(text: &str, max: usize) -> (&str, bool) {
-    if text.len() <= max {
-        return (text, false);
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (&text[..end], true)
 }
 
 /// What the agent answered, brought back to a commit message.

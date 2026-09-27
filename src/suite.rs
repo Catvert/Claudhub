@@ -2294,11 +2294,7 @@ fn failure_text(out: &mut String, failure: &Handoff, max: usize) {
 /// A line at most [`LINE_CHARS`] characters long, the cut said by an
 /// ellipsis.
 fn cut_line(line: &str) -> String {
-    let line = line.trim_end();
-    match line.char_indices().nth(LINE_CHARS) {
-        Some((at, _)) => format!("{}…", &line[..at]),
-        None => line.to_string(),
-    }
+    crate::text::ellipsized(line.trim_end(), LINE_CHARS)
 }
 
 #[cfg(test)]

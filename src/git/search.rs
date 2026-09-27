@@ -278,16 +278,11 @@ impl super::Sink for Collector {
 
 /// Cuts a line down to something a list can show, on a character boundary.
 fn clip(line: &str) -> String {
-    if line.len() <= MAX_LINE {
+    let head = crate::text::head_bytes(line, MAX_LINE);
+    if head.len() == line.len() {
         return line.to_string();
     }
-    let end = (0..=MAX_LINE)
-        .rev()
-        .find(|index| line.is_char_boundary(*index))
-        .unwrap_or(0);
-    let mut out = line[..end].to_string();
-    out.push('…');
-    out
+    format!("{head}…")
 }
 
 #[cfg(test)]
