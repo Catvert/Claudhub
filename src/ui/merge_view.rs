@@ -65,6 +65,13 @@ pub(super) struct MergeState {
     /// What the list actually holds, which is not quite the rows: the chunk
     /// being edited is **one** item as tall as it needs to be.
     pub items: Rc<Vec<Item>>,
+    /// Every line number a column can show, as text, made once: a cell asks
+    /// for three per visible row per frame. Grows with the rows, never shrinks.
+    pub numbers: Rc<Vec<SharedString>>,
+    /// The height the list reserves for each item, for the line height it was
+    /// measured at. Dropped with the items it was taken from, and made again by
+    /// the next frame — the line height is a setting, read there.
+    pub sizes: Option<(Pixels, Rc<Vec<gpui_kit::Size<Pixels>>>)>,
     /// The chunk the arrows are standing on, and the one the margin rule marks.
     pub current: usize,
     pub editor: Option<ChunkEditor>,
@@ -84,10 +91,13 @@ pub(super) struct MergeState {
 #[derive(Clone, Copy)]
 pub(super) enum Item {
     Row(usize),
-    /// The chunk being edited, and how many lines tall it is.
+    /// The chunk being edited, how many lines tall it is, and the run of rows
+    /// it folds — its two sides, painted from there without a search.
     Editing {
         chunk: usize,
         lines: usize,
+        start: usize,
+        len: usize,
     },
 }
 
@@ -106,6 +116,46 @@ impl MergeState {
             Item::Row(row) => self.rows.get(*row).is_some_and(|row| row.chunk == chunk),
             Item::Editing { chunk: at, .. } => *at == chunk,
         })
+    }
+
+    /// Everything derived from the rows, made again after they change.
+    fn relayout(&mut self) {
+        let Some(merge) = self.merge.as_ref() else {
+            return;
+        };
+        self.items = Rc::new(layout(merge, &self.rows, self.editing()));
+        // A column holds at most one line per row, so no number goes past the
+        // row count.
+        if self.numbers.len() < self.rows.len() {
+            let numbers = Rc::make_mut(&mut self.numbers);
+            let from = numbers.len() + 1;
+            numbers.extend((from..=self.rows.len()).map(|n| SharedString::from(n.to_string())));
+        }
+        self.sizes = None;
+    }
+
+    /// What the list reserves for each item, measured once per layout and line
+    /// height rather than once per frame.
+    fn sizes(&mut self, line: Pixels) -> Rc<Vec<gpui_kit::Size<Pixels>>> {
+        if let Some((at, sizes)) = &self.sizes {
+            if *at == line {
+                return sizes.clone();
+            }
+        }
+        let sizes = Rc::new(
+            self.items
+                .iter()
+                .map(|item| {
+                    let lines = match item {
+                        Item::Row(_) => 1,
+                        Item::Editing { lines, .. } => *lines,
+                    };
+                    gpui_kit::size(px(0.), line * lines as f32)
+                })
+                .collect::<Vec<_>>(),
+        );
+        self.sizes = Some((line, sizes.clone()));
+        sizes
     }
 }
 
@@ -132,6 +182,8 @@ fn layout(merge: &Merge, rows: &[Row], editing: Option<usize>) -> Vec<Item> {
             items.push(Item::Editing {
                 chunk,
                 lines: lines.max(typed).max(1),
+                start: at,
+                len: lines,
             });
             at += lines;
             continue;
@@ -166,6 +218,8 @@ impl ClaudhubApp {
             merge: None,
             rows: Rc::new(Vec::new()),
             items: Rc::new(Vec::new()),
+            numbers: Rc::new(Vec::new()),
+            sizes: None,
             current: 0,
             editor: None,
             error: None,
@@ -195,15 +249,14 @@ impl ClaudhubApp {
             Ok(stages) => {
                 let merge = Merge::new(&stages.base, &stages.ours, &stages.theirs);
                 let rows = merge.rows();
-                let items = layout(&merge, &rows, None);
                 // Straight to the first thing to decide: a conflict is often
                 // one chunk in the middle of a long file, and opening at the
                 // top means scrolling for it before the work can start.
                 let first = merge.step(0, 1).unwrap_or(0);
                 if let Some(state) = self.merging.as_mut() {
                     state.rows = Rc::new(rows);
-                    state.items = Rc::new(items);
                     state.merge = Some(merge);
+                    state.relayout();
                     state.current = first;
                     state.error = None;
                 }
@@ -214,6 +267,7 @@ impl ClaudhubApp {
                     state.merge = None;
                     state.rows = Rc::new(Vec::new());
                     state.items = Rc::new(Vec::new());
+                    state.sizes = None;
                     state.editor = None;
                     state.error = Some(message);
                 }
@@ -230,10 +284,8 @@ impl ClaudhubApp {
         let Some(merge) = state.merge.as_ref() else {
             return;
         };
-        let rows = merge.rows();
-        let items = layout(merge, &rows, state.editor.as_ref().map(|e| e.chunk));
-        state.rows = Rc::new(rows);
-        state.items = Rc::new(items);
+        state.rows = Rc::new(merge.rows());
+        state.relayout();
     }
 
     fn merge_reveal(&mut self, chunk: usize) {
@@ -341,16 +393,21 @@ impl ClaudhubApp {
         });
         // Every keystroke lands in the chunk: there is no "save" here, the
         // outcome being a text the "Resolve" button reads at the end. The rows
-        // are rebuilt with it, which is what makes the entry grow as one types.
+        // are rebuilt with it, which is what makes the entry grow as one types
+        // — this chunk's rows only (`Merge::resplice`), the rest of the file
+        // being what it was a keystroke ago.
         cx.subscribe(&input, move |this, editor, event, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
             }
-            let text = editor.read(cx).value().to_string();
-            if let Some(merge) = this.merging.as_mut().and_then(|state| state.merge.as_mut()) {
-                merge.set_manual(chunk, &text);
+            let text = editor.read(cx).value();
+            if let Some(state) = this.merging.as_mut() {
+                if let Some(merge) = state.merge.as_mut() {
+                    merge.set_manual(chunk, &text);
+                    merge.resplice(Rc::make_mut(&mut state.rows), chunk);
+                }
+                state.relayout();
             }
-            this.merge_rebuild();
             cx.notify();
         })
         .detach();
@@ -490,21 +547,13 @@ impl ClaudhubApp {
         let number_width = px(48.);
         let titles = self.render_merge_titles(number_width, cx);
         let rule = cx.theme().primary;
-        let sizes = Rc::new(
-            items
-                .iter()
-                .map(|item| {
-                    let lines = match item {
-                        Item::Row(_) => 1,
-                        Item::Editing { lines, .. } => *lines,
-                    };
-                    gpui_kit::size(px(0.), line * lines as f32)
-                })
-                .collect::<Vec<_>>(),
-        );
+        let state = self.merging.as_mut()?;
+        let sizes = state.sizes(line);
+        let numbers = state.numbers.clone();
         let paint = Paint {
             rows,
             items,
+            numbers,
             colors,
             number_width,
             line,
@@ -795,6 +844,7 @@ const RULE: Pixels = px(3.);
 struct Paint {
     rows: Rc<Vec<Row>>,
     items: Rc<Vec<Item>>,
+    numbers: Rc<Vec<SharedString>>,
     colors: DiffColors,
     number_width: Pixels,
     line: Pixels,
@@ -823,17 +873,20 @@ fn render_item(
 ) -> gpui_kit::AnyElement {
     match paint.items.get(index) {
         Some(Item::Row(row)) => render_row(paint, *row, app, entity, cx),
-        Some(Item::Editing { chunk, lines }) => {
-            render_editing(paint, *chunk, *lines, app, entity, cx)
+        Some(Item::Editing {
+            chunk,
+            lines,
+            start,
+            len,
+        }) => {
+            // What the chunk's two sides say, taken off its rows: the entry
+            // that carries an editor paints them itself, the list having
+            // folded them into one.
+            let rows = paint.rows.get(*start..*start + *len).unwrap_or(&[]);
+            render_editing(paint, *chunk, *lines, rows, app, entity, cx)
         }
         None => div().into_any_element(),
     }
-}
-
-/// What a chunk's two sides say, taken off its rows: the entry that carries an
-/// editor paints them itself, the list having folded them into one.
-fn chunk_rows(paint: &Paint, chunk: usize) -> Vec<&Row> {
-    paint.rows.iter().filter(|row| row.chunk == chunk).collect()
 }
 
 /// The chunk being written into: its two sides, and an editor between them.
@@ -841,19 +894,19 @@ fn render_editing(
     paint: &Paint,
     chunk: usize,
     lines: usize,
+    rows: &[Row],
     app: &ClaudhubApp,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui_kit::App,
 ) -> gpui_kit::AnyElement {
-    let rows = chunk_rows(paint, chunk);
-    let Some(first) = rows.first().copied() else {
+    let Some(first) = rows.first() else {
         return div().into_any_element();
     };
     let (mine, yours) = picked(app, chunk);
     let height = paint.line * lines as f32;
     let editor = paint.editor.clone();
-    let ours = side(paint, &rows, Column::Ours, mine, yours, height, cx);
-    let theirs = side(paint, &rows, Column::Theirs, mine, yours, height, cx);
+    let ours = side(paint, rows, Column::Ours, mine, yours, height, cx);
+    let theirs = side(paint, rows, Column::Theirs, mine, yours, height, cx);
     h_flex()
         .id(("merge-editing", chunk))
         .w_full()
@@ -908,7 +961,7 @@ fn render_editing(
 #[allow(clippy::too_many_arguments)]
 fn side(
     paint: &Paint,
-    rows: &[&Row],
+    rows: &[Row],
     column: Column,
     mine: bool,
     yours: bool,
@@ -1025,8 +1078,12 @@ fn cell(
         .text_right()
         .text_color(paint.colors.line_number)
         .child(match content {
-            Some(line) => line.number.to_string(),
-            None => String::new(),
+            Some(line) => paint
+                .numbers
+                .get(line.number.wrapping_sub(1))
+                .cloned()
+                .unwrap_or_default(),
+            None => SharedString::default(),
         });
     let text = div()
         .flex_1()
@@ -1044,6 +1101,7 @@ fn cell(
             |el| el.text_color(cx.theme().muted_foreground),
         )
         .child(match content {
+            // An `Arc` clone, not a copy of the line.
             Some(line) => SharedString::from(line.text.clone()),
             None => SharedString::default(),
         });
