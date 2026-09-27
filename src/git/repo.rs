@@ -845,19 +845,7 @@ fn list_files_in(
     if !super::first_visit(seen, dir) {
         return Ok(Files::default());
     }
-    // The index mode distinguishes a gitlink from a file without a stat per
-    // path. -t disambiguates untracked names containing spaces and tabs from
-    // the metadata preceding a tracked path.
-    let entries = list_of(
-        dir,
-        &[
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--stage",
-            "-t",
-        ],
-    )?;
+    let entries = tracked_entries(dir)?;
     let mut submodules: Vec<PathBuf> = entries
         .iter()
         .filter(|entry| entry.dir)
@@ -944,9 +932,34 @@ pub struct Files {
 }
 
 /// One entry of `ls-files`, and whether git wrote it as a directory.
-struct Listed {
-    path: PathBuf,
-    dir: bool,
+pub(crate) struct Listed {
+    pub(crate) path: PathBuf,
+    pub(crate) dir: bool,
+    /// A submodule's gitlink, and not a folder git stopped at: an untracked
+    /// nested repository is written `name/` as well, and is no submodule.
+    pub(crate) gitlink: bool,
+}
+
+/// Every file git tracks, or would add without being told to ignore it.
+///
+/// The index mode distinguishes a gitlink from a file without a stat per
+/// path. -t disambiguates untracked names containing spaces and tabs from
+/// the metadata preceding a tracked path.
+///
+/// The explorer's list and the watch plan both start here: the second used to
+/// run the same `ls-files` by hand, without a ceiling — a git stuck on a lock
+/// froze the watcher for good.
+pub(crate) fn tracked_entries(dir: &Path) -> Result<Vec<Listed>> {
+    list_of(
+        dir,
+        &[
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--stage",
+            "-t",
+        ],
+    )
 }
 
 fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<Listed>> {
@@ -975,6 +988,7 @@ fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<Listed>> {
                 (text, false)
             };
             Some(Listed {
+                gitlink: submodule,
                 dir: submodule || text.ends_with('/'),
                 path: PathBuf::from(text.trim_end_matches('/')),
             })

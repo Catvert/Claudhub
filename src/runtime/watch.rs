@@ -642,55 +642,24 @@ fn add_git_dir(dir: PathBuf, shared: bool, plan: &mut WatchPlan) {
     }
 }
 
-/// The folders containing a file git tracks, or a new file it does not ignore.
+/// The folders containing a file git tracks, or a new file it does not ignore,
+/// and the submodules to walk into.
+///
+/// The list is the explorer's (`repo::tracked_entries`), read through the git
+/// layer and so under its ceiling: a `git` stuck on a lock or a vanished mount
+/// fails here after a while, and the checkout is watched whole.
 fn tracked_directories(worktree: &Path) -> Option<(HashSet<PathBuf>, HashSet<PathBuf>)> {
-    use std::process::{Command, Stdio};
-
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--stage",
-            "-t",
-            "--others",
-            "--exclude-standard",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&out.stdout);
+    let entries = crate::git::repo::tracked_entries(worktree).ok()?;
     let mut dirs = HashSet::new();
     let mut submodules = HashSet::new();
-    for record in text.split('\0').filter(|s| !s.is_empty()) {
-        // -t distinguishes an untracked name containing tabs from an index
-        // record. The path itself is never split on whitespace.
-        let (file, submodule) = if let Some(path) = record.strip_prefix("? ") {
-            (path, false)
-        } else if let Some((header, path)) = record.split_once('\t') {
-            (
-                path,
-                header
-                    .get(2..)
-                    .is_some_and(|mode| mode.starts_with("160000 ")),
-            )
-        } else {
-            continue;
-        };
-        if submodule {
-            submodules.insert(worktree.join(file));
+    for entry in &entries {
+        if entry.gitlink {
+            submodules.insert(worktree.join(&entry.path));
         }
         // Every ancestor, not only the parent: an intermediate folder holding
         // nothing but subfolders has to be watched too, otherwise creating a
         // file at that level would go unnoticed.
-        let mut current = Path::new(file).parent();
+        let mut current = entry.path.parent();
         while let Some(dir) = current.filter(|d| !d.as_os_str().is_empty()) {
             if !dirs.insert(worktree.join(dir)) {
                 break; // already seen: so are its ancestors
@@ -1183,6 +1152,31 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `ls-files` writes an untracked repository inside the checkout `name/`,
+    /// as it would a folder it stopped at: that is no submodule to walk into.
+    #[test]
+    fn an_untracked_nested_repository_is_not_a_submodule() {
+        let root = std::env::temp_dir().join(format!("claudhub-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("inner/src")).unwrap();
+        std::fs::write(root.join("inner/src/code.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("top.rs"), "fn main() {}").unwrap();
+        crate::git::git(&root, &["init", "-q"]).unwrap();
+        crate::git::git(&root.join("inner"), &["init", "-q"]).unwrap();
+
+        let entries = crate::git::repo::tracked_entries(&root).unwrap();
+        let (dirs, submodules) = tracked_directories(&root).expect("a repository");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.dir && !entry.gitlink && entry.path == Path::new("inner")),
+            "git lists it as a folder"
+        );
+        assert!(submodules.is_empty(), "{submodules:?}");
+        assert!(!dirs.contains(&root.join("inner/src")), "{dirs:?}");
     }
 
     /// The only test proving the whole chain works: a real filesystem watcher,
