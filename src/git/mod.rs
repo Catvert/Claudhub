@@ -497,8 +497,6 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
     max_code: i32,
     mut sink: K,
 ) -> Result<K::Output> {
-    use std::io::BufRead;
-
     let started = Instant::now();
     let mut cmd = command(dir, args);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -514,49 +512,26 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
         buffer
     });
 
-    // The lines travel through a channel rather than being read here: a read
-    // blocked on a command that says nothing would have no ceiling, and the
-    // ceiling is the whole reason `wait_feeding` exists.
-    let (lines, incoming) = std::sync::mpsc::sync_channel::<String>(256);
-    let reader = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).split(b'\n') {
-            let Ok(line) = line else { break };
-            // A line git wrote is not necessarily UTF-8 — a match inside a
-            // file with an odd encoding — and losing it beats losing the search.
-            let line = into_text(line);
-            if lines.send(line).is_err() {
-                break; // the sink has had enough
-            }
+    // Nothing to poll: only the sink and the ceiling end a search.
+    let heard = follow_lines(
+        vec![((), Box::new(stdout) as Box<dyn Read + Send>)],
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        || false,
+        |(), line| sink.line(&line),
+    );
+    let interrupted = match heard {
+        Heard::Closed => false,
+        Heard::Enough => {
+            let _ = child.kill();
+            true
         }
-    });
-
-    let deadline = Instant::now() + TIMEOUT;
-    let mut interrupted = false;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
+        Heard::Overran => {
             let what = format!("git {}", describe(args));
             return Err(interrupt(&mut child, &what, TIMEOUT));
         }
-        match incoming.recv_timeout(deadline - now) {
-            Ok(line) => {
-                if !sink.line(&line) {
-                    interrupted = true;
-                    break;
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-        }
-    }
-
-    let status = if interrupted {
-        let _ = child.kill();
-        child.wait()?
-    } else {
-        let _ = reader.join();
-        child.wait()?
     };
+    let status = child.wait()?;
     let elapsed = started.elapsed();
     log::debug!(
         "git {} in {} — {}{}",
@@ -570,6 +545,81 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
         return Err(failure(args, &err_reader.join().unwrap_or_default()));
     }
     Ok(sink.finish(interrupted))
+}
+
+/// How [`follow_lines`] stopped listening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Heard {
+    /// Every stream reached its end: the process is exiting, and its status is
+    /// the caller's to wait for.
+    Closed,
+    /// The caller had enough — a line said so, or `should_stop` did.
+    Enough,
+    /// The deadline passed first.
+    Overran,
+}
+
+/// Hands a process's output streams to `line`, one line at a time and tagged
+/// with the stream it came from, **until the deadline** — the shape both
+/// `run_streaming` and a test run (`suite::follow`) follow.
+///
+/// The lines travel through a channel rather than being read here: a read
+/// blocked on a command that says nothing would have no ceiling, and the
+/// ceiling is the whole reason `wait_feeding` exists. The wait wakes at least
+/// every `poll` to ask `should_stop`, so a flag raised elsewhere is heard
+/// while the process is silent.
+///
+/// **On anything but `Closed`, killing the process is the caller's**, and so
+/// is the way: one process, or its whole group. The channel is closed on the
+/// way out, so a reader blocked in `send` on a full channel wakes and ends;
+/// one blocked in `read` ends when the pipe closes. Neither is waited for — a
+/// grandchild holding the pipe would make that wait endless.
+pub(crate) fn follow_lines<T: Clone + Send + 'static>(
+    streams: Vec<(T, Box<dyn Read + Send>)>,
+    deadline: Instant,
+    poll: Duration,
+    mut should_stop: impl FnMut() -> bool,
+    mut line: impl FnMut(T, String) -> bool,
+) -> Heard {
+    use std::io::BufRead;
+    use std::sync::mpsc::RecvTimeoutError;
+
+    let (lines, incoming) = std::sync::mpsc::sync_channel::<(T, String)>(256);
+    for (tag, stream) in streams {
+        let lines = lines.clone();
+        std::thread::spawn(move || {
+            for read in std::io::BufReader::new(stream).split(b'\n') {
+                let Ok(read) = read else { break };
+                // A line is not necessarily UTF-8 — a match inside a file with
+                // an odd encoding — and losing it beats losing the output.
+                if lines.send((tag.clone(), into_text(read))).is_err() {
+                    break; // the caller has had enough
+                }
+            }
+        });
+    }
+    // Only the readers hold a sender now: the channel disconnects when the
+    // last stream ends.
+    drop(lines);
+
+    loop {
+        if should_stop() {
+            return Heard::Enough;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Heard::Overran;
+        }
+        match incoming.recv_timeout((deadline - now).min(poll)) {
+            Ok((tag, read)) => {
+                if !line(tag, read) {
+                    return Heard::Enough;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return Heard::Closed,
+            Err(RecvTimeoutError::Timeout) => continue,
+        }
+    }
 }
 
 /// True if the command exits with code 0. For closed questions
@@ -716,6 +766,89 @@ mod tests {
             elapsed < LINGER + Duration::from_secs(3),
             "the wait took {elapsed:?}: it waited for the daemon"
         );
+    }
+
+    /// Both outputs of a process, tagged `true` for stderr.
+    type Streams = Vec<(bool, Box<dyn Read + Send>)>;
+
+    /// Spawns `sh -c line` with both outputs piped, and hands them over tagged.
+    fn streams_of(line: &str) -> (std::process::Child, Streams) {
+        let mut child = Command::new("sh")
+            .args(["-c", line])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let streams: Streams = vec![(false, Box::new(stdout)), (true, Box::new(stderr))];
+        (child, streams)
+    }
+
+    /// Each line arrives with the stream it came from, whole, and the end of
+    /// both streams is the end of the following.
+    #[test]
+    fn followed_lines_say_which_stream_they_came_from() {
+        let (mut child, streams) = streams_of("echo out; echo err >&2; printf 'caf\\351'");
+        let mut heard = Vec::new();
+        let end = follow_lines(
+            streams,
+            Instant::now() + TIMEOUT,
+            TIMEOUT,
+            || false,
+            |is_err, line| {
+                heard.push((is_err, line));
+                true
+            },
+        );
+        assert_eq!(end, Heard::Closed);
+        heard.sort();
+        assert_eq!(
+            heard,
+            [
+                (false, "caf\u{fffd}".to_string()),
+                (false, "out".to_string()),
+                (true, "err".to_string())
+            ]
+        );
+        let _ = child.wait();
+    }
+
+    /// A silent process still hears the stop, at the next poll — and the
+    /// ceiling, when nothing stops it.
+    #[test]
+    fn a_silent_process_hears_the_stop_and_the_ceiling() {
+        let (mut child, streams) = streams_of("sleep 30");
+        let started = Instant::now();
+        let mut polls = 0;
+        let end = follow_lines(
+            streams,
+            started + TIMEOUT,
+            Duration::from_millis(20),
+            || {
+                polls += 1;
+                polls > 3
+            },
+            |_, _| true,
+        );
+        assert_eq!(end, Heard::Enough);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let (mut child, streams) = streams_of("sleep 30");
+        let started = Instant::now();
+        let end = follow_lines(
+            streams,
+            started + Duration::from_millis(200),
+            TIMEOUT,
+            || false,
+            |_, _| true,
+        );
+        assert_eq!(end, Heard::Overran);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// Valid UTF-8 is taken as it is; anything else is replaced, not lost.
