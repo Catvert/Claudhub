@@ -175,11 +175,7 @@ fn cap(message: &str) -> String {
 
 /// Where the hooks write: `$HOME/.claudhub/agents`.
 pub fn folder() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))?;
-    Some(home.join(".claudhub").join("agents"))
+    Some(crate::home::home()?.join(".claudhub").join("agents"))
 }
 
 /// A file nobody has written to for this long is a session long gone.

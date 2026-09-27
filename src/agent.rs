@@ -506,10 +506,7 @@ pub fn parse_claude_process(text: &str) -> Option<ClaudeProcess> {
 /// `$CLAUDE_CONFIG_DIR/sessions` when that is set, as Claude reads it. Empty
 /// when there is no such folder: an older Claude, or none at all.
 pub fn claude_processes() -> Vec<ClaudeProcess> {
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
-    let Some(dir) = root.map(|root| root.join("sessions")) else {
+    let Some(dir) = crate::home::claude_config().map(|root| root.join("sessions")) else {
         return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(&dir) else {

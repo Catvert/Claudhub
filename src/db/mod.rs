@@ -699,19 +699,10 @@ pub fn count(rows: u64) -> String {
     }
 }
 
-/// A SQLite file's path, `~/` expanded.
-///
-/// A path typed into a form is written `~/dev/base.sqlite` — that is how it is
-/// given to a shell — and passing it as it is to `std::fs` would look for a
-/// folder named `~` in the current directory.
+/// A SQLite file's path, `~/` expanded (`home::expand`) — left as typed when
+/// there is no home to expand it to.
 pub(crate) fn expand(path: &str) -> std::path::PathBuf {
-    match path.trim().strip_prefix("~/") {
-        Some(rest) => match directories::UserDirs::new() {
-            Some(dirs) => dirs.home_dir().join(rest),
-            None => std::path::PathBuf::from(path.trim()),
-        },
-        None => std::path::PathBuf::from(path.trim()),
-    }
+    crate::home::expand(path).unwrap_or_else(|| std::path::PathBuf::from(path.trim()))
 }
 
 #[cfg(test)]

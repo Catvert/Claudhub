@@ -55,9 +55,7 @@ pub fn version_of(text: &str) -> Option<u32> {
 fn file(scope: Scope, worktree: &Path) -> Option<PathBuf> {
     let root = match scope {
         Scope::Repo => worktree.join(".claude"),
-        Scope::User => std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?,
+        Scope::User => crate::home::claude_config()?,
     };
     Some(root.join("skills").join("claudhub").join("SKILL.md"))
 }

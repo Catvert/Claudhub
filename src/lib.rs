@@ -28,6 +28,7 @@ pub mod db;
 pub mod files;
 pub mod git;
 pub mod github;
+pub mod home;
 pub mod instance;
 pub mod json;
 pub mod just;
