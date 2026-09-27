@@ -1018,9 +1018,10 @@ impl ClaudhubApp {
     /// new one on it.
     ///
     /// A new one goes **the road every creation goes** —
-    /// `worktree_from_branch`, so `wt`'s questions, copies, ports and
-    /// `post_new` when the project has a `wt.toml`, the bare `git worktree
-    /// add` otherwise — once the branch is here: the fetch comes first, in the
+    /// `worktree_from_branch`, the creation dialog on its « existing branch »
+    /// tab, then `wt`'s questions, copies, ports and `post_new` when the
+    /// project has a `wt.toml`, the bare `git worktree add` otherwise — once
+    /// the branch is here: the fetch comes first, in the
     /// main checkout, and never as `gh pr checkout`, which would switch that
     /// checkout's branch. A fork's branch is not on `origin`; its
     /// `refs/pull/<n>/head` is, fetched into `pr/<n>`.

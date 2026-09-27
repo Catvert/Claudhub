@@ -104,10 +104,15 @@ impl WtTarget {
 /// page opens before the branches have been re-read, and a list frozen at
 /// construction would miss the one just fetched.
 pub struct Setup {
-    /// The branch chosen; `None` is "a new branch".
+    /// « Existing branch » and not « New branch »: the page's two tabs.
+    pub existing: bool,
+    /// The existing branch picked.
     pub branch: Option<String>,
-    /// Where a new branch starts; `None` is the main repository's HEAD.
+    /// Where a new branch starts, once chosen; before, the repository's
+    /// integration branch — see [`ClaudhubApp::setup_base`].
     pub from: Option<String>,
+    /// The list of start points unfolded under its selector.
+    pub base_open: bool,
     /// The folder name. A field and not a string, for the reason every field of
     /// this dialog is one: recreated per frame, it would lose the caret on the
     /// first keystroke.
@@ -240,9 +245,6 @@ fn action_of(op: wt::Op) -> Action {
         wt::Op::Down => Action::WtDown,
     }
 }
-
-/// The row of the branch list that stands for "a new branch".
-const NEW_BRANCH: &str = "";
 
 /// What an entry does when it is chosen.
 ///
@@ -401,28 +403,6 @@ impl ClaudhubApp {
     /// [`Self::setup_worktree`], which asks the rest first. Without a project,
     /// we fall back to the bare git add: a repository with no configuration
     /// must still be able to gain a worktree.
-    pub(super) fn start_worktree(
-        &mut self,
-        main: PathBuf,
-        slug: String,
-        from: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let slug = slug.trim().to_string();
-        if slug.is_empty() {
-            return;
-        }
-        if self.wt_project(&main).is_none() {
-            self.add_worktree_without_wt(&main, &slug, from.as_deref(), cx);
-            return;
-        }
-        let target = WtTarget::Create { branch: None, from };
-        self.creation = Some(WtPrompt::new(main, slug, target, Stage::Questions));
-        self.open_creation_dialog(window, cx);
-        self.after_setup(window, cx);
-    }
-
     /// Opens the creation dialog on its first page: the branch, where it
     /// starts, the folder — what `wt`'s own interface asks before the project's
     /// questions, and what Claudhub used to decide alone, always a new
@@ -450,8 +430,10 @@ impl ClaudhubApp {
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("worktree-filter-branches")))
         };
         let setup = Setup {
+            existing: branch.is_some(),
             branch,
             from: None,
+            base_open: false,
             slug: slug.clone(),
             branch_filter: filter(cx),
             base_filter: filter(cx),
@@ -475,14 +457,25 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// The first page is answered: the folder is checked, and the project's
+    /// The first page is answered: the name is checked, and the project's
     /// questions come next — or the creation itself, when it asks none.
-    fn submit_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Without a `wt.toml` the creation is the bare git add, and the dialog
+    /// closes: returns whether it does.
+    fn submit_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(main) = self.creation.as_ref().map(|creation| creation.main.clone()) else {
+            return true;
+        };
+        let base = self.setup_base(&main);
+        let has_project = self.wt_project(&main).is_some();
+        let branches: Vec<crate::git::Branch> = self
+            .repo_of(&main)
+            .map(|repo| repo.branches.clone())
+            .unwrap_or_default();
         let Some(creation) = self.creation.as_mut() else {
-            return;
+            return true;
         };
         let Stage::Setup(setup) = &mut creation.stage else {
-            return;
+            return false;
         };
         let slug = setup.slug.read(cx).value().trim().to_string();
         // Said in the dialog and not in a balloon: the field is right there,
@@ -491,19 +484,58 @@ impl ClaudhubApp {
         if !wt::slug_is_valid(&slug) {
             setup.error = Some(tr!("worktree-slug-invalid"));
             cx.notify();
-            return;
+            return false;
+        }
+        if setup.existing && setup.branch.is_none() {
+            setup.error = Some(tr!("worktree-setup-pick"));
+            cx.notify();
+            return false;
+        }
+        let branch = setup.branch.clone().filter(|_| setup.existing);
+        let from = (!setup.existing)
+            .then(|| setup.from.clone().or(base))
+            .flatten();
+        if !has_project {
+            let planned = plan_creation(
+                &main,
+                None,
+                &slug,
+                branch.as_deref(),
+                from.as_deref(),
+                &branches,
+            );
+            self.git.send(Cmd::AddWorktree {
+                main,
+                path: planned.folder,
+                branch: planned.branch,
+                from: planned.from,
+            });
+            self.creation = None;
+            cx.notify();
+            return true;
         }
         creation.slug = slug;
-        creation.target = WtTarget::Create {
-            branch: setup.branch.clone(),
-            from: setup.from.clone(),
-        };
+        creation.target = WtTarget::Create { branch, from };
         creation.stage = Stage::Questions;
-        // The slug field dies with this page, and the focus with it — see
+        // The name field dies with this page, and the focus with it — see
         // `wt_questions_arrived`. Taken back at once: the waiting page has no
         // field, and Escape must already reach the dialog.
         window.focus_dialog(cx);
         self.after_setup(window, cx);
+        false
+    }
+
+    /// Where a new worktree starts unless told otherwise: the repository's
+    /// integration branch, and without one the branch its main checkout
+    /// holds.
+    fn setup_base(&self, main: &Path) -> Option<String> {
+        let repo = self.repo_of(main)?;
+        repo.integration.clone().or_else(|| {
+            repo.branches
+                .iter()
+                .find(|branch| branch.is_head_in(main))
+                .map(|branch| branch.name.clone())
+        })
     }
 
     /// After the folder is known: the project's questions, if it asks any, or
@@ -535,26 +567,21 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Chooses the branch of the first page, and suggests its folder.
+    /// Chooses the existing branch, and suggests its name.
     ///
     /// The suggestion **replaces** what the field holds: that is what a
     /// suggestion is, and the field stays editable afterwards. A branch already
     /// checked out elsewhere cannot be chosen — git refuses two checkouts of
     /// one branch, and the row says so instead of letting the creation fail.
-    fn choose_setup_branch(
-        &mut self,
-        branch: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn choose_setup_branch(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(creation) = self.creation.as_mut() else {
             return;
         };
         let Stage::Setup(setup) = &mut creation.stage else {
             return;
         };
-        let suggested = branch.as_deref().map(wt::suggest_slug).unwrap_or_default();
-        setup.branch = branch;
+        let suggested = wt::suggest_slug(&branch);
+        setup.branch = Some(branch);
         setup.error = None;
         setup
             .slug
@@ -562,12 +589,27 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Chooses where a new branch starts, and folds the list away.
     fn choose_setup_base(&mut self, from: String, cx: &mut Context<Self>) {
-        let Some(creation) = self.creation.as_mut() else {
-            return;
-        };
-        if let Stage::Setup(setup) = &mut creation.stage {
+        if let Some(Stage::Setup(setup)) = self.creation.as_mut().map(|c| &mut c.stage) {
             setup.from = Some(from);
+            setup.base_open = false;
+            cx.notify();
+        }
+    }
+
+    /// Goes to the page's other tab: a new branch, or an existing one.
+    fn set_setup_existing(&mut self, existing: bool, cx: &mut Context<Self>) {
+        if let Some(Stage::Setup(setup)) = self.creation.as_mut().map(|c| &mut c.stage) {
+            setup.existing = existing;
+            setup.error = None;
+            cx.notify();
+        }
+    }
+
+    fn toggle_setup_base(&mut self, cx: &mut Context<Self>) {
+        if let Some(Stage::Setup(setup)) = self.creation.as_mut().map(|c| &mut c.stage) {
+            setup.base_open = !setup.base_open;
             cx.notify();
         }
     }
@@ -634,31 +676,6 @@ impl ClaudhubApp {
     /// The worktree is created beside the repository, in `<repo>-wt/<name>`:
     /// that is `wt`'s convention, so both tools see the same folders the day the
     /// project gains a configuration.
-    fn add_worktree_without_wt(
-        &mut self,
-        main: &Path,
-        slug: &str,
-        from: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
-        let repo_name = main
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "repo".into());
-        let root = main
-            .parent()
-            .map(|p| crate::wslpath::join(p, format!("{repo_name}-wt")))
-            .unwrap_or_else(|| PathBuf::from(format!("{repo_name}-wt")));
-        self.git.send(Cmd::AddWorktree {
-            main: main.to_path_buf(),
-            path: crate::wslpath::join(&root, slug),
-            branch: format!("wt/{slug}"),
-            from: from.map(str::to_string),
-        });
-        cx.notify();
-    }
-
-    /// Receives the project's questions and prepares their fields.
     pub(super) fn wt_questions_arrived(
         &mut self,
         round: WtRound,
@@ -997,10 +1014,7 @@ impl ClaudhubApp {
             return true;
         };
         match &creation.stage {
-            Stage::Setup(_) => {
-                self.submit_setup(window, cx);
-                false
-            }
+            Stage::Setup(_) => self.submit_setup(window, cx),
             Stage::Questions => {
                 // A page that is still being fetched has nothing to confirm:
                 // Enter would send the previous answers a second time.
@@ -1087,7 +1101,14 @@ impl ClaudhubApp {
             },
             (_, WtTarget::Up { .. }) => tr!("worktree-up-title"),
             (_, WtTarget::Task { task, .. }) => SharedString::from(task.clone()),
-            (_, WtTarget::Create { .. }) => tr!("worktree-new-title"),
+            (_, WtTarget::Create { .. }) => {
+                let repo = creation
+                    .main
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                tr!("worktree-new-title-in", { repo: repo })
+            }
         }
     }
 
@@ -1119,13 +1140,13 @@ impl ClaudhubApp {
                     .label(tr!("worktree-console-hide"))
                     .on_click(cancel)
                     .into_any_element()],
-                _ => vec![
+                stage => vec![
                     Button::new("dialog-cancel")
                         .label(tr!("dialog-cancel"))
                         .on_click(cancel)
                         .into_any_element(),
                     Button::new("dialog-ok")
-                        .label(tr!("dialog-ok"))
+                        .label(self.creation_confirm_label(stage))
                         .primary()
                         .on_click(confirm)
                         .into_any_element(),
@@ -1137,6 +1158,23 @@ impl ClaudhubApp {
             .pt_2()
             .children(buttons)
             .into_any_element()
+    }
+
+    /// What the dialog's OK says it does: « Next » on a first page the
+    /// project's questions follow, « Create » where the creation comes next,
+    /// « OK » for the other gestures' questions.
+    fn creation_confirm_label(&self, stage: Option<&Stage>) -> SharedString {
+        let Some(creation) = self.creation.as_ref() else {
+            return tr!("dialog-ok");
+        };
+        let asks = self
+            .wt_project(&creation.main)
+            .is_some_and(|project| project.has_new_prompts);
+        match (stage, &creation.target) {
+            (Some(Stage::Setup(_)), _) if asks => tr!("worktree-next"),
+            (Some(Stage::Setup(_)), _) | (_, WtTarget::Create { .. }) => tr!("worktree-create"),
+            _ => tr!("dialog-ok"),
+        }
     }
 
     fn render_creation_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1216,7 +1254,14 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The first page: the branch, where it starts, the folder.
+    /// The first page: a new branch or an existing one — two tabs —, the
+    /// name first, where a new branch starts in one selector, and a line
+    /// that says exactly what will be made.
+    ///
+    /// It was three stacked sections, two of them the same list of every
+    /// branch — « Branch », whose first row was « new », then « Starts
+    /// from » —, and the name last, under « Folder », with nothing saying it
+    /// named the branch too, nor what the branch would be called.
     fn render_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(creation) = self.creation.as_ref() else {
             return div().into_any_element();
@@ -1224,76 +1269,183 @@ impl ClaudhubApp {
         let Stage::Setup(setup) = &creation.stage else {
             return div().into_any_element();
         };
+        let theme = cx.theme().clone();
         // Borrowed, not copied: this runs on every frame of the dialog, and a
         // repository has a hundred branches carrying a subject each.
         let branches: &[crate::git::Branch] = self
-            .repos
-            .iter()
-            .find(|repo| repo.main == creation.main)
+            .repo_of(&creation.main)
             .map(|repo| repo.branches.as_slice())
             .unwrap_or_default();
-        // The default start point: the branch the **main** worktree holds —
-        // what git's HEAD mark used to say, the list being read there.
         let head = branches
             .iter()
             .find(|branch| branch.is_head_in(&creation.main))
             .map(|branch| branch.name.clone());
-        let danger = cx.theme().danger;
+        let base = setup
+            .from
+            .clone()
+            .or_else(|| self.setup_base(&creation.main));
+        let slug = setup.slug.read(cx).value().trim().to_string();
 
-        let mut page = v_flex().gap_3();
+        let tab = |id: &'static str, label: SharedString, on: bool, existing: bool| {
+            Button::new(id)
+                .small()
+                .label(label)
+                .when(on, |button| button.primary())
+                .when(!on, |button| button.ghost())
+                .on_click(cx.listener(move |this, _, _, cx| this.set_setup_existing(existing, cx)))
+        };
+        let tabs = h_flex()
+            .gap_1()
+            .child(tab(
+                "wt-setup-new",
+                tr!("worktree-setup-mode-new"),
+                !setup.existing,
+                false,
+            ))
+            .child(tab(
+                "wt-setup-existing",
+                tr!("worktree-setup-mode-existing"),
+                setup.existing,
+                true,
+            ));
+        let label = |text: SharedString| div().text_sm().font_semibold().child(text);
+        let name = v_flex()
+            .gap_1()
+            .child(label(tr!("worktree-setup-name")))
+            .child(Input::new(&setup.slug).small())
+            .child(match setup.error.clone() {
+                Some(error) => div().text_xs().text_color(theme.danger).child(error),
+                None => div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(tr!("worktree-setup-name-hint")),
+            });
 
-        // Which branch. "New" first, then the list the top bar's picker shows,
-        // a branch already checked out greyed and saying where.
-        page = page.child(
-            v_flex()
-                .gap_1()
-                .child(div().text_sm().child(tr!("worktree-setup-branch")))
-                .child(self.render_branch_list(
-                    "wt-setup-branch",
-                    branches,
-                    &setup.branch_filter,
-                    Some(setup.branch.as_deref().unwrap_or(NEW_BRANCH)),
-                    true,
-                    head.as_deref(),
-                    |this, name, window, cx| {
-                        let branch = (name != NEW_BRANCH).then(|| name.to_string());
-                        this.choose_setup_branch(branch, window, cx);
-                    },
-                    cx,
-                )),
-        );
-
-        // Where a new branch starts: every branch, HEAD first chosen. Only for
-        // a new one — an existing branch starts where it is.
-        if setup.branch.is_none() && !branches.is_empty() {
-            let selected = setup.from.clone().or_else(|| head.clone());
-            page = page.child(
+        let mut page = v_flex().gap_4().child(tabs);
+        if setup.existing {
+            page = page
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(label(tr!("worktree-setup-branch")))
+                        .child(self.render_branch_list(
+                            "wt-setup-branch",
+                            branches,
+                            &setup.branch_filter,
+                            setup.branch.as_deref(),
+                            true,
+                            head.as_deref(),
+                            |this, name, window, cx| {
+                                this.choose_setup_branch(name.to_string(), window, cx)
+                            },
+                            cx,
+                        )),
+                )
+                .child(name);
+        } else {
+            let selector = Button::new("wt-setup-base")
+                .small()
+                .outline()
+                .label(SharedString::from(
+                    base.clone()
+                        .unwrap_or_else(|| tr!("worktree-setup-head").to_string()),
+                ))
+                .icon(icon(if setup.base_open {
+                    "chevron-up"
+                } else {
+                    "chevron-down"
+                }))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_setup_base(cx)));
+            page = page.child(name).child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_sm().child(tr!("worktree-setup-base")))
-                    .child(self.render_branch_list(
-                        "wt-setup-base",
-                        branches,
-                        &setup.base_filter,
-                        selected.as_deref(),
-                        false,
-                        head.as_deref(),
-                        |this, name, _window, cx| this.choose_setup_base(name.to_string(), cx),
-                        cx,
-                    )),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(label(tr!("worktree-setup-base")))
+                            .child(selector),
+                    )
+                    .when(setup.base_open, |el| {
+                        el.child(self.render_branch_list(
+                            "wt-setup-base-list",
+                            branches,
+                            &setup.base_filter,
+                            base.as_deref(),
+                            false,
+                            head.as_deref(),
+                            |this, name, _window, cx| this.choose_setup_base(name.to_string(), cx),
+                            cx,
+                        ))
+                    }),
             );
         }
 
-        page = page.child(
+        // What will be made, before it is: the branch and where it starts,
+        // and the folder — the two things the project decided in silence.
+        let preview = if slug.is_empty() || (setup.existing && setup.branch.is_none()) {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(if setup.existing && setup.branch.is_none() {
+                    tr!("worktree-setup-pick")
+                } else {
+                    tr!("worktree-setup-preview-empty")
+                })
+                .into_any_element()
+        } else {
+            let project = self
+                .wt_project(&creation.main)
+                .map(|project| (project.root.as_path(), project.branch_template.as_str()));
+            let planned = plan_creation(
+                &creation.main,
+                project,
+                &slug,
+                setup.branch.as_deref().filter(|_| setup.existing),
+                base.as_deref().filter(|_| !setup.existing),
+                branches,
+            );
+            let branch_line = match &planned.from {
+                Some(from) => {
+                    tr!("worktree-setup-preview-from", { branch: planned.branch.clone(), from: from.clone() })
+                }
+                None => tr!("worktree-setup-preview-branch", { branch: planned.branch.clone() }),
+            };
             v_flex()
-                .gap_1()
-                .child(div().text_sm().child(tr!("worktree-setup-slug")))
-                .child(Input::new(&setup.slug).small())
-                .when_some(setup.error.clone(), |el, error| {
-                    el.child(div().text_xs().text_color(danger).child(error))
-                }),
-        );
-        page.into_any_element()
+                .gap_0p5()
+                .text_xs()
+                .font_family(theme.mono_font_family.clone())
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .child(
+                            icon("git-branch")
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(div().min_w_0().truncate().child(branch_line)),
+                )
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .child(icon("folder").xsmall().text_color(theme.muted_foreground))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(planned.folder.display().to_string())),
+                        ),
+                )
+                .into_any_element()
+        };
+        page.child(
+            div()
+                .p_2()
+                .rounded(theme.radius)
+                .bg(theme.secondary)
+                .child(preview),
+        )
+        .into_any_element()
     }
 
     /// A list of branches to pick one from, with a search field past
@@ -1301,9 +1453,9 @@ impl ClaudhubApp {
     /// choice, for the same reason: a repository has a hundred branches, and a
     /// hundred rows with no way to narrow them is a list one scrolls past.
     ///
-    /// `with_new` puts "a new branch" first and greys the branches already
-    /// checked out; a base list has neither — a branch checked out elsewhere is
-    /// a perfectly good start point.
+    /// `grey_taken` greys the branches already checked out — they cannot take
+    /// a second checkout —; a list of start points does not, a branch checked
+    /// out elsewhere being a perfectly good start point.
     #[allow(clippy::too_many_arguments)]
     fn render_branch_list(
         &self,
@@ -1311,7 +1463,7 @@ impl ClaudhubApp {
         branches: &[crate::git::Branch],
         filter: &Entity<InputState>,
         selected: Option<&str>,
-        with_new: bool,
+        grey_taken: bool,
         head: Option<&str>,
         choose: impl Fn(&mut Self, &str, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -1369,16 +1521,6 @@ impl ClaudhubApp {
                 )
                 .into_any_element()
         };
-        if with_new {
-            rows.push(row(
-                0,
-                NEW_BRANCH.to_string(),
-                tr!("worktree-setup-new-branch"),
-                tr!("worktree-setup-new-branch-hint"),
-                false,
-                cx,
-            ));
-        }
         // No worktree is "here" in this dialog: a branch checked out anywhere
         // — the main's included — cannot take a second checkout, and `None`
         // is what makes `taken()` say so for all of them.
@@ -1403,7 +1545,7 @@ impl ClaudhubApp {
                         .into_any_element(),
                 ),
                 crate::ui::branches::Row::Branch(branch) => {
-                    let taken = with_new && branch.taken();
+                    let taken = grey_taken && branch.taken();
                     let detail = match (&branch.taken_by, head == Some(branch.name.as_str())) {
                         (Some(path), _) if taken => tr!("worktree-setup-taken", {
                             path: path.display().to_string()
@@ -2705,27 +2847,10 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A project asks what `wt`'s own interface asks — the branch, its
-        // start, the folder, then its questions. Without one there is only a
-        // name to ask for, and the bare git add is enough.
-        if self.wt_project(&main).is_some() {
-            self.setup_worktree(main, None, window, cx);
-            return;
-        }
-        self.open_text_dialog(
-            tr!("worktree-new-title"),
-            tr!("worktree-new-placeholder"),
-            window,
-            cx,
-            // The name typed in, then what the project asks for: its
-            // `[[prompt]]`s become a dialog, its copies and its ports are done
-            // by `wt`. Without a `wt.toml`, the bare git add is enough — a
-            // repository with no configuration must still be able to gain a
-            // worktree.
-            move |this, name, window, cx| {
-                this.start_worktree(main.clone(), name, None, window, cx);
-            },
-        );
+        // One page for every repository: the name, the branch, where it
+        // starts. A project's questions follow it; without one, the bare git
+        // add — which used to be a name alone, off HEAD.
+        self.setup_worktree(main, None, window, cx);
     }
 
     pub(super) fn confirm_remove_worktree(
@@ -2804,9 +2929,121 @@ fn local_base<'a>(base: &'a str, branches: &[crate::git::Branch]) -> &'a str {
     base.strip_prefix("origin/").unwrap_or(base)
 }
 
+/// What a creation will make, as its first page says before it does: the
+/// branch the worktree holds, its folder, and where a new branch starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Planned {
+    pub branch: String,
+    pub folder: PathBuf,
+    /// Where the branch starts, when it is new — or, for a remote branch
+    /// with no local twin, the remote one it is taken from.
+    pub from: Option<String>,
+}
+
+/// What a creation will make — see [`Planned`].
+///
+/// `project` is the `wt.toml`'s root and branch template, where it has one;
+/// without, the folder is `<repo>-wt/<slug>` beside the repository and the
+/// branch `wt/<slug>`, what the bare git add has always made. `existing` is
+/// the branch picked, when one is: it keeps its name, the remote prefix
+/// taken off, and a remote one with no local twin starts from the remote —
+/// `git worktree add -b` without a start point would start from HEAD, and
+/// the worktree held the main checkout's commits under the remote's name.
+pub(super) fn plan_creation(
+    main: &Path,
+    project: Option<(&Path, &str)>,
+    slug: &str,
+    existing: Option<&str>,
+    from: Option<&str>,
+    branches: &[crate::git::Branch],
+) -> Planned {
+    let folder = match project {
+        Some((root, _)) => crate::wslpath::join(root, slug),
+        None => {
+            let name = main
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "repo".into());
+            let root = main
+                .parent()
+                .map(|p| crate::wslpath::join(p, format!("{name}-wt")))
+                .unwrap_or_else(|| PathBuf::from(format!("{name}-wt")));
+            crate::wslpath::join(&root, slug)
+        }
+    };
+    match existing {
+        Some(existing) => {
+            let local = local_base(existing, branches).to_string();
+            let has_local = branches
+                .iter()
+                .any(|b| b.kind == crate::git::BranchKind::Local && b.name == local);
+            Planned {
+                from: (existing != local && !has_local).then(|| existing.to_string()),
+                branch: local,
+                folder,
+            }
+        }
+        None => Planned {
+            branch: match project {
+                Some((_, template)) => template.replace("{{slug}}", slug),
+                None => format!("wt/{slug}"),
+            },
+            folder,
+            from: from.map(str::to_string),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new branch takes the project's template and starts where it was
+    /// told; without a project, `wt/<slug>` beside the repository.
+    #[test]
+    fn a_creation_says_what_it_will_make() {
+        use crate::git::BranchKind::{Local, Remote};
+        let branches = [branch("dev", Local), branch("origin/feat/pdf", Remote)];
+        let main = Path::new("/p/acetics");
+        let project = Some((Path::new("/p/acetics-wt"), "feat/{{slug}}"));
+        assert_eq!(
+            plan_creation(main, project, "fix-login", None, Some("dev"), &branches),
+            Planned {
+                branch: "feat/fix-login".into(),
+                folder: PathBuf::from("/p/acetics-wt/fix-login"),
+                from: Some("dev".into()),
+            }
+        );
+        assert_eq!(
+            plan_creation(main, None, "fix-login", None, None, &branches),
+            Planned {
+                branch: "wt/fix-login".into(),
+                folder: PathBuf::from("/p/acetics-wt/fix-login"),
+                from: None,
+            }
+        );
+    }
+
+    /// An existing branch keeps its name; a remote one with no local twin
+    /// starts from the remote, a local one from where it is.
+    #[test]
+    fn an_existing_branch_keeps_its_name() {
+        use crate::git::BranchKind::{Local, Remote};
+        let branches = [branch("dev", Local), branch("origin/feat/pdf", Remote)];
+        let main = Path::new("/p/acetics");
+        let remote = plan_creation(
+            main,
+            None,
+            "feat-pdf",
+            Some("origin/feat/pdf"),
+            Some("dev"),
+            &branches,
+        );
+        assert_eq!(remote.branch, "feat/pdf");
+        assert_eq!(remote.from.as_deref(), Some("origin/feat/pdf"));
+        let local = plan_creation(main, None, "dev", Some("dev"), Some("main"), &branches);
+        assert_eq!((local.branch.as_str(), local.from), ("dev", None));
+    }
 
     fn branch(name: &str, kind: crate::git::BranchKind) -> crate::git::Branch {
         crate::git::Branch {

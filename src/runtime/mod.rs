@@ -1633,7 +1633,12 @@ fn in_lanes<T: Send>(
 }
 
 fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
-    Evt::Branches { main, branches }
+    let integration = branch::default_base(&main);
+    Evt::Branches {
+        main,
+        branches,
+        integration,
+    }
 }
 
 /// Deletes a branch and re-reads the list: the panel shows it, and nothing else

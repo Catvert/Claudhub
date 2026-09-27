@@ -1184,6 +1184,9 @@ pub enum Evt {
     Branches {
         main: PathBuf,
         branches: Vec<Branch>,
+        /// The repository's integration branch — `branch::default_base` —,
+        /// where a new worktree starts by default.
+        integration: Option<String>,
     },
     /// The base guessed for a checkout, or `None` when nothing can be compared
     /// — a repository with one branch, or the integration branch checked out

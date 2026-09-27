@@ -1380,8 +1380,8 @@ pas un rang : finie, elle quitte la liste de ce qui tourne au moment même où
 on la guettait, et la lecture de ses jobs dit où elle en est.
 
 **Une PR s'ouvre dans un worktree par la route de toute création**
-(`worktree_from_branch` : `wt` s'il y a un `wt.toml`, `git worktree add`
-sinon), après un `fetch` explicite dans le checkout principal — jamais
+(`worktree_from_branch` : le dialogue de création sur sa branche, puis `wt`
+s'il y a un `wt.toml`, `git worktree add` sinon), après un `fetch` explicite dans le checkout principal — jamais
 `gh pr checkout`, qui changerait sa branche. La PR d'un fork n'a pas de
 branche sur `origin` : `refs/pull/<n>/head` est récupérée dans `pr/<n>`. Le
 worktree venu, la fenêtre y va et compare contre `origin/<base>`. Ses fils de

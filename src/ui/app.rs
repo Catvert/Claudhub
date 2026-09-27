@@ -2459,7 +2459,11 @@ impl ClaudhubApp {
                 graph,
                 patches,
             } => self.history_arrived(worktree, range, commits, graph, patches, cx),
-            Evt::Branches { main, branches } => self.branches_arrived(main, branches, window, cx),
+            Evt::Branches {
+                main,
+                branches,
+                integration,
+            } => self.branches_arrived(main, branches, integration, window, cx),
             Evt::BaseGuessed { worktree, base } => self.base_guessed(worktree, base, window, cx),
             Evt::ReviewMarked { worktree, point } => {
                 self.review_marked(worktree, point, window, cx)
@@ -3171,11 +3175,13 @@ impl ClaudhubApp {
         &mut self,
         main: PathBuf,
         branches: Vec<Branch>,
+        integration: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
             repo.branches = branches;
+            repo.integration = integration;
         }
         self.refresh_base_choices(window, cx);
     }

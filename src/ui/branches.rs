@@ -464,17 +464,11 @@ impl ClaudhubApp {
         self.travel_to_panel(crate::ui::panels::BranchPanel::NAME, window, cx);
     }
 
-    /// Checks an existing branch out into a fresh worktree.
-    ///
-    /// **Through `wt` when the project has a `wt.toml`**: the creation dialog
-    /// opens on the branch, the folder suggested, and the project's copies,
-    /// ports, `post_new` and questions follow as for any creation. This gesture
-    /// used to go straight to git, and the worktree it made — under the
-    /// project's root, so taken for one `wt` knew — had none of that, with
-    /// nothing to say so.
-    ///
-    /// Without a project, the bare git add: the folder takes the branch's
-    /// name, slashes becoming dashes — `origin/feat/x` cannot be a folder name.
+    /// Checks an existing branch out into a fresh worktree: the creation
+    /// dialog, on its « existing branch » tab with the branch picked and its
+    /// name suggested — with a `wt.toml` or without. The project's copies,
+    /// ports, `post_new` and questions follow as for any creation; without
+    /// one, the bare git add, the folder and the start point shown before.
     pub(super) fn worktree_from_branch(
         &mut self,
         main: PathBuf,
@@ -482,40 +476,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.wt_project(&main).is_some() {
-            self.setup_worktree(main, Some(branch), window, cx);
-            return;
-        }
-        let local = branch
-            .strip_prefix("origin/")
-            .unwrap_or(&branch)
-            .to_string();
-        // A remote branch with no local counterpart **starts from the remote
-        // one**: `git worktree add -b <name>` without a start point starts from
-        // HEAD, and the worktree held the main checkout's commits under the
-        // remote branch's name, with nothing to say so.
-        let has_local = self.repo_of(&main).is_some_and(|repo| {
-            repo.branches
-                .iter()
-                .any(|known| known.kind == BranchKind::Local && known.name == local)
-        });
-        let from = (branch != local && !has_local).then(|| branch.clone());
-        let slug = local.replace('/', "-");
-        let repo_name = main
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "repo".into());
-        let root = main
-            .parent()
-            .map(|p| crate::wslpath::join(p, format!("{repo_name}-wt")))
-            .unwrap_or_else(|| crate::wslpath::join(&main, "worktrees"));
-        self.git.send(Cmd::AddWorktree {
-            main,
-            path: crate::wslpath::join(&root, slug),
-            branch: local,
-            from,
-        });
-        cx.notify();
+        self.setup_worktree(main, Some(branch), window, cx);
     }
 }
 
