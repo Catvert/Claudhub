@@ -1,4 +1,4 @@
-//! Splitting and rebuilding a command line.
+//! Splitting and rebuilding a command line, and quoting one word for a shell.
 //!
 //! Outside `src/ui/` because both ends use it: the settings form writes pieces
 //! and reads them back as one line, and the workers (`files::open_external`,
@@ -97,6 +97,18 @@ pub fn join_command(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String 
         .join(" ")
 }
 
+/// One word for a POSIX shell, between single quotes: nothing is special in
+/// there but the quote itself, which closes, is escaped and reopens (`'\''`).
+///
+/// For a line that goes to `sh -c` whole — a branch name, a pull request's
+/// body, a test filter: one apostrophe left bare, and the rest of the command
+/// is read as something else. `join_command` quotes differently, in double
+/// quotes and only when needed, because its line comes back to
+/// `split_command`, and to the settings form, as much as to a shell.
+pub fn single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +175,20 @@ mod tests {
         assert_eq!(join_command([r#"C:\a "$b""#]), r#""C:\\a \"\$b\"""#);
         // A word with nothing to quote stays bare, `$` and all.
         assert_eq!(join_command(["^Test$"]), "^Test$");
+    }
+
+    /// What `sh -c` reads back is the value, apostrophes and all — and so is
+    /// what `split_command` reads.
+    #[test]
+    fn a_quoted_word_survives_the_shell() {
+        assert_eq!(single_quoted("it's"), r"'it'\''s'");
+        let value = "l'été $HOME `x` \\";
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", single_quoted(value)))
+            .output()
+            .expect("sh runs");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), value);
+        assert_eq!(split_command(&single_quoted(value)), [value]);
     }
 }

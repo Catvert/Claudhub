@@ -1950,7 +1950,7 @@ fn shell_word(part: &str) -> String {
     if quoted != part || !(expands || part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c))) {
         return quoted;
     }
-    crate::text::single_quoted(part)
+    crate::cmdline::single_quoted(part)
 }
 
 /// The arguments that narrow a JS run to `target.path`, **anchored**: neither
