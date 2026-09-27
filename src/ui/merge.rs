@@ -18,6 +18,9 @@
 //! quietly — a chunk taken from the wrong side reads perfectly well — so the
 //! decision lives in front of the view that paints it, and it is tested.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use crate::ui::hunks;
 
 /// Which of the two versions a chunk is taken from.
@@ -54,12 +57,17 @@ impl Kind {
 }
 
 /// One run of lines, in all three versions of it.
+///
+/// The lines are `Arc<str>` and not `String`: the rows share them rather than
+/// copy them, and so does the view, which turns one into a `SharedString` for
+/// nothing — the rows are rebuilt on every keystroke of the chunk editor, and
+/// a `String` there was the whole file copied per letter typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     pub kind: Kind,
-    pub base: Vec<String>,
-    pub ours: Vec<String>,
-    pub theirs: Vec<String>,
+    pub base: Vec<Arc<str>>,
+    pub ours: Vec<Arc<str>>,
+    pub theirs: Vec<Arc<str>>,
     /// For a conflict, the sides picked **in the order they were picked**: an
     /// empty list is a conflict nobody has answered, and two entries are
     /// "both", which is a real answer and a common one — two functions added at
@@ -74,19 +82,21 @@ pub struct Chunk {
     /// **an answer like the others** — a conflict with text in it is settled —
     /// and it is kept per chunk rather than as one buffer over the whole file,
     /// which is what keeps the three columns aligned.
-    pub manual: Option<Vec<String>>,
+    pub manual: Option<Vec<Arc<str>>>,
 }
 
 impl Chunk {
-    /// The lines this chunk contributes to the result, as it stands.
-    pub fn result(&self) -> Vec<String> {
+    /// The lines this chunk contributes to the result, as it stands. Borrowed,
+    /// but for a conflict answered with both sides, which is two runs laid end
+    /// to end.
+    pub fn result(&self) -> Cow<'_, [Arc<str>]> {
         if let Some(manual) = &self.manual {
-            return manual.clone();
+            return Cow::Borrowed(manual);
         }
         match self.kind {
-            Kind::Stable => self.base.clone(),
-            Kind::Ours | Kind::Both => self.ours.clone(),
-            Kind::Theirs => self.theirs.clone(),
+            Kind::Stable => Cow::Borrowed(&self.base),
+            Kind::Ours | Kind::Both => Cow::Borrowed(&self.ours),
+            Kind::Theirs => Cow::Borrowed(&self.theirs),
             // A conflict answers with nothing until it is answered: an empty
             // middle column is what makes an unresolved chunk impossible to
             // walk past, where a middle showing one of the two sides would read
@@ -96,14 +106,32 @@ impl Chunk {
     }
 
     /// The lines of a resolved conflict, in the order the sides were picked.
-    fn picked(&self) -> Vec<String> {
-        self.choice
-            .iter()
-            .flat_map(|side| match side {
-                Side::Ours => self.ours.clone(),
-                Side::Theirs => self.theirs.clone(),
-            })
-            .collect()
+    fn picked(&self) -> Cow<'_, [Arc<str>]> {
+        match self.choice.as_slice() {
+            [] => Cow::Borrowed(&[]),
+            [side] => Cow::Borrowed(self.side(*side)),
+            sides => Cow::Owned(
+                sides
+                    .iter()
+                    .flat_map(|side| self.side(*side).iter().cloned())
+                    .collect(),
+            ),
+        }
+    }
+
+    fn side(&self, side: Side) -> &[Arc<str>] {
+        match side {
+            Side::Ours => &self.ours,
+            Side::Theirs => &self.theirs,
+        }
+    }
+
+    /// How many lines [`Chunk::result`] holds, without laying them out.
+    fn result_len(&self) -> usize {
+        match (&self.manual, self.kind) {
+            (None, Kind::Conflict) => self.choice.iter().map(|s| self.side(*s).len()).sum(),
+            _ => self.result().len(),
+        }
     }
 
     pub fn resolved(&self) -> bool {
@@ -131,7 +159,9 @@ pub struct Merge {
 pub struct Line {
     /// One-based, in the side this line belongs to.
     pub number: usize,
-    pub text: String,
+    /// Shared with the chunk it comes from: a row is a view on the merge, not
+    /// a copy of it.
+    pub text: Arc<str>,
 }
 
 /// One row of the three-column view: what each column shows on that line.
@@ -159,8 +189,8 @@ fn split(text: &str) -> Vec<&str> {
     text.split('\n').collect()
 }
 
-fn owned(lines: &[&str]) -> Vec<String> {
-    lines.iter().map(|line| (*line).to_string()).collect()
+fn owned(lines: &[&str]) -> Vec<Arc<str>> {
+    lines.iter().map(|line| Arc::from(*line)).collect()
 }
 
 /// For each base line, where the other side has it — `None` when that side
@@ -284,9 +314,9 @@ impl Merge {
 
     /// The merged file, exactly as it would be written.
     pub fn text(&self) -> String {
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<Arc<str>> = Vec::new();
         for chunk in &self.chunks {
-            lines.extend(chunk.result());
+            lines.extend_from_slice(&chunk.result());
         }
         lines.join("\n")
     }
@@ -312,7 +342,7 @@ impl Merge {
         chunk.manual = Some(if text.is_empty() {
             Vec::new()
         } else {
-            text.split('\n').map(|line| line.to_string()).collect()
+            text.split('\n').map(Arc::from).collect()
         });
     }
 
@@ -361,62 +391,111 @@ impl Merge {
     /// The three columns, aligned.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        let (mut o, mut t, mut r) = (0usize, 0usize, 0usize);
-        for (index, chunk) in self.chunks.iter().enumerate() {
-            let ours = &chunk.ours_lines();
-            let theirs = &chunk.theirs_lines();
-            let result = chunk.result();
-            // At least one row, always: a chunk with nothing on any side — a
-            // conflict where each deleted a different run, answered with
-            // neither — still has to carry its buttons somewhere.
-            let height = [ours.len(), theirs.len(), result.len()]
-                .into_iter()
-                .max()
-                .unwrap_or(0)
-                .max(1);
-            for line in 0..height {
-                rows.push(Row {
-                    chunk: index,
-                    kind: chunk.kind,
-                    first: line == 0,
-                    edited: chunk.edited(),
-                    ours: ours.get(line).map(|text| numbered(&mut o, text)),
-                    result: result.get(line).map(|text| numbered(&mut r, text)),
-                    theirs: theirs.get(line).map(|text| numbered(&mut t, text)),
-                });
-            }
+        let mut at = Counters::default();
+        for index in 0..self.chunks.len() {
+            self.chunk_rows(index, &mut at, &mut rows);
         }
         rows
     }
+
+    /// Lays out one chunk's rows, numbering on from `at`.
+    fn chunk_rows(&self, index: usize, at: &mut Counters, rows: &mut Vec<Row>) {
+        let Some(chunk) = self.chunks.get(index) else {
+            return;
+        };
+        let ours = chunk.ours_lines();
+        let theirs = chunk.theirs_lines();
+        let result = chunk.result();
+        // At least one row, always: a chunk with nothing on any side — a
+        // conflict where each deleted a different run, answered with
+        // neither — still has to carry its buttons somewhere.
+        let height = [ours.len(), theirs.len(), result.len()]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        for line in 0..height {
+            rows.push(Row {
+                chunk: index,
+                kind: chunk.kind,
+                first: line == 0,
+                edited: chunk.edited(),
+                ours: ours.get(line).map(|text| numbered(&mut at.ours, text)),
+                result: result.get(line).map(|text| numbered(&mut at.result, text)),
+                theirs: theirs.get(line).map(|text| numbered(&mut at.theirs, text)),
+            });
+        }
+    }
+
+    /// Brings `rows` — what [`Merge::rows`] gave before this chunk's outcome
+    /// changed — up to date, touching only that chunk's rows and the outcome's
+    /// numbers below them.
+    ///
+    /// It is what a keystroke in the chunk editor costs: the chunk's own lines,
+    /// and one pass of integer updates further down, where rebuilding every
+    /// row of the file allocated for each of them, letter after letter. Only
+    /// the outcome may have changed — the two sides never move.
+    pub fn resplice(&self, rows: &mut Vec<Row>, chunk: usize) {
+        let start = rows.partition_point(|row| row.chunk < chunk);
+        let end = rows.partition_point(|row| row.chunk <= chunk);
+        let before = rows[start..end]
+            .iter()
+            .filter(|row| row.result.is_some())
+            .count();
+        let mut at = Counters::default();
+        for earlier in &self.chunks[..chunk.min(self.chunks.len())] {
+            at.ours += earlier.ours_lines().len();
+            at.theirs += earlier.theirs_lines().len();
+            at.result += earlier.result_len();
+        }
+        let mut fresh = Vec::new();
+        self.chunk_rows(chunk, &mut at, &mut fresh);
+        let after = self.chunks.get(chunk).map_or(0, Chunk::result_len);
+        let next = start + fresh.len();
+        rows.splice(start..end, fresh);
+        if after != before {
+            for row in &mut rows[next..] {
+                if let Some(line) = row.result.as_mut() {
+                    line.number = line.number + after - before;
+                }
+            }
+        }
+    }
+}
+
+/// Where each column's numbering has got to.
+#[derive(Default)]
+struct Counters {
+    ours: usize,
+    theirs: usize,
+    result: usize,
 }
 
 impl Chunk {
     /// What the left column shows: our version, whatever the chunk's kind. A
     /// stable run is the same text on all three sides, and showing it there is
     /// what lets the eye read across.
-    fn ours_lines(&self) -> Vec<String> {
+    fn ours_lines(&self) -> &[Arc<str>] {
         match self.kind {
-            Kind::Stable => self.base.clone(),
-            Kind::Theirs => self.base.clone(),
-            _ => self.ours.clone(),
+            Kind::Stable | Kind::Theirs => &self.base,
+            _ => &self.ours,
         }
     }
 
-    fn theirs_lines(&self) -> Vec<String> {
+    fn theirs_lines(&self) -> &[Arc<str>] {
         match self.kind {
-            Kind::Stable => self.base.clone(),
-            Kind::Ours => self.base.clone(),
-            Kind::Both => self.ours.clone(),
-            _ => self.theirs.clone(),
+            Kind::Stable | Kind::Ours => &self.base,
+            Kind::Both => &self.ours,
+            _ => &self.theirs,
         }
     }
 }
 
-fn numbered(counter: &mut usize, text: &str) -> Line {
+fn numbered(counter: &mut usize, text: &Arc<str>) -> Line {
     *counter += 1;
     Line {
         number: *counter,
-        text: text.to_string(),
+        text: text.clone(),
     }
 }
 
@@ -637,7 +716,7 @@ mod tests {
         assert_eq!(conflict.len(), 2);
         assert!(conflict[0].first && !conflict[1].first);
         assert!(conflict[1].ours.is_none());
-        assert_eq!(conflict[1].theirs.as_ref().unwrap().text, "T2");
+        assert_eq!(&*conflict[1].theirs.as_ref().unwrap().text, "T2");
         // And every chunk carries exactly one row that holds its buttons.
         for (index, _) in m.chunks.iter().enumerate() {
             assert_eq!(
@@ -657,6 +736,32 @@ mod tests {
         assert_eq!(last.ours.as_ref().unwrap().number, 4);
         let last = rows.iter().rev().find(|r| r.theirs.is_some()).unwrap();
         assert_eq!(last.theirs.as_ref().unwrap().number, 5);
+    }
+
+    #[test]
+    fn resplicing_the_edited_chunk_is_rebuilding_every_row() {
+        // Two conflicts, so that there is something below the one typed into
+        // whose outcome numbers have to follow.
+        let mut m = merge(
+            "keep\na\nb\nc\nd\ne\n",
+            "keep\nA\nb\nC\nd\ne\n",
+            "keep\nX\nb\nY\nd\ne\n",
+        );
+        let conflicts = m.conflict_chunks();
+        m.toggle(conflicts[1], Side::Ours);
+        m.toggle(conflicts[1], Side::Theirs);
+        let at = conflicts[0];
+        let mut rows = m.rows();
+        // Growing, shrinking, emptying: each keystroke starts from the rows
+        // the one before left.
+        for typed in ["one", "one\ntwo\nthree", "", "four\nfive"] {
+            m.set_manual(at, typed);
+            m.resplice(&mut rows, at);
+            assert_eq!(rows, m.rows(), "after typing {typed:?}");
+        }
+        m.clear_manual(at);
+        m.resplice(&mut rows, at);
+        assert_eq!(rows, m.rows());
     }
 
     #[test]

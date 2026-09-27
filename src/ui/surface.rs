@@ -161,7 +161,8 @@ pub(super) struct VimHost {
     /// that the block cursor, the yank flash and a blockwise selection all keep
     /// their colours where they cross one.
     pub matches: gpui_kit::component::input::TextDecorationCollection,
-    /// The pattern and the text the occurrences were found for.
+    /// The pattern and the version of the text (`TextSeen::version`) the
+    /// occurrences were found for.
     ///
     /// `find_all` walks the whole file, which is a keystroke's worth of work and
     /// not a frame's: it is redone when the pattern changes and when the text
@@ -169,11 +170,10 @@ pub(super) struct VimHost {
     /// it moves at every `j`, and the search does not have to be run again to
     /// find out which occurrence one has landed on — that is `matches_lit`.
     ///
-    /// The text itself and not its length: an edit that keeps the length — `r`,
-    /// an undo, a paste over as many bytes — left ranges over the old text,
-    /// which lit the wrong words and could cut a character in two. See
-    /// `matches_stale` for what the comparison costs.
-    pub matches_at: Option<(String, gpui_kit::component::input::Rope)>,
+    /// The text's version and not its length: an edit that keeps the length —
+    /// `r`, an undo, a paste over as many bytes — left ranges over the old
+    /// text, which lit the wrong words and could cut a character in two.
+    pub matches_at: Option<(String, u64)>,
     /// Where the occurrences are, kept from one frame to the next so that a
     /// caret moving over them costs a comparison and not a walk of the file.
     pub matches_found: Vec<std::ops::Range<usize>>,
@@ -224,6 +224,37 @@ pub(super) struct VimHost {
     /// closed. `None` is everything open, which is one past the deepest — the
     /// state `zR` puts the surface back into, and the one it opens in.
     pub fold_level: Option<usize>,
+    /// Raised by every notification of the editor, lowered once the text has
+    /// been looked at again (`ClaudhubApp::text_version`).
+    ///
+    /// A notification and not `InputEvent::Change`, because the latter is not
+    /// sent for everything that changes the text: `set_value` — a file reloaded
+    /// from disk, a field emptied after a commit — and an IME composition in
+    /// progress change it in silence. Every change of the text notifies,
+    /// whatever its door; so do a caret that moves and a blink, which is why a
+    /// raised flag is a question (`same_text`) and not yet an answer.
+    touched: std::rc::Rc<std::cell::Cell<bool>>,
+    _touched: gpui_kit::Subscription,
+    /// The text as last looked at, which is what the flag above is answered
+    /// against.
+    text: Option<TextSeen>,
+}
+
+/// The editor's text as the surface last saw it, and the one copy of it the
+/// harness makes.
+///
+/// A vim keystroke needs the text as a `str`, the block cursor needs it again
+/// at the next frame, and the search's occurrences want it too: three copies of
+/// the whole file per keystroke when each took its own `value()`. One copy per
+/// **version** now, shared by the three, and made only when one of them asks.
+struct TextSeen {
+    /// What the version was read from. A clone shares the editor's tree, so it
+    /// costs no copy, and it is what `same_text` compares against.
+    rope: gpui_kit::component::input::Rope,
+    /// Bumped each time the text is found to have changed.
+    version: u64,
+    /// The copy, made the first time someone asks for it at this version.
+    value: Option<SharedString>,
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +317,11 @@ impl VimHost {
                 state.create_decorations_collection(Vec::new(), cx),
             )
         });
+        let touched = std::rc::Rc::new(std::cell::Cell::new(true));
+        let _touched = {
+            let touched = touched.clone();
+            cx.observe(input, move |_, _| touched.set(true))
+        };
         Self {
             vim: crate::ui::vim::Vim::default(),
             flash,
@@ -302,6 +338,9 @@ impl VimHost {
             search_centred: None,
             pending_reveal: None,
             fold_level: None,
+            touched,
+            _touched,
+            text: None,
         }
     }
 }
@@ -333,15 +372,14 @@ pub(super) fn line_at(text: &gpui_kit::component::input::Rope, offset: usize) ->
 ///
 /// Called at every frame a surface is painted, so the order of the questions
 /// is the cost: a pattern that changed answers at once, and **no pattern at
-/// all** — the common case by far — answers without looking at the text, there
-/// being nothing to find in any of them. Only a lit pattern compares the text,
-/// and that comparison is a walk of the rope in memory; the search it saves
-/// is the same walk plus a copy of the whole text into a `String`. The length
-/// goes first inside it, which is where an edit usually shows.
+/// all** — the common case by far — answers without the text, there being
+/// nothing to find in any of them: `version` is `None` then, the text not
+/// having been looked at. Only a lit pattern compares versions, which is an
+/// integer and not a walk of the file.
 pub(super) fn matches_stale(
-    prev: Option<&(String, gpui_kit::component::input::Rope)>,
+    prev: Option<&(String, u64)>,
     pattern: &str,
-    text: &gpui_kit::component::input::Rope,
+    version: Option<u64>,
 ) -> bool {
     let Some((searched, over)) = prev else {
         return true;
@@ -349,7 +387,35 @@ pub(super) fn matches_stale(
     if searched != pattern {
         return true;
     }
-    !pattern.is_empty() && over != text
+    !pattern.is_empty() && version != Some(*over)
+}
+
+/// Whether two ropes hold the same text — `==`, with a short cut for the case
+/// that asks it most.
+///
+/// It is asked after every notification of an editor, and most of those move
+/// a caret and change nothing: the rope being compared is then a clone of the
+/// editor's, sharing its every leaf, and `==` would still compare the whole
+/// file byte by byte. A chunk found **at the same address** in both is one
+/// leaf that both hold, which cannot have changed under either — a rope
+/// copies a shared leaf before writing to it — and that is a pointer compare.
+/// The first chunk that is not shared hands over to `==`, which is the answer
+/// for everything else.
+pub(super) fn same_text(
+    a: &gpui_kit::component::input::Rope,
+    b: &gpui_kit::component::input::Rope,
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (mut left, mut right) = (a.chunks(), b.chunks());
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if std::ptr::eq(x, y) => {}
+            _ => return a == b,
+        }
+    }
 }
 
 /// How many lines `Ctrl+D` moves by half of, before the surface has been laid
@@ -414,6 +480,62 @@ impl ClaudhubApp {
             Surface::Query(id) => self.console(*id).map(|console| &console.host),
             Surface::Text(field) => self.text_hosts.get(field),
         }
+    }
+
+    /// The version of a surface's text, bumped when it has changed since it was
+    /// last asked.
+    ///
+    /// A frame where the editor has not notified costs a flag and a length; one
+    /// where it has costs `same_text`, which is pointer compares when only the
+    /// caret moved. No copy is made here.
+    fn text_version(
+        &mut self,
+        surface: &Surface,
+        input: &Entity<EditorState>,
+        cx: &App,
+    ) -> Option<u64> {
+        let host = self.surface_host_mut(surface)?;
+        let rope = input.read(cx).text();
+        let touched = host.touched.replace(false);
+        if let Some(seen) = host.text.as_mut() {
+            // The length on top of the flag: it is free, and it catches a
+            // change made earlier in the very cycle whose notification has not
+            // been delivered yet.
+            if seen.rope.len() == rope.len() && !touched {
+                return Some(seen.version);
+            }
+            if same_text(&seen.rope, rope) {
+                // The same text in another tree — an edit and its undo: the
+                // editor's is kept, so that the next question shares leaves.
+                seen.rope = rope.clone();
+                return Some(seen.version);
+            }
+        }
+        let version = host.text.as_ref().map_or(0, |seen| seen.version + 1);
+        host.text = Some(TextSeen {
+            rope: rope.clone(),
+            version,
+            value: None,
+        });
+        Some(version)
+    }
+
+    /// A surface's text as one string, copied once per version of it and
+    /// shared by whoever asks at that version — a vim keystroke, the block
+    /// cursor at the next frame, the search's occurrences.
+    pub(super) fn surface_text(
+        &mut self,
+        surface: &Surface,
+        input: &Entity<EditorState>,
+        cx: &App,
+    ) -> Option<SharedString> {
+        self.text_version(surface, input, cx)?;
+        let seen = self.surface_host_mut(surface)?.text.as_mut()?;
+        Some(
+            seen.value
+                .get_or_insert_with(|| input.read(cx).value())
+                .clone(),
+        )
     }
 
     fn surface_host_mut(&mut self, surface: &Surface) -> Option<&mut VimHost> {
@@ -634,7 +756,10 @@ impl ClaudhubApp {
         let Some(input) = self.surface_input(surface) else {
             return false;
         };
-        let (text, cursor, rows, folds, query) = {
+        let Some(text) = self.surface_text(surface, &input, cx) else {
+            return false;
+        };
+        let (cursor, rows, folds, query) = {
             let state = input.read(cx);
             let rows = state
                 .visible_row_range()
@@ -650,7 +775,6 @@ impl ClaudhubApp {
                 .map(|range| (range.start_line, range.end_line))
                 .collect();
             (
-                state.value(),
                 state.selected_range().start,
                 rows,
                 folds,
@@ -844,11 +968,14 @@ impl ClaudhubApp {
         };
         // A selection that vim did not write is one made with the mouse — or by
         // `Ctrl+A`, or by a shifted arrow the input binds for itself. The text
-        // is read here rather than below so that a drag, which changes the
-        // selection at every frame, copies it once and not twice.
+        // is the surface's shared copy (`surface_text`): a drag, which changes
+        // the selection at every frame, does not change the text, and copies
+        // nothing.
         let mut text = None;
         if on && host.selection_at.as_ref() != Some(&range) {
-            let value = input.read(cx).value();
+            let Some(value) = self.surface_text(surface, &input, cx) else {
+                return;
+            };
             if let Some(host) = self.surface_host_mut(surface) {
                 let was = host.vim.mode();
                 if std::mem::take(&mut host.absorb_selection) {
@@ -880,9 +1007,9 @@ impl ClaudhubApp {
         }
         let (block, rows) = match on {
             true => {
-                let text = match text {
+                let text = match text.or_else(|| self.surface_text(surface, &input, cx)) {
                     Some(text) => text,
-                    None => input.read(cx).value(),
+                    None => return,
                 };
                 let host = match self.surface_host(surface) {
                     Some(host) => host,
@@ -964,43 +1091,39 @@ impl ClaudhubApp {
             return;
         };
         let layer = host.matches.clone();
-        let mut pattern = on.then(|| host.vim.highlights()).flatten().unwrap_or("");
-        // **The search results are the other source of the same question**,
-        // and they share the layer rather than adding one: two layers of the
-        // same colour over the same words make a denser colour, which reads as
-        // a third kind of match — the very reason the search bar puts this one
-        // out below. A file opened from a hit lights the words looked for; vim
-        // wins where both have something to say, its pattern being the one a
-        // key has just typed.
-        if pattern.is_empty() {
-            pattern = self.hit_pattern(surface);
-        }
-        let (caret, text, bar) = {
+        let (caret, bar) = {
             let state = input.read(cx);
-            (
-                state.selected_range().start,
-                // A rope clones by sharing its tree: no copy of the text.
-                state.text().clone(),
-                state.search_session().open,
-            )
+            (state.selected_range().start, state.search_session().open)
         };
-        // While the search bar is up, it paints its own occurrences: two layers
-        // of the same colour over the same words is a denser colour, which
-        // reads as a third kind of match.
-        if bar {
-            pattern = "";
-        }
+        // The text is looked at only under a lit pattern, and then through the
+        // surface's shared copy: its version says whether the walk below is
+        // due, and the copy is the one vim and the block cursor read too.
+        let text = match self.lit_pattern(surface, on, bar).is_empty() {
+            true => None,
+            false => self.surface_text(surface, &input, cx),
+        };
+        // Asked a second time, and answered off the flag the first one lowered.
+        let version = match text {
+            Some(_) => self.text_version(surface, &input, cx),
+            None => None,
+        };
+        let pattern = self.lit_pattern(surface, on, bar);
+        let Some(host) = self.surface_host(surface) else {
+            return;
+        };
         // The walk of the file, and only when the question has changed. What
         // invalidates it: the pattern, and the text it was run over.
-        let searched = matches_stale(host.matches_at.as_ref(), pattern, &text);
-        let at = (pattern.to_string(), text);
+        let searched = matches_stale(host.matches_at.as_ref(), pattern, version);
         if searched {
-            let ranges = match pattern.is_empty() {
-                true => Vec::new(),
+            let ranges = match (pattern.is_empty(), text) {
                 // Byte offsets, and a comparison character by character: the
                 // same reckoning `Ctrl+F` makes, and the same function.
-                false => crate::ui::find::find_all(pattern, &input.read(cx).value()),
+                (false, Some(text)) => crate::ui::find::find_all(pattern, &text),
+                _ => Vec::new(),
             };
+            // The pattern is copied only here, when it was searched for: at
+            // every other frame it is compared, which allocates nothing.
+            let at = (pattern.to_string(), version.unwrap_or(0));
             if let Some(host) = self.surface_host_mut(surface) {
                 host.matches_at = Some(at);
                 host.matches_found = ranges;
@@ -1040,6 +1163,29 @@ impl ClaudhubApp {
         layer.set(decorations, cx);
         if let Some(host) = self.surface_host_mut(surface) {
             host.matches_lit = current;
+        }
+    }
+
+    /// The pattern whose occurrences a surface lights, empty for none.
+    fn lit_pattern(&self, surface: &Surface, on: bool, bar: bool) -> &str {
+        // While the search bar is up, it paints its own occurrences: two layers
+        // of the same colour over the same words is a denser colour, which
+        // reads as a third kind of match.
+        if bar {
+            return "";
+        }
+        let pattern = self
+            .surface_host(surface)
+            .and_then(|host| on.then(|| host.vim.highlights()).flatten())
+            .unwrap_or("");
+        // **The search results are the other source of the same question**,
+        // and they share the layer rather than adding one — the very reason
+        // the search bar puts this one out above. A file opened from a hit
+        // lights the words looked for; vim wins where both have something to
+        // say, its pattern being the one a key has just typed.
+        match pattern.is_empty() {
+            true => self.hit_pattern(surface),
+            false => pattern,
         }
     }
 
@@ -1948,23 +2094,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_edit_of_the_same_length_invalidates_the_occurrences() {
-        use gpui_kit::component::input::Rope;
-        let before = Rope::from_str("let été = 1;");
-        let found = (String::from("été"), before.clone());
+    fn another_version_of_the_text_invalidates_the_occurrences() {
+        let found = (String::from("été"), 3);
         // Nothing moved: the walk is not redone.
-        assert!(!matches_stale(Some(&found), "été", &before));
+        assert!(!matches_stale(Some(&found), "été", Some(3)));
+        // The text changed, whatever its length did.
+        assert!(matches_stale(Some(&found), "été", Some(4)));
+        // Another pattern, or nothing found yet.
+        assert!(matches_stale(Some(&found), "let", Some(3)));
+        assert!(matches_stale(None, "", None));
+        // No pattern finds nothing in any text, so the text is not looked at.
+        let unlit = (String::new(), 0);
+        assert!(!matches_stale(Some(&unlit), "", None));
+    }
+
+    #[test]
+    fn an_edit_of_the_same_length_is_another_text() {
+        use gpui_kit::component::input::Rope;
+        let before = Rope::from_str(&"let été = 1;\n".repeat(2000));
+        // A clone shares every leaf: the short cut answers.
+        assert!(same_text(&before, &before.clone()));
         // `r` over one byte, an undo: the same length, another text — and the
         // old ranges may now fall inside a character.
-        let after = Rope::from_str("let étè = 1;");
+        let mut after = before.clone();
+        let at = after.len() / 2;
+        let at = (at..).find(|at| after.is_char_boundary(*at)).unwrap();
+        let ch = after.char(at);
+        let other = if ch == 'x' { "y" } else { "x" };
+        after.remove(at..at + ch.len_utf8());
+        after.insert(at, &other.repeat(ch.len_utf8()));
         assert_eq!(before.len(), after.len());
-        assert!(matches_stale(Some(&found), "été", &after));
-        // Another pattern, or nothing found yet.
-        assert!(matches_stale(Some(&found), "let", &before));
-        assert!(matches_stale(None, "", &before));
-        // No pattern finds nothing in any text, so the text is not looked at.
-        let unlit = (String::new(), before.clone());
-        assert!(!matches_stale(Some(&unlit), "", &after));
+        assert!(!same_text(&before, &after));
+        // The same text built apart shares nothing, and is still the same.
+        let rebuilt = Rope::from_str(&before.to_string());
+        assert!(same_text(&before, &rebuilt));
     }
 
     /// Every writing field is in `TextField::ALL`, and each has a scroll key of
