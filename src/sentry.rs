@@ -634,15 +634,17 @@ pub fn prompt(
         }
         let path = frame.repo_path(exists);
         out.push_str(&format!("\n## {path}:{}\n", frame.line));
-        out.push_str("```\n");
+        let mut code = String::new();
         for (number, text) in &frame.context {
             // The offending line is marked, and it is not decoration: the text
             // reaches the agent without the gutter the panel paints, and "line
             // 46" in a block of eleven is counted by hand without it.
             let marker = if *number == frame.line { ">" } else { " " };
-            out.push_str(&format!("{marker} {number:>5} {text}\n"));
+            code.push_str(&format!("{marker} {number:>5} {text}\n"));
         }
-        out.push_str("```\n");
+        // Deployed code may quote a fence itself — a Markdown template, a
+        // docblock — and a fixed one would close there.
+        out.push_str(&crate::text::fence(&code, ""));
     }
 
     if !event.crumbs.is_empty() {

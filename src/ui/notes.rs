@@ -292,7 +292,10 @@ pub fn prompt(branch: &str, notes: &[Note]) -> String {
         out.push_str("## ");
         out.push_str(&note.location());
         out.push('\n');
-        push_fence(&mut out, &note.excerpt, fence_language(&note.path));
+        out.push_str(&crate::text::fence(
+            &note.excerpt,
+            fence_language(&note.path),
+        ));
         for line in note.body.lines() {
             out.push_str("> ");
             out.push_str(line);
@@ -324,29 +327,9 @@ pub fn ask(location: &str, path: &std::path::Path, excerpt: &str, question: &str
     let mut out = String::new();
     out.push_str(&crate::tr!("notes-prompt-ask", { location: location }));
     out.push_str("\n\n");
-    push_fence(&mut out, excerpt, fence_language(path));
+    out.push_str(&crate::text::fence(excerpt, fence_language(path)));
     out.push_str(question.trim());
     out
-}
-
-/// A code fence whose number of backticks exceeds the longest run the excerpt
-/// contains.
-///
-/// Backticks would almost always be enough; almost, because a Markdown excerpt
-/// — or this very file — contains some, and would close the fence in the middle
-/// of the quoted code.
-fn push_fence(out: &mut String, excerpt: &str, language: &str) {
-    let longest = excerpt.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2) + 1);
-    out.push_str(&fence);
-    out.push_str(language);
-    out.push('\n');
-    out.push_str(excerpt);
-    if !excerpt.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&fence);
-    out.push('\n');
 }
 
 /// The language name of a Markdown fence.

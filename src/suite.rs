@@ -2191,7 +2191,7 @@ fn one_failure(out: &mut String, failure: &Handoff, output: &[String]) {
     if let Some(command) = &failure.command {
         out.push_str(&format!(
             "- Run it again, alone, from the worktree's root: {}\n",
-            inline_code(command)
+            crate::text::inline_code(command)
         ));
     }
     out.push_str("\n## Failure\n");
@@ -2213,7 +2213,7 @@ fn one_failure(out: &mut String, failure: &Handoff, output: &[String]) {
         } else {
             out.push_str("\n## The runner's output\n");
         }
-        out.push_str(&fenced(&kept));
+        out.push_str(&crate::text::fence(&kept.join("\n"), ""));
     }
 }
 
@@ -2267,7 +2267,10 @@ fn many_failures(out: &mut String, failures: &[Handoff]) {
                 out.push_str(&format!("- {}\n", facts.join(" · ")));
             }
             if let Some(command) = &failure.command {
-                out.push_str(&format!("- Run it again: {}\n", inline_code(command)));
+                out.push_str(&format!(
+                    "- Run it again: {}\n",
+                    crate::text::inline_code(command)
+                ));
             }
             failure_text(out, failure, MESSAGE_LINES_GROUPED);
         }
@@ -2311,7 +2314,7 @@ fn failure_text(out: &mut String, failure: &Handoff, max: usize) {
         return;
     }
     let kept: Vec<String> = lines.iter().take(max).map(|line| cut_line(line)).collect();
-    out.push_str(&fenced(&kept));
+    out.push_str(&crate::text::fence(&kept.join("\n"), ""));
     if lines.len() > max {
         out.push_str(&format!("({} more lines cut)\n", lines.len() - max));
     }
@@ -2325,43 +2328,6 @@ fn cut_line(line: &str) -> String {
         Some((at, _)) => format!("{}…", &line[..at]),
         None => line.to_string(),
     }
-}
-
-/// A fenced block the text cannot close: one backtick more than its longest
-/// run, and never fewer than three.
-fn fenced(lines: &[String]) -> String {
-    let longest = lines
-        .iter()
-        .map(|line| backtick_run(line))
-        .max()
-        .unwrap_or(0);
-    let fence = "`".repeat((longest + 1).max(3));
-    format!("{fence}\n{}\n{fence}\n", lines.join("\n"))
-}
-
-/// Inline code the text cannot close, by the same rule — a shell line can
-/// hold a backtick inside its quotes.
-fn inline_code(text: &str) -> String {
-    let fence = "`".repeat(backtick_run(text) + 1);
-    let pad = if text.starts_with('`') || text.ends_with('`') {
-        " "
-    } else {
-        ""
-    };
-    format!("{fence}{pad}{text}{pad}{fence}")
-}
-
-fn backtick_run(text: &str) -> usize {
-    let (mut longest, mut run) = (0, 0);
-    for c in text.chars() {
-        if c == '`' {
-            run += 1;
-            longest = longest.max(run);
-        } else {
-            run = 0;
-        }
-    }
-    longest
 }
 
 #[cfg(test)]
@@ -3287,12 +3253,5 @@ at tests/Feature/HttpTest.php:3</failure>
         assert_eq!(prompt.matches("\n### ").count(), HANDED_MAX);
         // Output goes with a lone failure only.
         assert!(!prompt.contains("ignored"));
-    }
-
-    #[test]
-    fn a_fence_is_longer_than_what_it_holds() {
-        assert_eq!(fenced(&["a ``` b".into()]), "````\na ``` b\n````\n");
-        assert_eq!(inline_code("echo `x`"), "`` echo `x` ``");
-        assert_eq!(inline_code("plain"), "`plain`");
     }
 }

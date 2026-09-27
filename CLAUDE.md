@@ -76,7 +76,7 @@ src/
   main.rs       le binaire de l'interface : le verrou d'instance, puis `ui::run`
   bin/server.rs le serveur headless
   cmdline.rs    découpe et recompose une ligne de commande (guillemets POSIX)
-  text.rs       le texte nu : échappements ANSI retirés — pur
+  text.rs       le texte nu : échappements ANSI, clôtures Markdown — pur
   wsl.rs        la distro : la lister, y installer le serveur, l'y lancer
   wslpath.rs    chemins Windows ⇄ distro WSL, textuel et pur
   commit_msg.rs le message de commit proposé : prompt, nettoyage, agent
