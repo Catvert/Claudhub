@@ -104,18 +104,22 @@ impl Page {
 /// installed fonts and stat-ing every line of `/etc/shells` at that rate is
 /// filesystem work in the middle of a frame.
 pub(super) struct Environment {
-    ui_fonts: Vec<(SharedString, SharedString)>,
-    mono_fonts: Vec<(SharedString, SharedString)>,
-    shells: Vec<(SharedString, SharedString)>,
+    /// Shared, not owned: the nine pages are built again on every render of
+    /// the form, and the fixed-pitch list is read by two of them — each took
+    /// a copy of a few hundred names. The menus still want a `Vec` of their
+    /// own, built where they are.
+    ui_fonts: Shared,
+    mono_fonts: Shared,
+    shells: Shared,
 }
 
 impl Environment {
     fn read(cx: &App) -> Self {
         let installed = cx.text_system().all_font_names();
         Self {
-            ui_fonts: choices(settings::font_choices(&installed, false, DEFAULT_UI_FONT)),
-            mono_fonts: choices(settings::font_choices(&installed, true, DEFAULT_MONO_FONT)),
-            shells: shell_choices(),
+            ui_fonts: choices(settings::font_choices(&installed, false, DEFAULT_UI_FONT)).into(),
+            mono_fonts: choices(settings::font_choices(&installed, true, DEFAULT_MONO_FONT)).into(),
+            shells: shell_choices().into(),
         }
     }
 }
@@ -268,15 +272,8 @@ impl ClaudhubApp {
         let pages: Vec<SettingPage> = Page::ORDER
             .into_iter()
             .map(|page| match page {
-                Page::Appearance => appearance_page(
-                    environment.ui_fonts.clone(),
-                    environment.mono_fonts.clone(),
-                    light_themes.clone(),
-                    dark_themes.clone(),
-                ),
-                Page::Terminal => {
-                    terminal_page(environment.shells.clone(), environment.mono_fonts.clone())
-                }
+                Page::Appearance => appearance_page(&environment, &light_themes, &dark_themes),
+                Page::Terminal => terminal_page(&environment),
                 Page::Review => review_page(),
                 Page::Keyboard => keyboard_page(app.clone()),
                 Page::Files => files_page(),
@@ -356,11 +353,91 @@ impl ClaudhubApp {
 /// What a menu offers: a value and the label that stands for it.
 type Choices = Vec<(SharedString, SharedString)>;
 
+/// The same, read once and handed to every render of the form.
+type Shared = std::rc::Rc<[(SharedString, SharedString)]>;
+
 fn choices(names: Vec<String>) -> Choices {
     names
         .into_iter()
         .map(|name| (SharedString::from(name.clone()), SharedString::from(name)))
         .collect()
+}
+
+// — Fields bound to one setting ——————————————————————————————————————
+//
+// Most fields of the form read one field of `Settings` and write it back, and
+// spelled out each was eight lines naming the field twice — one of which could
+// drift from the other with nothing to say so. These name it once, as a path
+// (`terminal.agent_hooks`). What reads or writes anything else — a font read
+// through its fallback, a table of rows — is written out where it is.
+
+/// A switch on one flag: `switch!(vim_mode, false)`.
+macro_rules! switch {
+    ($($field:ident).+, $default:expr) => {
+        SettingField::switch(
+            |cx: &App| Settings::global(cx).$($field).+,
+            |value: bool, cx: &mut App| Settings::update_global(cx, |s| s.$($field).+ = value),
+        )
+        .default_value($default)
+    };
+}
+
+/// A text field, or a menu of `options`, on one string.
+macro_rules! text {
+    ($($field:ident).+, $default:expr) => {
+        SettingField::input(
+            |cx: &App| Settings::global(cx).$($field).+.clone().into(),
+            |value: SharedString, cx: &mut App| {
+                Settings::update_global(cx, |s| s.$($field).+ = value.to_string())
+            },
+        )
+        .default_value(SharedString::from($default))
+    };
+    ($options:expr, $($field:ident).+, $default:expr) => {
+        SettingField::dropdown(
+            $options,
+            |cx: &App| Settings::global(cx).$($field).+.clone().into(),
+            |value: SharedString, cx: &mut App| {
+                Settings::update_global(cx, |s| s.$($field).+ = value.to_string())
+            },
+        )
+        .default_value(SharedString::from($default))
+    };
+}
+
+/// A menu on one choice written as its key: `keyed!(themes, theme: ThemeMode,
+/// "dark")` reads `as_key` and writes `ThemeMode::from_key`.
+macro_rules! keyed {
+    ($options:expr, $($field:ident).+ : $kind:ty, $default:expr) => {
+        SettingField::dropdown(
+            $options,
+            |cx: &App| Settings::global(cx).$($field).+.as_key().into(),
+            |value: SharedString, cx: &mut App| {
+                Settings::update_global(cx, |s| s.$($field).+ = <$kind>::from_key(&value))
+            },
+        )
+        .default_value(SharedString::from($default))
+    };
+}
+
+/// A number on one numeric field; `into` turns what was typed into the
+/// field's type, bounds included.
+macro_rules! number {
+    ($options:expr, $($field:ident).+, $default:expr, $into:expr) => {
+        SettingField::number_input(
+            $options,
+            |cx: &App| Settings::global(cx).$($field).+ as f64,
+            |value: f64, cx: &mut App| {
+                Settings::update_global(cx, |s| s.$($field).+ = ($into)(value))
+            },
+        )
+        .default_value($default)
+    };
+}
+
+/// The bounds of a number field.
+fn bounds(min: f64, max: f64, step: f64) -> NumberFieldOptions {
+    NumberFieldOptions { min, max, step }
 }
 
 /// Shells the system declares. The menu only offers them: the field stays free,
@@ -383,7 +460,7 @@ struct ShellField {
 /// A closed list would do if `/etc/shells` told the truth; it ignores everything
 /// not installed by the system — a shell compiled by hand, a `nix run`, a `tmux
 /// new-session` — and we do not want a setting you leave by editing a JSON file.
-fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
+fn shell_item(shells: Shared) -> SettingItem {
     SettingItem::new(
         tr!("settings-shell"),
         SettingField::render(move |_, window, cx| {
@@ -656,10 +733,9 @@ fn theme_choices(cx: &App) -> (Choices, Choices) {
 }
 
 fn appearance_page(
-    ui_fonts: Vec<(SharedString, SharedString)>,
-    mono_fonts: Vec<(SharedString, SharedString)>,
-    light_themes: Vec<(SharedString, SharedString)>,
-    dark_themes: Vec<(SharedString, SharedString)>,
+    environment: &Environment,
+    light_themes: &Choices,
+    dark_themes: &Choices,
 ) -> SettingPage {
     let themes = vec![
         (SharedString::from("dark"), tr!("settings-theme-dark")),
@@ -683,57 +759,33 @@ fn appearance_page(
                 .item(
                     SettingItem::new(
                         tr!("settings-theme"),
-                        SettingField::dropdown(
-                            themes,
-                            |cx: &App| Settings::global(cx).theme.as_key().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.theme = ThemeMode::from_key(&value)
-                                });
-                            },
-                        )
-                        .default_value(SharedString::from("dark")),
+                        keyed!(themes, theme: ThemeMode, "dark"),
                     )
                     .description(tr!("settings-theme-help")),
                 )
                 .item(
                     SettingItem::new(
                         tr!("settings-dark-theme"),
-                        SettingField::dropdown(
-                            dark_themes,
-                            |cx: &App| Settings::global(cx).dark_theme.clone().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.dark_theme = value.to_string())
-                            },
-                        )
-                        .default_value(SharedString::from(settings::DEFAULT_DARK_THEME)),
+                        text!(
+                            dark_themes.clone(),
+                            dark_theme,
+                            settings::DEFAULT_DARK_THEME
+                        ),
                     )
                     .description(tr!("settings-palette-help")),
                 )
                 .item(SettingItem::new(
                     tr!("settings-light-theme"),
-                    SettingField::dropdown(
-                        light_themes,
-                        |cx: &App| Settings::global(cx).light_theme.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.light_theme = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::from(settings::DEFAULT_LIGHT_THEME)),
+                    text!(
+                        light_themes.clone(),
+                        light_theme,
+                        settings::DEFAULT_LIGHT_THEME
+                    ),
                 ))
                 .item(
                     SettingItem::new(
                         tr!("settings-language"),
-                        SettingField::dropdown(
-                            languages,
-                            |cx: &App| Settings::global(cx).language.as_key().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.language = LanguageChoice::from_key(&value)
-                                });
-                            },
-                        )
-                        .default_value(SharedString::from("system")),
+                        keyed!(languages, language: LanguageChoice, "system"),
                     )
                     .description(tr!("settings-language-help")),
                 ),
@@ -741,11 +793,13 @@ fn appearance_page(
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-fonts"))
+                // The two families are read through their fallback, and so
+                // are written out rather than bound to a field.
                 .item(
                     SettingItem::new(
                         tr!("settings-ui-font"),
                         SettingField::dropdown(
-                            ui_fonts,
+                            environment.ui_fonts.to_vec(),
                             |cx: &App| Settings::global(cx).ui_font().to_string().into(),
                             |value: SharedString, cx: &mut App| {
                                 Settings::update_global(cx, |s| {
@@ -759,20 +813,13 @@ fn appearance_page(
                 )
                 .item(SettingItem::new(
                     tr!("settings-ui-font-size"),
-                    SettingField::number_input(
-                        size_range(),
-                        |cx: &App| Settings::global(cx).font_size as f64,
-                        |value: f64, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.font_size = clamp_size(value))
-                        },
-                    )
-                    .default_value(14.0),
+                    number!(size_range(), font_size, 14.0, clamp_size),
                 ))
                 .item(
                     SettingItem::new(
                         tr!("settings-mono-font"),
                         SettingField::dropdown(
-                            mono_fonts,
+                            environment.mono_fonts.to_vec(),
                             |cx: &App| Settings::global(cx).mono_font().to_string().into(),
                             |value: SharedString, cx: &mut App| {
                                 Settings::update_global(cx, |s| {
@@ -786,62 +833,48 @@ fn appearance_page(
                 )
                 .item(SettingItem::new(
                     tr!("settings-diff-font-size"),
-                    SettingField::number_input(
-                        size_range(),
-                        |cx: &App| Settings::global(cx).diff_font_size as f64,
-                        |value: f64, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.diff_font_size = clamp_size(value))
-                        },
-                    )
-                    .default_value(13.0),
+                    number!(size_range(), diff_font_size, 13.0, clamp_size),
                 )),
         )
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-window"))
                 .item(
-                    SettingItem::new(
-                        tr!("settings-maximized"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).start_maximized,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.start_maximized = value)
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(tr!("settings-maximized-help")),
+                    SettingItem::new(tr!("settings-maximized"), switch!(start_maximized, false))
+                        .description(tr!("settings-maximized-help")),
                 ),
         )
 }
 
-fn terminal_page(
-    shells: Vec<(SharedString, SharedString)>,
-    mono_fonts: Vec<(SharedString, SharedString)>,
-) -> SettingPage {
+fn terminal_page(environment: &Environment) -> SettingPage {
     // The terminal's font reuses the fixed-pitch list, preceded by the "same as
     // the diffs" entry: the terminal is allowed not to choose, so that setting
     // the fixed pitch once is enough for the common case.
-    let mut fonts = vec![(SharedString::default(), tr!("settings-font-inherit"))];
-    fonts.extend(mono_fonts);
+    let fonts: Choices = std::iter::once((SharedString::default(), tr!("settings-font-inherit")))
+        .chain(environment.mono_fonts.iter().cloned())
+        .collect();
+    let placements = vec![
+        (
+            SharedString::from("bottom"),
+            tr!("settings-terminal-placement-bottom"),
+        ),
+        (
+            SharedString::from("right"),
+            tr!("settings-terminal-placement-right"),
+        ),
+    ];
 
     SettingPage::new(Page::Terminal.title())
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-shell"))
-                .item(shell_item(shells))
+                .item(shell_item(environment.shells.clone()))
                 .item(agents_item())
                 .item(default_agent_item())
                 .item(
                     SettingItem::new(
                         tr!("settings-agent-hooks"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).terminal.agent_hooks,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.terminal.agent_hooks = value)
-                            },
-                        )
-                        .default_value(true),
+                        switch!(terminal.agent_hooks, true),
                     )
                     .description(tr!("settings-agent-hooks-help")),
                 ),
@@ -852,93 +885,50 @@ fn terminal_page(
                 .item(
                     SettingItem::new(
                         tr!("settings-terminal-placement"),
-                        SettingField::dropdown(
-                            vec![
-                                (
-                                    SharedString::from("bottom"),
-                                    tr!("settings-terminal-placement-bottom"),
-                                ),
-                                (
-                                    SharedString::from("right"),
-                                    tr!("settings-terminal-placement-right"),
-                                ),
-                            ],
-                            |cx: &App| Settings::global(cx).terminal.placement.as_key().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.terminal.placement =
-                                        settings::TerminalPlacement::from_key(&value)
-                                })
-                            },
-                        )
-                        .default_value(SharedString::from("bottom")),
+                        keyed!(
+                            placements,
+                            terminal.placement: settings::TerminalPlacement,
+                            "bottom"
+                        ),
                     )
                     .description(tr!("settings-terminal-placement-help")),
                 )
                 .item(SettingItem::new(
                     tr!("settings-terminal-font"),
-                    SettingField::dropdown(
-                        fonts,
-                        |cx: &App| Settings::global(cx).terminal.font_family.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| {
-                                s.terminal.font_family = value.to_string()
-                            })
-                        },
-                    )
-                    .default_value(SharedString::default()),
+                    text!(fonts, terminal.font_family, SharedString::default()),
                 ))
                 .item(SettingItem::new(
                     tr!("settings-terminal-font-size"),
-                    SettingField::number_input(
-                        size_range(),
-                        |cx: &App| Settings::global(cx).terminal.font_size as f64,
-                        |value: f64, cx: &mut App| {
-                            Settings::update_global(cx, |s| {
-                                s.terminal.font_size = clamp_size(value)
-                            })
-                        },
-                    )
-                    .default_value(13.0),
+                    number!(size_range(), terminal.font_size, 13.0, clamp_size),
                 ))
                 .item(
                     SettingItem::new(
                         tr!("settings-scrollback"),
-                        SettingField::number_input(
-                            NumberFieldOptions {
-                                min: 0.,
-                                max: 200_000.,
-                                step: 1_000.,
-                            },
-                            |cx: &App| Settings::global(cx).terminal.scrollback as f64,
-                            |value: f64, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.terminal.scrollback = value.clamp(0., 200_000.) as usize
-                                })
-                            },
-                        )
-                        .default_value(10_000.0),
+                        number!(
+                            bounds(0., 200_000., 1_000.),
+                            terminal.scrollback,
+                            10_000.0,
+                            |value: f64| value.clamp(0., 200_000.) as usize
+                        ),
                     )
                     .description(tr!("settings-scrollback-help")),
                 )
                 .item(
                     SettingItem::new(
                         tr!("settings-column-min"),
-                        SettingField::number_input(
-                            NumberFieldOptions {
-                                min: crate::ui::settings::COLUMN_MIN_RANGE.0 as f64,
-                                max: crate::ui::settings::COLUMN_MIN_RANGE.1 as f64,
-                                step: 20.,
-                            },
-                            |cx: &App| Settings::global(cx).terminal.column_min as f64,
-                            |value: f64, cx: &mut App| {
+                        number!(
+                            bounds(
+                                crate::ui::settings::COLUMN_MIN_RANGE.0 as f64,
+                                crate::ui::settings::COLUMN_MIN_RANGE.1 as f64,
+                                20.,
+                            ),
+                            terminal.column_min,
+                            crate::ui::settings::COLUMN_MIN_DEFAULT as f64,
+                            |value: f64| {
                                 let (least, most) = crate::ui::settings::COLUMN_MIN_RANGE;
-                                Settings::update_global(cx, |s| {
-                                    s.terminal.column_min = (value as f32).clamp(least, most)
-                                })
-                            },
-                        )
-                        .default_value(crate::ui::settings::COLUMN_MIN_DEFAULT as f64),
+                                (value as f32).clamp(least, most)
+                            }
+                        ),
                     )
                     .description(tr!("settings-column-min-help")),
                 ),
@@ -956,30 +946,12 @@ fn keyboard_page(app: Entity<ClaudhubApp>) -> SettingPage {
             SettingGroup::new()
                 .title(tr!("settings-group-vim"))
                 .item(
-                    SettingItem::new(
-                        tr!("settings-vim-mode"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).vim_mode,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.vim_mode = value)
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(tr!("settings-vim-mode-help")),
+                    SettingItem::new(tr!("settings-vim-mode"), switch!(vim_mode, false))
+                        .description(tr!("settings-vim-mode-help")),
                 )
                 .item(
-                    SettingItem::new(
-                        tr!("settings-vim-clipboard"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).vim_clipboard,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.vim_clipboard = value)
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(tr!("settings-vim-clipboard-help")),
+                    SettingItem::new(tr!("settings-vim-clipboard"), switch!(vim_clipboard, false))
+                        .description(tr!("settings-vim-clipboard-help")),
                 ),
         )
         .group(
@@ -1349,63 +1321,36 @@ fn review_page() -> SettingPage {
                 .item(
                     SettingItem::new(
                         tr!("settings-update-rebase"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).update_with_rebase,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.update_with_rebase = value)
-                            },
-                        )
-                        .default_value(false),
+                        switch!(update_with_rebase, false),
                     )
                     .description(tr!("settings-update-rebase-help")),
                 )
                 .item(
                     SettingItem::new(
                         tr!("settings-integrate-no-ff"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).integrate_no_ff,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.integrate_no_ff = value)
-                            },
-                        )
-                        .default_value(true),
+                        switch!(integrate_no_ff, true),
                     )
                     .description(tr!("settings-integrate-no-ff-help")),
                 )
                 .item(
                     SettingItem::new(
                         tr!("settings-commit-message"),
-                        SettingField::input(
-                            |cx: &App| Settings::global(cx).commit_message_command.clone().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.commit_message_command = value.to_string()
-                                })
-                            },
-                        )
-                        .default_value(SharedString::from(
-                            crate::ui::settings::DEFAULT_COMMIT_MESSAGE_COMMAND,
-                        )),
+                        text!(
+                            commit_message_command,
+                            crate::ui::settings::DEFAULT_COMMIT_MESSAGE_COMMAND
+                        ),
                     )
                     .description(tr!("settings-commit-message-help")),
                 )
                 .item(
                     SettingItem::new(
                         tr!("settings-auto-fetch"),
-                        SettingField::number_input(
-                            NumberFieldOptions {
-                                min: 0.,
-                                max: 240.,
-                                step: 5.,
-                            },
-                            |cx: &App| Settings::global(cx).auto_fetch_minutes as f64,
-                            |value: f64, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.auto_fetch_minutes = value.clamp(0., 240.) as u32
-                                })
-                            },
-                        )
-                        .default_value(10.0),
+                        number!(
+                            bounds(0., 240., 5.),
+                            auto_fetch_minutes,
+                            10.0,
+                            |value: f64| value.clamp(0., 240.) as u32
+                        ),
                     )
                     .description(tr!("settings-auto-fetch-help")),
                 ),
@@ -1416,20 +1361,9 @@ fn review_page() -> SettingPage {
                 .item(
                     SettingItem::new(
                         tr!("settings-diff-context"),
-                        SettingField::number_input(
-                            NumberFieldOptions {
-                                min: 0.,
-                                max: 50.,
-                                step: 1.,
-                            },
-                            |cx: &App| Settings::global(cx).diff_context as f64,
-                            |value: f64, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.diff_context = value.clamp(0., 50.) as usize
-                                })
-                            },
-                        )
-                        .default_value(3.0),
+                        number!(bounds(0., 50., 1.), diff_context, 3.0, |value: f64| {
+                            value.clamp(0., 50.) as usize
+                        }),
                     )
                     .description(tr!("settings-diff-context-help")),
                 )
@@ -1442,28 +1376,13 @@ fn review_page() -> SettingPage {
                 .item(
                     SettingItem::new(
                         tr!("settings-diff-whole-file"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).diff_whole_file,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.diff_whole_file = value)
-                            },
-                        )
-                        .default_value(false),
+                        switch!(diff_whole_file, false),
                     )
                     .description(tr!("settings-diff-whole-file-help")),
                 )
                 .item(
-                    SettingItem::new(
-                        tr!("settings-diff-split"),
-                        SettingField::switch(
-                            |cx: &App| Settings::global(cx).diff_split,
-                            |value: bool, cx: &mut App| {
-                                Settings::update_global(cx, |s| s.diff_split = value)
-                            },
-                        )
-                        .default_value(false),
-                    )
-                    .description(tr!("settings-diff-split-help")),
+                    SettingItem::new(tr!("settings-diff-split"), switch!(diff_split, false))
+                        .description(tr!("settings-diff-split-help")),
                 ),
         )
 }
@@ -1474,26 +1393,14 @@ fn files_page() -> SettingPage {
             .item(
                 SettingItem::new(
                     tr!("settings-external-editor"),
-                    SettingField::input(
-                        |cx: &App| Settings::global(cx).external_editor.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.external_editor = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::default()),
+                    text!(external_editor, SharedString::default()),
                 )
                 .description(tr!("settings-external-editor-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-notes-dir"),
-                    SettingField::input(
-                        |cx: &App| Settings::global(cx).notes_dir.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.notes_dir = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::default()),
+                    text!(notes_dir, SharedString::default()),
                 )
                 .description(tr!("settings-notes-dir-help")),
             )
@@ -1505,72 +1412,37 @@ fn files_page() -> SettingPage {
             .item(
                 SettingItem::new(
                     tr!("settings-wsl-distro"),
-                    SettingField::input(
-                        |cx: &App| Settings::global(cx).wsl_distro.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.wsl_distro = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::default()),
+                    text!(wsl_distro, SharedString::default()),
                 )
                 .description(tr!("settings-wsl-distro-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-show-ignored"),
-                    SettingField::switch(
-                        |cx: &App| Settings::global(cx).show_ignored_files,
-                        |value: bool, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.show_ignored_files = value)
-                        },
-                    )
-                    .default_value(false),
+                    switch!(show_ignored_files, false),
                 )
                 .description(tr!("settings-show-ignored-help")),
             )
             .item(
-                SettingItem::new(
-                    tr!("settings-save-all"),
-                    SettingField::switch(
-                        |cx: &App| Settings::global(cx).save_all_tabs,
-                        |value: bool, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.save_all_tabs = value)
-                        },
-                    )
-                    .default_value(true),
-                )
-                .description(tr!("settings-save-all-help")),
+                SettingItem::new(tr!("settings-save-all"), switch!(save_all_tabs, true))
+                    .description(tr!("settings-save-all-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-preview-tab"),
-                    SettingField::switch(
-                        |cx: &App| Settings::global(cx).editor_preview_tab,
-                        |value: bool, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.editor_preview_tab = value)
-                        },
-                    )
-                    .default_value(true),
+                    switch!(editor_preview_tab, true),
                 )
                 .description(tr!("settings-preview-tab-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-tab-limit"),
-                    SettingField::number_input(
-                        NumberFieldOptions {
-                            min: 0.,
-                            max: 100.,
-                            step: 1.,
-                        },
-                        |cx: &App| Settings::global(cx).editor_tab_limit as f64,
-                        |value: f64, cx: &mut App| {
-                            Settings::update_global(cx, |s| {
-                                s.editor_tab_limit = value.clamp(0., 100.) as usize
-                            })
-                        },
-                    )
-                    .default_value(10.0),
+                    number!(
+                        bounds(0., 100., 1.),
+                        editor_tab_limit,
+                        10.0,
+                        |value: f64| { value.clamp(0., 100.) as usize }
+                    ),
                 )
                 .description(tr!("settings-tab-limit-help")),
             ),
@@ -1592,63 +1464,37 @@ fn files_page() -> SettingPage {
 /// repository — five checkouts of one code have the same errors. Its field is
 /// on the panel, which is also where one is when one decides to change it.
 fn sentry_page() -> SettingPage {
-    let field = |value: fn(&App) -> SharedString, set: fn(SharedString, &mut App)| {
-        SettingField::input(value, set).default_value(SharedString::default())
-    };
     SettingPage::new(Page::Sentry.title()).group(
         SettingGroup::new()
             .item(SettingItem::new(
                 tr!("settings-sentry-org"),
-                field(
-                    |cx| Settings::global(cx).sentry_org.clone().into(),
-                    |value, cx| Settings::update_global(cx, |s| s.sentry_org = value.to_string()),
-                ),
+                text!(sentry_org, SharedString::default()),
             ))
             .item(
                 SettingItem::new(
                     tr!("settings-sentry-token"),
-                    field(
-                        |cx| Settings::global(cx).sentry_token.clone().into(),
-                        |value, cx| {
-                            Settings::update_global(cx, |s| s.sentry_token = value.to_string())
-                        },
-                    ),
+                    text!(sentry_token, SharedString::default()),
                 )
                 .description(tr!("settings-sentry-token-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-sentry-host"),
-                    field(
-                        |cx| Settings::global(cx).sentry_host.clone().into(),
-                        |value, cx| {
-                            Settings::update_global(cx, |s| s.sentry_host = value.to_string())
-                        },
-                    ),
+                    text!(sentry_host, SharedString::default()),
                 )
                 .description(tr!("settings-sentry-host-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-sentry-query"),
-                    field(
-                        |cx| Settings::global(cx).sentry_query.clone().into(),
-                        |value, cx| {
-                            Settings::update_global(cx, |s| s.sentry_query = value.to_string())
-                        },
-                    ),
+                    text!(sentry_query, SharedString::default()),
                 )
                 .description(tr!("settings-sentry-query-help")),
             )
             .item(
                 SettingItem::new(
                     tr!("settings-sentry-intro"),
-                    field(
-                        |cx| Settings::global(cx).sentry_intro.clone().into(),
-                        |value, cx| {
-                            Settings::update_global(cx, |s| s.sentry_intro = value.to_string())
-                        },
-                    ),
+                    text!(sentry_intro, SharedString::default()),
                 )
                 .description(tr!("settings-sentry-intro-help")),
             ),
@@ -1660,20 +1506,12 @@ fn databases_page() -> SettingPage {
         SettingGroup::new().item(databases_item()).item(
             SettingItem::new(
                 tr!("settings-db-page-size"),
-                SettingField::number_input(
-                    NumberFieldOptions {
-                        min: 1.,
-                        max: 100_000.,
-                        step: 100.,
-                    },
-                    |cx: &App| Settings::global(cx).db_page_size as f64,
-                    |value: f64, cx: &mut App| {
-                        Settings::update_global(cx, |s| {
-                            s.db_page_size = value.clamp(1., 100_000.) as usize
-                        })
-                    },
-                )
-                .default_value(500.),
+                number!(
+                    bounds(1., 100_000., 100.),
+                    db_page_size,
+                    500.,
+                    |value: f64| value.clamp(1., 100_000.) as usize
+                ),
             )
             .description(tr!("settings-db-page-size-help")),
         ),
@@ -2496,11 +2334,11 @@ fn logs_page(view: LogView) -> SettingPage {
 
 /// Bounds common to the text sizes, the same as the wheel's.
 fn size_range() -> NumberFieldOptions {
-    NumberFieldOptions {
-        min: settings::MIN_FONT_SIZE as f64,
-        max: settings::MAX_FONT_SIZE as f64,
-        step: 1.0,
-    }
+    bounds(
+        settings::MIN_FONT_SIZE as f64,
+        settings::MAX_FONT_SIZE as f64,
+        1.0,
+    )
 }
 
 fn clamp_size(value: f64) -> f32 {
