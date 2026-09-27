@@ -130,86 +130,10 @@ pub struct Finder {
     pub open: bool,
 }
 
-/// Does the query match the text?
-pub fn matches(query: &str, haystack: &str) -> bool {
-    let query = query.trim();
-    if query.is_empty() {
-        return true;
-    }
-    first_match(query, haystack, 0).is_some()
-}
-
-/// Every occurrence, as **byte** offsets — that is what gpui expects to style a
-/// fragment of text, and indexing by characters breaks at the first accent.
-pub fn find_all(query: &str, haystack: &str) -> Vec<Range<usize>> {
-    let query = query.trim();
-    let mut out = Vec::new();
-    if query.is_empty() {
-        return out;
-    }
-    let mut from = 0;
-    while let Some(range) = first_match(query, haystack, from) {
-        // An empty occurrence would loop forever: `first_match` returns none,
-        // the query never being empty here.
-        from = range.end;
-        out.push(range);
-    }
-    out
-}
-
-/// The first occurrence at or after `from` — what vim's `/` and `n` step with,
-/// so that both searches read case the same way.
-pub fn find_from(query: &str, haystack: &str, from: usize) -> Option<Range<usize>> {
-    let query = query.trim();
-    if query.is_empty() {
-        return None;
-    }
-    first_match(query, haystack, from)
-}
-
-/// The first occurrence from a given offset.
-///
-/// A character-by-character comparison rather than a search inside
-/// `to_lowercase()`: lowercasing changes the byte length of some characters,
-/// and the offsets returned would no longer point at anything in the original
-/// text.
-fn first_match(query: &str, haystack: &str, from: usize) -> Option<Range<usize>> {
-    let sensitive = query.chars().any(char::is_uppercase);
-    let first = query.chars().next()?;
-    // Sliced and not skipped: `find_all` restarts from the end of the previous
-    // occurrence, and walking the whole text again each time made it quadratic.
-    // `from` is always a character boundary — it comes from a match's end.
-    for (offset, candidate) in haystack[from..].char_indices() {
-        let start = from + offset;
-        if !same(candidate, first, sensitive) {
-            continue;
-        }
-        let mut end = start;
-        let mut hay = haystack[start..].chars();
-        let mut ok = true;
-        for wanted in query.chars() {
-            match hay.next() {
-                Some(c) if same(c, wanted, sensitive) => end += c.len_utf8(),
-                _ => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
-            return Some(start..end);
-        }
-    }
-    None
-}
-
-fn same(a: char, b: char, sensitive: bool) -> bool {
-    if sensitive {
-        a == b
-    } else {
-        a == b || a.to_lowercase().eq(b.to_lowercase())
-    }
-}
+/// The matching itself lives in the core (`crate::text`): the filters of the
+/// panels whose rows come from a worker — Sentry, GitHub — read case the same
+/// way as every other.
+pub use crate::text::{find_all, find_from, matches};
 
 impl ClaudhubApp {
     /// A panel's query, empty while its bar is closed.
@@ -543,69 +467,5 @@ pub fn highlight_color(current: bool, cx: &gpui_kit::App) -> gpui_kit::Hsla {
         cx.theme().warning
     } else {
         cx.theme().warning.opacity(0.35)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_all_lowercase_query_ignores_case() {
-        assert!(matches("todo", "TODO: rewrite"));
-        assert!(matches("REWRITE", "TODO: REWRITE"));
-    }
-
-    #[test]
-    fn a_query_with_a_capital_respects_it() {
-        assert!(!matches("Todo", "todo: rewrite"));
-        assert!(matches("Todo", "Todo: rewrite"));
-    }
-
-    #[test]
-    fn an_empty_query_matches_everything() {
-        assert!(matches("", "anything at all"));
-        assert!(matches("   ", "anything at all"));
-        assert!(find_all("", "anything at all").is_empty());
-    }
-
-    /// The offsets are byte offsets: a case-insensitive search must not shift
-    /// them by an accent.
-    #[test]
-    fn offsets_are_byte_offsets_even_past_an_accent() {
-        let text = "été chaud";
-        let hits = find_all("chaud", text);
-        assert_eq!(hits, vec![6..11]);
-        assert_eq!(&text[hits[0].clone()], "chaud");
-    }
-
-    #[test]
-    fn a_repeated_needle_is_found_every_time() {
-        assert_eq!(find_all("ab", "abcab"), vec![0..2, 3..5]);
-    }
-
-    /// Every occurrence is found from the end of the previous one, and the
-    /// offsets stay byte offsets past a multi-byte character: that is what the
-    /// resumed scan must not break.
-    #[test]
-    fn the_scan_resumes_where_the_last_occurrence_ended() {
-        let text = "éaébéc";
-        let hits = find_all("é", text);
-        assert_eq!(hits, vec![0..2, 3..5, 6..8]);
-        for hit in &hits {
-            assert_eq!(&text[hit.clone()], "é");
-        }
-    }
-
-    /// Two overlapping occurrences are not returned twice: the ranges have to
-    /// stay disjoint for gpui to accept them.
-    #[test]
-    fn overlapping_occurrences_do_not_overlap_in_the_result() {
-        assert_eq!(find_all("aa", "aaaa"), vec![0..2, 2..4]);
-    }
-
-    #[test]
-    fn a_needle_longer_than_the_line_is_not_found() {
-        assert!(find_all("abcdef", "abc").is_empty());
     }
 }

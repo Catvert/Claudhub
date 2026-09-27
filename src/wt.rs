@@ -635,24 +635,19 @@ fn succeeds_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) ->
 /// A project's shell line, run with the probe's ceiling.
 ///
 /// `WT_SHELL` and its `sh` default are `wt`'s own: hooks are written for a
-/// POSIX shell, whatever the user's login shell may be.
+/// POSIX shell, whatever the user's login shell may be. A worker's guards are
+/// `outside::Bounded`'s — with stdin open, a probe asking anything of the user
+/// held the worker for ever — and the locale is left alone: what the line
+/// prints is shown to the user as it wrote it.
 fn run_within(
     command: &str,
     cwd: &Path,
     env: &BTreeMap<String, String>,
 ) -> Result<std::process::Output> {
-    let shell = std::env::var("WT_SHELL").unwrap_or_else(|_| "sh".to_string());
-    let mut cmd = std::process::Command::new(shell);
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .envs(env)
-        // The same guard as every git command's: with stdin open, a probe
-        // asking anything of the user holds the worker for ever.
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    crate::git::wait_with_timeout(cmd, STATUS_TIMEOUT, || format!("wt status: {command}"))
+    let shell = std::env::var("WT_SHELL").ok();
+    let mut cmd = crate::outside::sh(command, shell.as_deref());
+    cmd.current_dir(cwd).envs(env);
+    crate::outside::Bounded::new(cmd, format!("wt status: {command}"), STATUS_TIMEOUT).output()
 }
 
 /// A task's arguments, from the answers to the prompts it declares.
@@ -723,9 +718,9 @@ fn capturing<T>(
             // dropped, which is the `set_sink(None)` below.
             while let Ok(msg) = rx.recv() {
                 let (line, warning) = match msg {
-                    util::Msg::Warn(m) => (strip_ansi(&m), true),
+                    util::Msg::Warn(m) => (crate::text::strip_ansi(&m), true),
                     util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Out(m) => {
-                        (strip_ansi(&m), false)
+                        (crate::text::strip_ansi(&m), false)
                     }
                     // `Done` carries no text of its own: it marks the end of a
                     // step.
@@ -756,46 +751,6 @@ fn capturing<T>(
     (last, result)
 }
 
-/// A hook's line, undressed: ANSI escapes are instructions to a terminal, and
-/// the console panel and the journal are plain text — an SGR left in shows as
-/// `␛[36m` in the middle of the sentence. CSI sequences (colours, cursor),
-/// OSC ones (titles, up to BEL or ST) and the two-byte escapes are dropped;
-/// the carriage returns of a progress bar go with them.
-pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => match chars.next() {
-                // CSI: parameters and intermediates, then one final byte.
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                // OSC: swallowed up to BEL or ST (ESC \).
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\u{07}' || (c == '\u{1b}' && chars.peek() == Some(&'\\')) {
-                            if c == '\u{1b}' {
-                                chars.next();
-                            }
-                            break;
-                        }
-                    }
-                }
-                // Two-byte escapes (ESC c, ESC =, …): the second byte goes too.
-                Some(_) | None => {}
-            },
-            '\r' => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,18 +776,6 @@ mod tests {
     fn an_empty_answer_produces_no_argument() {
         let answers = BTreeMap::from([("add_tenants".to_string(), String::new())]);
         assert!(task_args([("add_tenants", ",")], &answers).is_empty());
-    }
-
-    /// The dress a hook's line arrives in — colours, a title, a progress
-    /// bar's carriage return — is dropped whole; the words stay.
-    #[test]
-    fn ansi_escapes_are_stripped_and_the_words_stay() {
-        assert_eq!(
-            strip_ansi("\u{1b}[36mvendor\u{1b}[0m recable\r"),
-            "vendor recable"
-        );
-        assert_eq!(strip_ansi("\u{1b}]0;title\u{07}plain \u{1b}c!"), "plain !");
-        assert_eq!(strip_ansi("sans habit"), "sans habit");
     }
 
     #[test]

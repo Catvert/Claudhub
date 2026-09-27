@@ -496,17 +496,9 @@ pub fn parse_claude_process(text: &str) -> Option<ClaudeProcess> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     Some(ClaudeProcess {
         pid: u32::try_from(value.get("pid")?.as_u64()?).ok()?,
-        session: value.get("sessionId")?.as_str()?.to_string(),
-        cwd: PathBuf::from(
-            value
-                .get("cwd")
-                .and_then(|cwd| cwd.as_str())
-                .unwrap_or_default(),
-        ),
-        status: value
-            .get("status")
-            .and_then(|status| status.as_str())
-            .map(str::to_string),
+        session: crate::json::string(&value, "sessionId")?.to_string(),
+        cwd: PathBuf::from(crate::json::text(&value, "cwd")),
+        status: crate::json::string(&value, "status").map(str::to_string),
     })
 }
 
@@ -514,10 +506,7 @@ pub fn parse_claude_process(text: &str) -> Option<ClaudeProcess> {
 /// `$CLAUDE_CONFIG_DIR/sessions` when that is set, as Claude reads it. Empty
 /// when there is no such folder: an older Claude, or none at all.
 pub fn claude_processes() -> Vec<ClaudeProcess> {
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
-    let Some(dir) = root.map(|root| root.join("sessions")) else {
+    let Some(dir) = crate::home::claude_config().map(|root| root.join("sessions")) else {
         return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(&dir) else {

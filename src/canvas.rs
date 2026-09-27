@@ -449,7 +449,8 @@ pub fn finding_prompt(review_file: &str, findings: &[&Finding]) -> String {
                 .unwrap_or_default()
         ));
         if let Some(excerpt) = &finding.excerpt {
-            out.push_str(&format!("\n```\n{excerpt}\n```\n"));
+            out.push('\n');
+            out.push_str(&crate::text::fence(excerpt, ""));
         }
         if !finding.text.is_empty() {
             out.push_str(&format!("\n{}\n", finding.text));

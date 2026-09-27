@@ -179,17 +179,14 @@ fn resolve(
         .collect()
 }
 
+/// The command goes out in English: its lines are Claudhub's own `gh`
+/// invocations, and what they say on failure is quoted in a panel.
 fn shell(worktree: &std::path::Path, command: &str) -> Result<String, String> {
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(worktree)
-        // The same guard as every git command's: with stdin open, a program
-        // asking for a password holds a worker forever.
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let output = crate::git::wait_with_timeout(cmd, SHELL_TIMEOUT, || format!("sh -c {command}"))
+    let mut cmd = sh(command, None);
+    cmd.current_dir(worktree);
+    let output = Bounded::new(cmd, format!("sh -c {command}"), SHELL_TIMEOUT)
+        .in_english()
+        .output()
         .map_err(|e| format!("{e:#}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -200,6 +197,108 @@ fn shell(worktree: &std::path::Path, command: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+// — Running a program ————————————————————————————————————————————————
+
+/// A program a worker runs to its end, with every guard a worker's subprocess
+/// needs — and one place to put them. Five callers used to write them out,
+/// and each had forgotten a different one.
+///
+/// - **stdin closed**, unless something is fed to it: a program deciding to
+///   ask a question — a password, a bootstrap reading its input — would hold
+///   the worker for good.
+/// - **Both outputs piped and drained while it runs**, and a **ceiling**:
+///   `git::wait_feeding`, which also stops waiting on a daemon that inherited
+///   the pipes.
+/// - **No console window** on Windows (`wsl::no_console`): the interface is a
+///   windowed program, and each console child would flash one.
+///
+/// `LC_ALL=C` is **not** among them, and on purpose: it is asked for
+/// ([`Bounded::in_english`]) by a caller running a tool whose complaint it
+/// quotes — `just`, a test runner, `gh`. A project's own shell line or the
+/// user's agent writes text the user reads, which the C locale could turn to
+/// question marks or another language.
+pub(crate) struct Bounded {
+    cmd: std::process::Command,
+    what: String,
+    limit: Duration,
+    input: Option<Vec<u8>>,
+}
+
+impl Bounded {
+    /// `what` names the program in the errors — which one did not answer,
+    /// which one failed.
+    pub(crate) fn new(
+        cmd: std::process::Command,
+        what: impl Into<String>,
+        limit: Duration,
+    ) -> Self {
+        Self {
+            cmd,
+            what: what.into(),
+            limit,
+            input: None,
+        }
+    }
+
+    /// Error messages read in English, for the reason the git layer reads
+    /// them there: they are quoted, and matched on.
+    pub(crate) fn in_english(mut self) -> Self {
+        self.cmd.env("LC_ALL", "C");
+        self
+    }
+
+    /// Something to write on its standard input, which is then open.
+    pub(crate) fn feeding(mut self, input: Vec<u8>) -> Self {
+        self.input = Some(input);
+        self
+    }
+
+    /// Runs it and gives back all it said, success or not.
+    pub(crate) fn output(self) -> anyhow::Result<std::process::Output> {
+        use std::process::Stdio;
+        let Self {
+            mut cmd,
+            what,
+            limit,
+            input,
+        } = self;
+        cmd.stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        crate::wsl::no_console(&mut cmd);
+        crate::git::wait_feeding(cmd, input, limit, || what.clone())
+    }
+
+    /// Runs it and gives back its standard output — or, when it failed, an
+    /// error saying so with what it wrote on stderr.
+    pub(crate) fn stdout(self) -> anyhow::Result<String> {
+        let what = self.what.clone();
+        let out = self.output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let said = stderr.trim();
+            anyhow::bail!(
+                "{what} failed ({}): {}",
+                out.status,
+                if said.is_empty() { "no message" } else { said }
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// `sh -c <line>`: a line written for a POSIX shell, whatever the user's login
+/// shell is. `shell` names another one to read it — `wt`'s `WT_SHELL`.
+pub(crate) fn sh(line: &str, shell: Option<&str>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(shell.unwrap_or("sh"));
+    cmd.arg("-c").arg(line);
+    cmd
 }
 
 /// A secret written `$NAME` is read from the environment, **here**.
@@ -305,6 +404,56 @@ mod tests {
         )
         .expect("no variable, no failure");
         assert_eq!(plain[0].1, "Bearer $nothing-is-set-here");
+    }
+
+    /// A program reading its input finds it closed and goes on, rather than
+    /// holding the worker until the ceiling.
+    #[test]
+    fn a_program_reading_its_input_finds_it_closed() {
+        let out = Bounded::new(sh("cat", None), "cat", Duration::from_secs(5))
+            .stdout()
+            .expect("cat reads nothing and ends");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn what_is_fed_reaches_the_program() {
+        let out = Bounded::new(sh("tr a-z A-Z", None), "tr", Duration::from_secs(5))
+            .feeding(b"bonjour".to_vec())
+            .stdout()
+            .expect("tr works");
+        assert_eq!(out, "BONJOUR");
+    }
+
+    /// The failure names the program, its exit and what it said.
+    #[test]
+    fn a_failure_says_who_and_why() {
+        let error = Bounded::new(
+            sh("echo nope >&2; exit 3", None),
+            "probe",
+            Duration::from_secs(5),
+        )
+        .stdout()
+        .expect_err("exit 3 is a failure");
+        assert_eq!(format!("{error:#}"), "probe failed (exit status: 3): nope");
+    }
+
+    /// English is asked for, never imposed: a project's own line prints text
+    /// the user reads.
+    #[test]
+    fn english_is_asked_for_and_not_imposed() {
+        let locale = |bounded: Bounded| bounded.stdout().expect("echo works");
+        let line = || sh("echo \"${LC_ALL-unset}\"", None);
+        assert_eq!(
+            locale(Bounded::new(line(), "echo", Duration::from_secs(5)).in_english()).trim(),
+            "C"
+        );
+        let mut untouched = line();
+        untouched.env_remove("LC_ALL");
+        assert_eq!(
+            locale(Bounded::new(untouched, "echo", Duration::from_secs(5))).trim(),
+            "unset"
+        );
     }
 
     #[test]

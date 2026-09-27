@@ -255,23 +255,16 @@ pub fn report(worktree: &Path) -> Report {
     Report::Tests(tests)
 }
 
-/// One listing subprocess, whatever the runner: closed stdin, both streams
-/// read, the ceiling applied — and the complaint built from both streams on
-/// refusal.
+/// One listing subprocess, whatever the runner: a worker's guards
+/// (`outside::Bounded` — a bootstrap deciding to read from its input would
+/// hold the worker for good), English — and the complaint built from both
+/// streams on refusal.
 fn listing(mut cmd: Command, what: &str) -> Result<String> {
-    cmd
-        // Closed, like git's and just's: a bootstrap deciding to read from
-        // its input would hold the worker for good.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Error messages we quote are read in English, for the same reason
-        // the git layer reads them there. `NO_COLOR` is the convention node
-        // tools follow.
-        .env("LC_ALL", "C")
-        .env("NO_COLOR", "1");
-    crate::wsl::no_console(&mut cmd);
-    let out = crate::git::wait_with_timeout(cmd, TIMEOUT, || what.to_string())?;
+    // The convention node tools follow.
+    cmd.env("NO_COLOR", "1");
+    let out = crate::outside::Bounded::new(cmd, what, TIMEOUT)
+        .in_english()
+        .output()?;
     if !out.status.success() {
         anyhow::bail!(
             "{}",
@@ -528,11 +521,7 @@ impl Drop for Screencast {
 fn pump_steps(path: &Path, going: &std::sync::atomic::AtomicBool, steps: &(dyn Fn(Step) + Sync)) {
     const POLL: Duration = Duration::from_millis(150);
     let mut read = 0u64;
-    let mut carry = String::new();
-    let mut class = String::new();
-    // TeamCity says `testFailed` **before** `testFinished`; the fate is held
-    // until the line that ends the test.
-    let mut fate: Option<Status> = None;
+    let mut log = Teamcity::default();
     loop {
         let still = going.load(std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut file) = std::fs::File::open(path) {
@@ -541,40 +530,75 @@ fn pump_steps(path: &Path, going: &std::sync::atomic::AtomicBool, steps: &(dyn F
                 let mut fresh = Vec::new();
                 if let Ok(got) = file.read_to_end(&mut fresh) {
                     read += got as u64;
-                    carry.push_str(&String::from_utf8_lossy(&fresh));
+                    log.feed(&fresh, steps);
                 }
-            }
-        }
-        while let Some(at) = carry.find('\n') {
-            let line = carry[..at].to_string();
-            carry.drain(..=at);
-            let Some((kind, rest)) = teamcity(&line) else {
-                continue;
-            };
-            let Some(name) = teamcity_name(rest) else {
-                continue;
-            };
-            match kind {
-                "testSuiteStarted" => class = name.strip_prefix("P\\").unwrap_or(&name).to_string(),
-                "testStarted" => steps(Step {
-                    class: class.clone(),
-                    method: method_key(&name).to_string(),
-                    status: None,
-                }),
-                "testFailed" => fate = Some(Status::Failed),
-                "testIgnored" => fate = Some(Status::Skipped),
-                "testFinished" => steps(Step {
-                    class: class.clone(),
-                    method: method_key(&name).to_string(),
-                    status: Some(fate.take().unwrap_or(Status::Passed)),
-                }),
-                _ => {}
             }
         }
         if !still {
             break;
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// What the TeamCity log has said so far: the bytes of a line not yet ended,
+/// the class being run, the fate of the test not yet finished.
+#[derive(Default)]
+struct Teamcity {
+    carry: Vec<u8>,
+    class: String,
+    /// TeamCity says `testFailed` **before** `testFinished`; the fate is held
+    /// until the line that ends the test.
+    fate: Option<Status>,
+}
+
+impl Teamcity {
+    /// Takes what the file grew by since the last look.
+    ///
+    /// **Bytes, not text, until a line is whole.** A read ends wherever the
+    /// writer was, which may be inside a character: decoded at once, the two
+    /// halves of an `é` became two U+FFFD in a test's name, and the row it
+    /// named was never found. Only complete lines are decoded — and the
+    /// buffer is drained once per read, where a drain per line made a long
+    /// read quadratic.
+    fn feed(&mut self, fresh: &[u8], steps: &dyn Fn(Step)) {
+        let mut carry = std::mem::take(&mut self.carry);
+        carry.extend_from_slice(fresh);
+        let mut start = 0;
+        while let Some(at) = carry[start..].iter().position(|&byte| byte == b'\n') {
+            let end = start + at;
+            self.line(&String::from_utf8_lossy(&carry[start..end]), steps);
+            start = end + 1;
+        }
+        carry.drain(..start);
+        self.carry = carry;
+    }
+
+    fn line(&mut self, line: &str, steps: &dyn Fn(Step)) {
+        let Some((kind, rest)) = teamcity(line) else {
+            return;
+        };
+        let Some(name) = teamcity_name(rest) else {
+            return;
+        };
+        match kind {
+            "testSuiteStarted" => {
+                self.class = name.strip_prefix("P\\").unwrap_or(&name).to_string()
+            }
+            "testStarted" => steps(Step {
+                class: self.class.clone(),
+                method: method_key(&name).to_string(),
+                status: None,
+            }),
+            "testFailed" => self.fate = Some(Status::Failed),
+            "testIgnored" => self.fate = Some(Status::Skipped),
+            "testFinished" => steps(Step {
+                class: self.class.clone(),
+                method: method_key(&name).to_string(),
+                status: Some(self.fate.take().unwrap_or(Status::Passed)),
+            }),
+            _ => {}
+        }
     }
 }
 
@@ -621,10 +645,7 @@ fn pump_frames(stdout: std::process::ChildStdout, frames: &(dyn Fn(Frame) + Sync
         let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let kind = message
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let kind = crate::json::string(&message, "type").unwrap_or_default();
         if kind != "frame" {
             // The relay's other lines — its Playwright server coming up, the
             // browser attaching and letting go. They paint nothing, and they
@@ -636,18 +657,13 @@ fn pump_frames(stdout: std::process::ChildStdout, frames: &(dyn Fn(Frame) + Sync
             }
             continue;
         }
-        let Some(data) = message.get("data").and_then(serde_json::Value::as_str) else {
+        let Some(data) = crate::json::string(&message, "data") else {
             continue;
         };
         let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
             continue;
         };
-        let number = |key| {
-            message
-                .get(key)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or_default() as u32
-        };
+        let number = |key| crate::json::count(&message, key) as u32;
         frames(Frame {
             jpeg,
             width: number("width"),
@@ -697,14 +713,9 @@ fn vitest_rows(json: &str, worktree: &Path) -> Vec<Test> {
     entries
         .iter()
         .filter_map(|entry| {
-            let name = entry.get("name")?.as_str()?.to_string();
-            let file = entry.get("file")?.as_str()?;
-            let file = Path::new(file)
-                .strip_prefix(worktree)
-                .ok()
-                .and_then(|rel| rel.to_str())
-                .unwrap_or(file)
-                .to_string();
+            let name = crate::json::string(entry, "name")?.to_string();
+            let file = crate::json::string(entry, "file")?;
+            let file = relative(file, worktree);
             Some(Test {
                 runner: Runner::Vitest,
                 class: file.clone(),
@@ -716,6 +727,18 @@ fn vitest_rows(json: &str, worktree: &Path) -> Vec<Test> {
             })
         })
         .collect()
+}
+
+/// A path a runner wrote absolute, made relative to the worktree — the file
+/// is also the row the tree and the fates are keyed on. One outside the
+/// worktree stays as it was written.
+fn relative(path: &str, worktree: &Path) -> String {
+    Path::new(path)
+        .strip_prefix(worktree)
+        .ok()
+        .and_then(|rel| rel.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Asks Jest. `--listTests` only names files — Jest cannot enumerate tests
@@ -733,12 +756,7 @@ fn jest_rows(output: &str, worktree: &Path) -> Vec<Test> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let rel = Path::new(line.trim())
-                .strip_prefix(worktree)
-                .ok()
-                .and_then(|rel| rel.to_str())
-                .unwrap_or(line.trim())
-                .to_string();
+            let rel = relative(line.trim(), worktree);
             let (dir, file) = match rel.rsplit_once('/') {
                 Some((dir, file)) => (dir.to_string(), file.to_string()),
                 None => (String::new(), rel.clone()),
@@ -770,14 +788,23 @@ fn title_pattern(title: &str) -> String {
 /// space-joined full title, so it goes through this alone — `title_pattern`'s
 /// ` > ` rewrite would break a Jest title that happens to contain one.
 fn title_regex(joined: &str) -> String {
-    let mut pattern = String::with_capacity(joined.len());
-    for c in joined.chars() {
-        if ".^$*+?()[]{}|\\/".contains(c) {
-            pattern.push('\\');
+    escaped(joined, ".^$*+?()[]{}|\\/")
+}
+
+/// What a JS regex reads as syntax outside a class.
+const REGEX_SPECIAL: &str = ".^$*+?()[]{}|\\";
+
+/// `text` with a backslash before each character of `special` — a literal in
+/// a regex or a glob, whichever `special` describes.
+fn escaped(text: &str, special: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if special.contains(c) {
+            out.push('\\');
         }
-        pattern.push(c);
+        out.push(c);
     }
-    pattern
+    out
 }
 
 /// What a failed listing has to say, both streams read.
@@ -1401,7 +1428,7 @@ fn follow(
         }
         match incoming.recv_timeout((deadline - now).min(POLL)) {
             Ok((is_err, line)) => {
-                let line = strip_ansi(&line);
+                let line = crate::text::strip_ansi(&line);
                 let tail = if is_err { &mut err_tail } else { &mut kept };
                 if tail.len() == COMPLAINT_KEPT {
                     tail.pop_front();
@@ -1475,31 +1502,6 @@ fn kill_run(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
-}
-
-/// Colours out of a narrated line: the run is followed through a pipe, and
-/// Jest paints its stderr even there.
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        // ESC [ … final-byte, or a lone two-byte escape.
-        if chars.peek() == Some(&'[') {
-            chars.next();
-            for c in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&c) {
-                    break;
-                }
-            }
-        } else {
-            chars.next();
-        }
-    }
-    out
 }
 
 /// Reads the JUnit account: one `Outcome` per test, dataset cases folded.
@@ -1630,42 +1632,26 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
     };
-    let Some(files) = root.get("testResults").and_then(|list| list.as_array()) else {
-        return Vec::new();
-    };
     let mut outcomes = Vec::new();
-    for file in files {
-        let Some(path) = file.get("name").and_then(|name| name.as_str()) else {
+    for file in crate::json::items(&root, "testResults") {
+        let Some(path) = crate::json::string(file, "name") else {
             continue;
         };
-        let rel = Path::new(path)
-            .strip_prefix(worktree)
-            .ok()
-            .and_then(|rel| rel.to_str())
-            .unwrap_or(path)
-            .to_string();
-        let Some(cases) = file
-            .get("assertionResults")
-            .and_then(|list| list.as_array())
-        else {
-            continue;
-        };
-        for case in cases {
-            let Some(name) = case.get("fullName").and_then(|name| name.as_str()) else {
+        let rel = relative(path, worktree);
+        for case in crate::json::items(file, "assertionResults") {
+            let Some(name) = crate::json::string(case, "fullName") else {
                 continue;
             };
-            let status = match case.get("status").and_then(|status| status.as_str()) {
+            let status = match crate::json::string(case, "status") {
                 Some("passed") => Status::Passed,
                 Some("failed") => Status::Failed,
                 // "pending", "todo", "skipped", "disabled" — not run.
                 _ => Status::Skipped,
             };
-            let message = case
-                .get("failureMessages")
-                .and_then(|list| list.as_array())
-                .and_then(|list| list.first())
+            let message = crate::json::items(case, "failureMessages")
+                .first()
                 .and_then(|message| message.as_str())
-                .map(|message| strip_ansi(message.trim()))
+                .map(|message| crate::text::strip_ansi(message.trim()))
                 .unwrap_or_default();
             // The stack ends `(…/src/http.test.js:2:53)`: the line follows
             // the file's own name.
@@ -1686,10 +1672,7 @@ fn parse_jest(json: &str, worktree: &Path) -> Vec<Outcome> {
                 file: rel.clone(),
                 line,
                 cases: 1,
-                time_ms: case
-                    .get("duration")
-                    .and_then(|duration| duration.as_u64())
-                    .unwrap_or(0),
+                time_ms: crate::json::count(case, "duration"),
             });
         }
     }
@@ -1998,8 +1981,7 @@ fn shell_word(part: &str) -> String {
     if quoted != part || !(expands || part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c))) {
         return quoted;
     }
-    // Bare means no quote in it: `join_command` would have quoted that.
-    format!("'{part}'")
+    crate::text::single_quoted(part)
 }
 
 /// The arguments that narrow a JS run to `target.path`, **anchored**: neither
@@ -2051,28 +2033,14 @@ fn js_path_args(target: &Target) -> Vec<String> {
 /// A path as a literal in a picomatch glob — what Vitest's `--exclude` is
 /// read by. `[id].test.ts` and `(group)/` are ordinary JS file names.
 fn glob_escape(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for c in path.chars() {
-        if "\\*?[]{}()!@+".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    escaped(path, "\\*?[]{}()!@+")
 }
 
 /// A path as a literal in a Jest path regex. The `/` stays bare: Jest turns
 /// each one into the platform's separator, and an escaped one would become
 /// a separator after a stray backslash on Windows.
 fn path_regex(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for c in path.chars() {
-        if ".^$*+?()[]{}|\\".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    escaped(path, REGEX_SPECIAL)
 }
 
 // — Handing a red test to an agent ——————————————————————————————————————
@@ -2216,7 +2184,7 @@ fn one_failure(out: &mut String, failure: &Handoff, output: &[String]) {
     if let Some(command) = &failure.command {
         out.push_str(&format!(
             "- Run it again, alone, from the worktree's root: {}\n",
-            inline_code(command)
+            crate::text::inline_code(command)
         ));
     }
     out.push_str("\n## Failure\n");
@@ -2238,7 +2206,7 @@ fn one_failure(out: &mut String, failure: &Handoff, output: &[String]) {
         } else {
             out.push_str("\n## The runner's output\n");
         }
-        out.push_str(&fenced(&kept));
+        out.push_str(&crate::text::fence(&kept.join("\n"), ""));
     }
 }
 
@@ -2292,7 +2260,10 @@ fn many_failures(out: &mut String, failures: &[Handoff]) {
                 out.push_str(&format!("- {}\n", facts.join(" · ")));
             }
             if let Some(command) = &failure.command {
-                out.push_str(&format!("- Run it again: {}\n", inline_code(command)));
+                out.push_str(&format!(
+                    "- Run it again: {}\n",
+                    crate::text::inline_code(command)
+                ));
             }
             failure_text(out, failure, MESSAGE_LINES_GROUPED);
         }
@@ -2336,7 +2307,7 @@ fn failure_text(out: &mut String, failure: &Handoff, max: usize) {
         return;
     }
     let kept: Vec<String> = lines.iter().take(max).map(|line| cut_line(line)).collect();
-    out.push_str(&fenced(&kept));
+    out.push_str(&crate::text::fence(&kept.join("\n"), ""));
     if lines.len() > max {
         out.push_str(&format!("({} more lines cut)\n", lines.len() - max));
     }
@@ -2345,48 +2316,7 @@ fn failure_text(out: &mut String, failure: &Handoff, max: usize) {
 /// A line at most [`LINE_CHARS`] characters long, the cut said by an
 /// ellipsis.
 fn cut_line(line: &str) -> String {
-    let line = line.trim_end();
-    match line.char_indices().nth(LINE_CHARS) {
-        Some((at, _)) => format!("{}…", &line[..at]),
-        None => line.to_string(),
-    }
-}
-
-/// A fenced block the text cannot close: one backtick more than its longest
-/// run, and never fewer than three.
-fn fenced(lines: &[String]) -> String {
-    let longest = lines
-        .iter()
-        .map(|line| backtick_run(line))
-        .max()
-        .unwrap_or(0);
-    let fence = "`".repeat((longest + 1).max(3));
-    format!("{fence}\n{}\n{fence}\n", lines.join("\n"))
-}
-
-/// Inline code the text cannot close, by the same rule — a shell line can
-/// hold a backtick inside its quotes.
-fn inline_code(text: &str) -> String {
-    let fence = "`".repeat(backtick_run(text) + 1);
-    let pad = if text.starts_with('`') || text.ends_with('`') {
-        " "
-    } else {
-        ""
-    };
-    format!("{fence}{pad}{text}{pad}{fence}")
-}
-
-fn backtick_run(text: &str) -> usize {
-    let (mut longest, mut run) = (0, 0);
-    for c in text.chars() {
-        if c == '`' {
-            run += 1;
-            longest = longest.max(run);
-        } else {
-            run = 0;
-        }
-    }
-    longest
+    crate::text::ellipsized(line.trim_end(), LINE_CHARS)
 }
 
 #[cfg(test)]
@@ -2467,6 +2397,34 @@ mod tests {
             method_key("__pest_evaluable_it_builds\"('App\\Exceptions\\Other')\""),
             "__pest_evaluable_it_builds"
         );
+    }
+
+    /// A read may end inside a character, and inside a line: neither is
+    /// decoded before the next read completes it.
+    #[test]
+    fn a_character_cut_between_two_reads_arrives_whole() {
+        let log = "##teamcity[testSuiteStarted name='P\\Tests\\Unit\\ÉtéTest' flowId='1']\n\
+                   ##teamcity[testStarted name='__pest_evaluable_it_fête_l_été' flowId='1']\n";
+        let bytes = log.as_bytes();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let collect = |step: Step| seen.borrow_mut().push(step);
+        // Every cut, the ones inside `É` and `ê` included.
+        for cut in 0..=bytes.len() {
+            seen.borrow_mut().clear();
+            let mut teamcity = Teamcity::default();
+            teamcity.feed(&bytes[..cut], &collect);
+            teamcity.feed(&bytes[cut..], &collect);
+            assert_eq!(
+                *seen.borrow(),
+                [Step {
+                    class: "Tests\\Unit\\ÉtéTest".into(),
+                    method: "__pest_evaluable_it_fête_l_été".into(),
+                    status: None,
+                }],
+                "cut at byte {cut}"
+            );
+            assert!(teamcity.carry.is_empty());
+        }
     }
 
     /// Reads a whole log as the reader would, the run already over: one last
@@ -3128,17 +3086,6 @@ at tests/Feature/HttpTest.php:3</failure>
         assert!(js_path_args(&Target::everything(Runner::Vitest)).is_empty());
     }
 
-    #[test]
-    fn the_colours_come_out_of_a_narrated_line() {
-        assert_eq!(
-            strip_ansi(
-                "\u{1b}[7m\u{1b}[1m\u{1b}[31m FAIL \u{1b}[39m\u{1b}[22m\u{1b}[27m src/http.test.js"
-            ),
-            " FAIL  src/http.test.js"
-        );
-        assert_eq!(strip_ansi("plain"), "plain");
-    }
-
     fn listed(runner: Runner, class: &str, method: &str, file: &str) -> Test {
         Test {
             runner,
@@ -3323,12 +3270,5 @@ at tests/Feature/HttpTest.php:3</failure>
         assert_eq!(prompt.matches("\n### ").count(), HANDED_MAX);
         // Output goes with a lone failure only.
         assert!(!prompt.contains("ignored"));
-    }
-
-    #[test]
-    fn a_fence_is_longer_than_what_it_holds() {
-        assert_eq!(fenced(&["a ``` b".into()]), "````\na ``` b\n````\n");
-        assert_eq!(inline_code("echo `x`"), "`` echo `x` ``");
-        assert_eq!(inline_code("plain"), "`plain`");
     }
 }

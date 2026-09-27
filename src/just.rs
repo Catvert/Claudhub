@@ -29,7 +29,7 @@
 //! dump carries them under `modules` when something does.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -148,22 +148,12 @@ fn dump(dir: &Path, file: &Path) -> Result<String> {
         .arg(dir)
         .arg("--dump")
         .arg("--dump-format")
-        .arg("json")
-        // Closed, like git's: an assignment evaluating a backtick inherits
-        // these, and a command deciding to read from its input would hold the
-        // worker for good.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Error messages we quote are read in English, for the same reason the
-        // git layer reads them there.
-        .env("LC_ALL", "C");
-    crate::wsl::no_console(&mut cmd);
-    let out = crate::git::wait_with_timeout(cmd, TIMEOUT, || "just --dump".to_string())?;
-    if !out.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        .arg("json");
+    // Closed stdin among the guards: an assignment evaluating a backtick
+    // inherits it. English, because the complaint is quoted.
+    crate::outside::Bounded::new(cmd, "just --dump", TIMEOUT)
+        .in_english()
+        .stdout()
 }
 
 /// Reads the dump: the public recipes, and the one a bare `just` runs.
@@ -180,25 +170,15 @@ fn parse(json: &str) -> Result<Snapshot> {
         .context("just's dump has no recipes")?;
     let recipes = recipes
         .values()
-        .filter(|recipe| {
-            !recipe
-                .get("private")
-                .and_then(|p| p.as_bool())
-                .unwrap_or(false)
-        })
+        .filter(|recipe| !crate::json::flag(recipe, "private"))
         .filter_map(|recipe| {
             Some(Recipe {
-                name: recipe.get("name")?.as_str()?.to_string(),
-                doc: recipe
-                    .get("doc")
-                    .and_then(|doc| doc.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                params: recipe
-                    .get("parameters")
-                    .and_then(|params| params.as_array())
-                    .map(|params| params.iter().filter_map(parameter).collect())
-                    .unwrap_or_default(),
+                name: crate::json::string(recipe, "name")?.to_string(),
+                doc: crate::json::text(recipe, "doc"),
+                params: crate::json::items(recipe, "parameters")
+                    .iter()
+                    .filter_map(parameter)
+                    .collect(),
             })
         })
         .collect();
@@ -208,22 +188,19 @@ fn parse(json: &str) -> Result<Snapshot> {
         // runs. It may well be private — a justfile is free to start with an
         // underscore — and it stays the default all the same: it is what the
         // command does, and the button says what the command does.
-        default: root
-            .get("first")
-            .and_then(|first| first.as_str())
-            .map(str::to_string),
+        default: crate::json::string(&root, "first").map(str::to_string),
     })
 }
 
 /// One parameter, written as `just --list` writes it.
 fn parameter(param: &serde_json::Value) -> Option<String> {
-    let name = param.get("name")?.as_str()?;
-    let prefix = match param.get("kind").and_then(|kind| kind.as_str()) {
+    let name = crate::json::string(param, "name")?;
+    let prefix = match crate::json::string(param, "kind") {
         Some("star") => "*",
         Some("plus") => "+",
         _ => "",
     };
-    Some(match param.get("default").and_then(|d| d.as_str()) {
+    Some(match crate::json::string(param, "default") {
         Some(default) => format!("{prefix}{name}=\"{default}\""),
         None => format!("{prefix}{name}"),
     })

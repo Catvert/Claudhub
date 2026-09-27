@@ -38,10 +38,7 @@ fn bounded(mut message: String) -> String {
     if message.len() <= MESSAGE_CAP {
         return message;
     }
-    let mut end = MESSAGE_CAP;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = crate::text::head_bytes(&message, MESSAGE_CAP).len();
     let cut = message.len() - end;
     message.truncate(end);
     message.push_str(&format!("… [{cut} more bytes cut from the journal]"));

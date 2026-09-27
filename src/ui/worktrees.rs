@@ -177,13 +177,13 @@ pub(super) fn rows_for(
     folded: &HashSet<PathBuf>,
     mut item: impl FnMut(&Repository, &Checkout) -> Item,
 ) -> Vec<Row> {
-    let needle = filter.trim().to_lowercase();
+    let needle = filter.trim();
     let mut rows = Vec::new();
     for repo in repos {
         let kept: Vec<&Checkout> = repo
             .checkouts
             .iter()
-            .filter(|checkout| keeps(checkout, &repo.name, &needle))
+            .filter(|checkout| keeps(checkout, &repo.name, needle))
             .collect();
         if kept.is_empty() {
             continue;
@@ -235,13 +235,12 @@ pub(super) fn rows_for(
 /// Its own name, its branch, or the repository's: one looks for a worktree by
 /// the project it belongs to as often as by what it is called.
 fn keeps(checkout: &Checkout, repo: &str, needle: &str) -> bool {
-    needle.is_empty()
-        || checkout.label.to_lowercase().contains(needle)
-        || repo.to_lowercase().contains(needle)
+    crate::text::matches(needle, &checkout.label)
+        || crate::text::matches(needle, repo)
         || checkout
             .branch
             .as_deref()
-            .is_some_and(|branch| branch.to_lowercase().contains(needle))
+            .is_some_and(|branch| crate::text::matches(needle, branch))
 }
 
 #[cfg(test)]
@@ -468,7 +467,9 @@ mod tests {
     #[test]
     fn the_filter_reads_the_checkout_its_branch_and_its_repository() {
         let matched = |needle| names(&rows_for(&project(), &[], needle, &HashSet::new(), item));
-        assert_eq!(matched("FIX"), ["== acetics", "fix"]);
+        assert_eq!(matched("fix"), ["== acetics", "fix"]);
+        // Smart case, as in every panel: a capital asks for exactly that.
+        assert!(matched("FIX").is_empty());
         assert_eq!(matched("master"), ["== acetics", "main"]);
         assert_eq!(matched("claud"), ["== claudhub", "wip"]);
         assert!(matched("rien").is_empty());

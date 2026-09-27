@@ -28,7 +28,9 @@ pub mod db;
 pub mod files;
 pub mod git;
 pub mod github;
+pub mod home;
 pub mod instance;
+pub mod json;
 pub mod just;
 pub mod logging;
 pub mod lsp;
@@ -40,6 +42,7 @@ pub mod skill;
 pub mod suite;
 #[cfg(feature = "ui")]
 pub mod terminal;
+pub mod text;
 #[cfg(feature = "ui")]
 pub mod ui;
 pub mod wsl;

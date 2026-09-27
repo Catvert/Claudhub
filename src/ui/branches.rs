@@ -95,7 +95,7 @@ pub(super) fn rows_for(
     active: Option<&Path>,
     scopes: bool,
 ) -> Vec<Row> {
-    let needle = filter.trim().to_lowercase();
+    let needle = filter.trim();
     let mut rows = Vec::new();
     // **Dropped as soon as one types.** They are not branch names, so a filter
     // that keeps them would leave two rows standing over an empty list and
@@ -108,7 +108,7 @@ pub(super) fn rows_for(
         let matching: Vec<Row> = branches
             .iter()
             .filter(|branch| branch.kind == kind)
-            .filter(|branch| needle.is_empty() || branch.name.to_lowercase().contains(&needle))
+            .filter(|branch| crate::text::matches(needle, &branch.name))
             .map(|branch| {
                 Row::Branch(BranchRow {
                     name: branch.name.clone(),

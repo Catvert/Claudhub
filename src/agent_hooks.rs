@@ -138,8 +138,8 @@ pub fn parse(text: &str) -> Option<(Option<u32>, String, PathBuf, Signal)> {
     let (pid, json) = text.split_once('\n')?;
     let pid = pid.trim().parse::<u32>().ok().filter(|pid| *pid > 1);
     let value: Value = serde_json::from_str(json.trim()).ok()?;
-    let session = value.get("session_id")?.as_str()?.to_string();
-    let cwd = PathBuf::from(value.get("cwd")?.as_str()?);
+    let session = crate::json::string(&value, "session_id")?.to_string();
+    let cwd = PathBuf::from(crate::json::string(&value, "cwd")?);
     let signal = signal_of(&value)?;
     Some((pid, session, cwd, signal))
 }
@@ -147,9 +147,9 @@ pub fn parse(text: &str) -> Option<(Option<u32>, String, PathBuf, Signal)> {
 /// Which state an event puts a session in.
 ///
 /// Read field by field and not through a structure, for the reason written on
-/// `sentry.rs`: a field present at `null` makes a whole structure fail.
+/// `crate::json`: a field present at `null` makes a whole structure fail.
 pub fn signal_of(value: &Value) -> Option<Signal> {
-    let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
+    let text = |key: &str| crate::json::string(value, key).unwrap_or("");
     Some(match text("hook_event_name") {
         "SessionStart" => match text("source") {
             "compact" => return None,
@@ -170,20 +170,12 @@ pub fn signal_of(value: &Value) -> Option<Signal> {
 }
 
 fn cap(message: &str) -> String {
-    let line = message.lines().next().unwrap_or("");
-    match line.char_indices().nth(MESSAGE_CAP) {
-        Some((cut, _)) => format!("{}…", &line[..cut]),
-        None => line.to_string(),
-    }
+    crate::text::ellipsized(message.lines().next().unwrap_or(""), MESSAGE_CAP)
 }
 
 /// Where the hooks write: `$HOME/.claudhub/agents`.
 pub fn folder() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))?;
-    Some(home.join(".claudhub").join("agents"))
+    Some(crate::home::home()?.join(".claudhub").join("agents"))
 }
 
 /// A file nobody has written to for this long is a session long gone.

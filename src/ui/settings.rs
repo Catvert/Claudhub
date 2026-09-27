@@ -720,20 +720,13 @@ impl Settings {
             .then(|| std::time::Duration::from_secs(u64::from(self.auto_fetch_minutes) * 60))
     }
 
-    /// The notes root, `~` expanded.
-    ///
-    /// A path typed into a form is written `~/Vault/…` — that is how it is given
-    /// to a shell — and passing it as it is to `std::fs` would create a folder
-    /// named `~` in the current directory.
+    /// The notes root, `~` expanded (`home::expand`).
     pub fn notes_root(&self) -> Option<PathBuf> {
         let text = self.notes_dir.trim();
         if text.is_empty() {
             return config_dir().map(|dir| dir.join("notes"));
         }
-        match text.strip_prefix("~/") {
-            Some(rest) => directories::UserDirs::new().map(|dirs| dirs.home_dir().join(rest)),
-            None => Some(PathBuf::from(text)),
-        }
+        crate::home::expand(text)
     }
 }
 
