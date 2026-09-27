@@ -421,6 +421,9 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
   vérifications, ses fils de revue — répondus et résolus d'ici par GraphQL,
   le corps en variable et jamais dans la requête — et prête / brouillon /
   fusionner. Chaque geste relit tout (`GithubState::pr_action_call`).
+- **L'onglet Git** a deux faces : les modifications (la feuille de validation
+  posée dans le tableau) et l'historique (le panneau de l'éditeur — graphe,
+  recherche, fichiers du commit — à côté du diff du commit choisi).
 - **L'onglet Tests** montre par défaut les seuls tests écrits dans un fichier
   que la branche a touché — depuis sa base ou en cours (`branch_touched`,
   `tests_view::rows_among`) ; le même filtre existe, éteint, dans l'éditeur.

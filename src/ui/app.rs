@@ -1136,6 +1136,8 @@ pub struct ClaudhubApp {
     /// The terminal each board's home shows under its sub-tabs, once one
     /// was pressed — see `focus::shown_terminal`; not kept.
     pub(super) home_terminal: HashMap<PathBuf, u64>,
+    /// The boards whose git tab shows the history rather than the changes.
+    pub(super) git_history: std::collections::HashSet<PathBuf>,
     /// The PR tab's form, for the worktree it was made for — see
     /// `ui::pr_view`.
     pub(super) pr_form: Option<crate::ui::pr_view::PrForm>,
@@ -1639,6 +1641,7 @@ impl ClaudhubApp {
             home_mode: crate::ui::store::Store::global(cx).session.home_mode,
             focus_note_shown: HashMap::new(),
             home_terminal: HashMap::new(),
+            git_history: Default::default(),
             pr_form: None,
             pr_reply: None,
             focus_chosen: crate::ui::store::Store::global(cx)

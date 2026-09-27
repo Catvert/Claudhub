@@ -35,7 +35,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenu},
-    v_flex, ActiveTheme, Sizable as _,
+    v_flex, ActiveTheme, Selectable as _, Sizable as _,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Pixels, SharedString, Window,
@@ -1094,7 +1094,7 @@ impl ClaudhubApp {
         // terminals, not the board.
         let least_width = match view {
             View::Home => super::summary_view::HOME_LEAST,
-            View::Git => GIT_LIST_WIDTH + 8. + column_min,
+            View::Git => GIT_LIST_WIDTH.max(420.) + 8. + column_min,
             View::Notes => NOTES_LIST_WIDTH + 8. + column_min,
             View::Review => super::changes_view::REVIEW_LIST_WIDTH + column_min,
             View::Todo | View::Terminals | View::Pr => column_min,
@@ -1221,6 +1221,101 @@ impl ClaudhubApp {
     /// with the way to merge it there — and the commits it adds, over the
     /// Changes panel and its commit box; the diff on the right.
     fn render_git_view(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let history = self.git_history.contains(path);
+        let switch = |id: &'static str, label: SharedString, glyph: &'static str, on: bool| {
+            let board = path.to_path_buf();
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon(glyph))
+                .label(label)
+                .selected(on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if id == "focus-git-history" {
+                        this.git_history.insert(board.clone());
+                    } else {
+                        this.git_history.remove(&board);
+                    }
+                    cx.notify();
+                }))
+        };
+        let bar = h_flex()
+            .flex_none()
+            .gap_1()
+            .child(switch(
+                "focus-git-changes",
+                tr!("focus-git-changes"),
+                "git-commit-horizontal",
+                !history,
+            ))
+            .child(switch(
+                "focus-git-history",
+                tr!("focus-git-history"),
+                "history",
+                history,
+            ));
+        let body = if history {
+            self.render_git_history(path, window, cx)
+        } else {
+            self.render_git_changes(path, window, cx)
+        };
+        v_flex()
+            .size_full()
+            .gap_2()
+            .child(bar)
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .into_any_element()
+    }
+
+    /// The git view's history: the editor's history panel — the graph, its
+    /// search, the files of the commit chosen — beside that commit's diff.
+    fn render_git_history(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.active.as_deref() != Some(path) {
+            return self.follow_the_active(path, cx);
+        }
+        if self.commit_sheet {
+            return centered(tr!("focus-review-sheet"), cx);
+        }
+        let theme = cx.theme().clone();
+        self.ensure_history(cx);
+        let on_commit = self
+            .review
+            .get(path)
+            .is_some_and(|state| matches!(state.range, crate::git::DiffRange::Commit { .. }));
+        let history = self.render_history(window, cx).into_any_element();
+        let diff = if on_commit {
+            self.render_diff(window, cx).into_any_element()
+        } else {
+            centered(tr!("focus-git-pick-commit"), cx)
+        };
+        let boxed = |el: gpui_kit::Div| {
+            el.h_full()
+                .overflow_hidden()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+        };
+        h_flex()
+            .size_full()
+            .gap_2()
+            .child(boxed(v_flex().flex_grow(3.).flex_basis(px(0.)).min_w(px(420.))).child(history))
+            .child(boxed(v_flex().flex_grow(2.).flex_basis(px(0.)).min_w_0()).child(diff))
+            .into_any_element()
+    }
+
+    /// The git view's changes: the commit sheet laid in the board.
+    fn render_git_changes(
         &mut self,
         path: &Path,
         window: &mut Window,
