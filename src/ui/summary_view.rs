@@ -1211,79 +1211,92 @@ impl ClaudhubApp {
                         .into_any_element(),
                 );
                 // Every file, the heaviest first, in a list that scrolls: a
-                // press opens its review.
-                let mut listed: Vec<AnyElement> = Vec::new();
-                for (index, (file, added, removed, share)) in
-                    focus::heaviest(files, files.len()).into_iter().enumerate()
-                {
-                    let name = file
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let (board, pressed) = (path.to_path_buf(), file.clone());
-                    listed.push(
-                        h_flex()
-                            .id(("focus-home-review-file", index))
-                            .gap_2()
-                            .items_center()
-                            .text_xs()
-                            .rounded(theme.radius)
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.list_hover))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_from_home(
-                                    &board,
-                                    pressed.clone(),
-                                    GitFace::Review,
-                                    window,
-                                    cx,
-                                );
-                            }))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(px(64.))
-                                    .h(px(6.))
-                                    .rounded_full()
-                                    .bg(theme.secondary)
+                // press opens its review. **Virtual**: a branch can carry
+                // well over a thousand files, and every one of them laid out
+                // on every frame slowed the whole window.
+                let listed = std::rc::Rc::new(focus::heaviest(files, files.len()));
+                let count = listed.len();
+                let row = super::theme::row_height(cx);
+                let (entity, board) = (cx.entity(), path.to_path_buf());
+                let (hover, bar, fill, radius) = (
+                    theme.list_hover,
+                    theme.secondary,
+                    theme.info.opacity(0.7),
+                    theme.radius,
+                );
+                let (added_fg, removed_fg) = (diff.added_fg, diff.removed_fg);
+                rows.push(
+                    gpui_kit::uniform_list("focus-home-review-files", count, move |range, _, _| {
+                        range
+                            .map(|index| {
+                                let (file, added, removed, share) = &listed[index];
+                                let name = file
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                let (app, board, pressed) =
+                                    (entity.clone(), board.clone(), file.clone());
+                                h_flex()
+                                    .id(("focus-home-review-file", index))
+                                    .h(row)
+                                    .gap_2()
+                                    .items_center()
+                                    .text_xs()
+                                    .rounded(radius)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(hover))
+                                    .on_click(move |_, window, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.open_from_home(
+                                                &board,
+                                                pressed.clone(),
+                                                GitFace::Review,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    })
                                     .child(
                                         div()
-                                            .h_full()
+                                            .flex_none()
+                                            .w(px(64.))
+                                            .h(px(6.))
                                             .rounded_full()
-                                            .bg(theme.info.opacity(0.7))
-                                            .w(px(64. * share.max(0.04))),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(SharedString::from(name)),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(diff.added_fg)
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(diff.removed_fg)
-                                    .child(format!("−{removed}")),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                rows.push(
-                    v_flex()
-                        .id("focus-home-review-files")
-                        .max_h(px(HOME_REVIEW_HEIGHT))
-                        .overflow_y_scroll()
-                        .gap_0p5()
-                        .children(listed)
-                        .into_any_element(),
+                                            .bg(bar)
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .rounded_full()
+                                                    .bg(fill)
+                                                    .w(px(64. * share.max(0.04))),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(SharedString::from(name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(added_fg)
+                                            .child(format!("+{added}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(removed_fg)
+                                            .child(format!("−{removed}")),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
+                    })
+                    // A virtual list measures nothing: its height is said.
+                    .h(px(HOME_REVIEW_HEIGHT).min(row * count as f32))
+                    .into_any_element(),
                 );
             }
             None if self.active.as_deref() != Some(path) => rows.push(
