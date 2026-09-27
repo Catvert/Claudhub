@@ -132,11 +132,7 @@ impl ClaudhubApp {
                         continue;
                     }
                     view.update(cx, |view, _| view.interrupt());
-                    if let Some(terminal) = self
-                        .terminals
-                        .iter_mut()
-                        .find(|terminal| terminal.view.entity_id() == view.entity_id())
-                    {
+                    if let Some(terminal) = self.terminal_mut(view.entity_id().as_u64()) {
                         terminal.stopping = true;
                     }
                 }

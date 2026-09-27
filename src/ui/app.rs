@@ -432,6 +432,11 @@ pub struct ReviewState {
     /// lists, the reviews, the collapses. A cache built under an older number
     /// is thrown away.
     pub rows_epoch: u64,
+    /// The home screen's lists of this worktree, built once and dropped with
+    /// `row_cache`: the changes node's files, and the review card's tree —
+    /// each copied out of the state at every frame, per board, before.
+    pub home_changes: Option<crate::ui::changes_view::ChangesList>,
+    pub home_review: Option<crate::ui::summary_view::ReviewCard>,
 }
 
 impl ReviewState {
@@ -442,6 +447,8 @@ impl ReviewState {
     pub fn rows_changed(&mut self) {
         self.rows_epoch += 1;
         self.row_cache.clear();
+        self.home_changes = None;
+        self.home_review = None;
     }
 }
 
@@ -537,6 +544,8 @@ impl Default for ReviewState {
             pending_note: None,
             row_cache: HashMap::new(),
             rows_epoch: 0,
+            home_changes: None,
+            home_review: None,
         }
     }
 }
@@ -3486,24 +3495,21 @@ impl ClaudhubApp {
                 entity.update(cx, |this, cx| this.reconcile(worktree, true, push, cx));
             }
         };
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, worktree, rebasing) = (entity.clone(), worktree.clone(), rebasing.clone());
-            dialog
-                .title(tr!("diverge-title"))
-                .overlay_closable(false)
-                .close_button(false)
-                .child(div().text_sm().child(body.clone()))
-                .footer(super::dialogs::choose(
+        super::dialogs::ask(
+            entity,
+            tr!("diverge-title"),
+            move || div().text_sm().child(body.clone()).into_any_element(),
+            move || {
+                super::dialogs::choose(
                     tr!("diverge-merge"),
                     tr!("diverge-rebase"),
-                    rebasing,
-                ))
-                .on_ok(move |_, _window, cx| {
-                    let worktree = worktree.clone();
-                    entity.update(cx, |this, cx| this.reconcile(worktree, false, push, cx));
-                    true
-                })
-        });
+                    rebasing.clone(),
+                )
+            },
+            move |this, _, cx| this.reconcile(worktree.clone(), false, push, cx),
+            window,
+            cx,
+        );
     }
 
     /// Sends the reconciliation, under the action the failed gesture had worn:
@@ -5194,6 +5200,24 @@ impl ClaudhubApp {
 }
 
 impl ClaudhubApp {
+    /// The open terminal whose view has this id — the id a node, a tab or a
+    /// board keeps of it. A worktree's are `terminals_of`.
+    pub(super) fn terminal(&self, id: u64) -> Option<&super::terminal_view::OpenTerminal> {
+        self.terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id().as_u64() == id)
+    }
+
+    /// The same, to change it.
+    pub(super) fn terminal_mut(
+        &mut self,
+        id: u64,
+    ) -> Option<&mut super::terminal_view::OpenTerminal> {
+        self.terminals
+            .iter_mut()
+            .find(|terminal| terminal.view.entity_id().as_u64() == id)
+    }
+
     pub(super) fn active_path(&self) -> Option<PathBuf> {
         self.active.clone()
     }
@@ -5232,42 +5256,40 @@ impl ClaudhubApp {
         }
         let terminals = (!self.terminals.is_empty())
             .then(|| tr!("menu-reset-layout-terminals", { count: self.terminals.len() }));
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            dialog
-                .title(tr!("menu-reset-layout-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .children(terminals.clone().map(|line| div().text_sm().child(line)))
-                        .children(
-                            busy.iter()
-                                .map(|label| div().text_sm().child(label.clone())),
-                        )
-                        .when(!unsaved.is_empty(), |el| {
-                            el.child(div().text_sm().child(tr!("menu-reset-layout-unsaved")))
-                                .children(
-                                    unsaved
-                                        .iter()
-                                        .map(|path| div().text_sm().child(path.clone())),
-                                )
-                        })
-                        .child(div().text_xs().child(tr!("menu-reset-layout-help"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::submit(tr!("menu-reset-layout")))
-                .on_ok(move |_, window, cx| {
-                    // After the dialog has gone: the rebuild moves the focus,
-                    // and a dialog still up would take it back.
-                    let entity = entity.clone();
-                    window.defer(cx, move |window, cx| {
-                        entity.update(cx, |this, cx| this.reset_layout_now(window, cx));
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("menu-reset-layout-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .children(terminals.clone().map(|line| div().text_sm().child(line)))
+                    .children(
+                        busy.iter()
+                            .map(|label| div().text_sm().child(label.clone())),
+                    )
+                    .when(!unsaved.is_empty(), |el| {
+                        el.child(div().text_sm().child(tr!("menu-reset-layout-unsaved")))
+                            .children(
+                                unsaved
+                                    .iter()
+                                    .map(|path| div().text_sm().child(path.clone())),
+                            )
+                    })
+                    .child(div().text_xs().child(tr!("menu-reset-layout-help")))
+                    .into_any_element()
+            },
+            || super::dialogs::submit(tr!("menu-reset-layout")),
+            |_, window, cx| {
+                // After the dialog has gone: the rebuild moves the focus,
+                // and a dialog still up would take it back.
+                let entity = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    entity.update(cx, |this, cx| this.reset_layout_now(window, cx));
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     fn reset_layout_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -55,8 +55,21 @@ const BOARD_BAR: &str = "focus-board-bar";
 
 /// The sidebar's width.
 const SIDEBAR_WIDTH: f32 = 260.;
-/// What each worktree's agents say, the ones at rest left out.
+/// What each worktree's agents say. Rest reads as nothing everywhere.
 pub(super) type Doings = std::collections::HashMap<PathBuf, Doing>;
+
+/// What the home screen reads of the application once a frame, and hands
+/// down: the worktrees on show and what their agents say were worked out
+/// again by each of its parts — the sidebar, the boards, the links, each
+/// board's notes —, thirty times a second while an agent works.
+pub(super) struct HomeFrame {
+    /// Every live worktree of every project, in the sidebar's order.
+    pub(super) live: Vec<PathBuf>,
+    /// The worktrees chosen in the sidebar — see `focus_worktrees`.
+    pub(super) shown: Vec<PathBuf>,
+    /// What every live worktree's Claudes say — see `worktree_doings`.
+    pub(super) doings: Doings,
+}
 /// The sidebar folded to its rail: a column of initials.
 const RAIL_WIDTH: f32 = 52.;
 /// How many of the commits a branch adds its git view lists.
@@ -75,14 +88,14 @@ impl ClaudhubApp {
     /// The focus view: the sidebar, and the worktrees on show.
     pub(super) fn render_overview_focus(
         &mut self,
+        frame: &HomeFrame,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let shown = self.focus_worktrees();
-        let doings = self.sidebar_doings();
-        let at_work = self.prepare_laid_out(&shown, &doings, cx);
+        let shown = &frame.shown;
+        let at_work = self.prepare_laid_out(shown, &frame.doings, cx);
         let gap = window.rem_size() * 0.75;
-        let sidebar = self.render_focus_sidebar(&shown, &doings, cx);
+        let sidebar = self.render_focus_sidebar(shown, &frame.doings, cx);
         let main: AnyElement = match self.overview_zoomed.clone() {
             // A maximised node fills the middle, the sidebar staying: it is
             // how one goes elsewhere.
@@ -101,7 +114,7 @@ impl ClaudhubApp {
             None => {
                 // Their lists of changes, even if the pickers leave them out
                 // of what the home screen reads.
-                self.ensure_changes_read(&shown, cx);
+                self.ensure_changes_read(shown, cx);
                 // A wheel's slide goes on where the last frame left it.
                 let scroll = self.focus_scroll.clone();
                 self.motion(BOARD_BAR.into(), Axes::Both)
@@ -178,15 +191,16 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// What every worktree's Claudes say, loudest first: the sidebar
-    /// dresses each row as the boards dress a terminal.
-    pub(super) fn sidebar_doings(&self) -> Doings {
-        let among: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
-        among
-            .iter()
-            .map(|path| (path.clone(), self.worktree_doing(path, &among)))
-            .filter(|(_, doing)| *doing != Doing::Rest)
-            .collect()
+    /// This frame's `HomeFrame`: what every worktree's Claudes say — the
+    /// sidebar dresses each row as the boards dress a terminal — and which
+    /// are on show.
+    pub(super) fn home_frame(&self) -> HomeFrame {
+        let live: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
+        HomeFrame {
+            shown: self.shown_among(&live),
+            doings: self.worktree_doings(&live),
+            live,
+        }
     }
 
     /// The worktrees the middle shows, side by side — see
@@ -194,8 +208,16 @@ impl ClaudhubApp {
     /// the one on show, else the first of all.
     pub(super) fn focus_worktrees(&self) -> Vec<PathBuf> {
         let on_show: Vec<PathBuf> = self.repos.iter().flat_map(live_worktrees).collect();
-        let primary = self.active.clone().or_else(|| on_show.first().cloned());
-        focus::shown_worktrees(&self.focus_chosen, primary.as_deref(), &on_show)
+        self.shown_among(&on_show)
+    }
+
+    /// The same, `on_show` being every live worktree.
+    fn shown_among(&self, on_show: &[PathBuf]) -> Vec<PathBuf> {
+        let primary = self
+            .active
+            .as_deref()
+            .or(on_show.first().map(PathBuf::as_path));
+        focus::shown_worktrees(&self.focus_chosen, primary, on_show)
     }
 
     /// Keeps what the sidebar chose, for the next session too.
@@ -883,36 +905,9 @@ impl ClaudhubApp {
             .get(path)
             .copied()
             .filter(|summary| !summary.is_empty());
-        let terminals = self
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == path)
-            .count();
-        let diff = super::theme::DiffColors::of(cx);
+        let terminals = self.terminals_of(path).count();
         let open = path.to_path_buf();
-        let volume = summary.map(|summary| {
-            h_flex()
-                .flex_none()
-                .gap_1()
-                .when(summary.added > 0, |el| {
-                    el.child(
-                        div()
-                            .text_color(diff.added_fg)
-                            .child(format!("+{}", focus::short_count(summary.added))),
-                    )
-                })
-                .when(summary.removed > 0, |el| {
-                    el.child(
-                        div()
-                            .text_color(diff.removed_fg)
-                            .child(format!("−{}", focus::short_count(summary.removed))),
-                    )
-                })
-                // A rename or a binary moves no line: the files, then.
-                .when(summary.added == 0 && summary.removed == 0, |el| {
-                    el.child(SharedString::from(summary.files.to_string()))
-                })
-        });
+        let volume = summary.map(|summary| super::topbar::volume_short(summary, cx));
         h_flex()
             .id(SharedString::from(format!("focus-row-{}", path.display())))
             .relative()
@@ -996,26 +991,26 @@ impl ClaudhubApp {
 
     /// A worktree's terminals, in the order they were opened.
     pub(super) fn board_terminals(&self, path: &Path) -> Vec<u64> {
-        self.terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == path)
+        self.terminals_of(path)
             .map(|terminal| terminal.view.entity_id().as_u64())
             .collect()
     }
 
-    /// A worktree's notes and its repository's, the hidden ones left out.
+    /// A board's worktree's notes and its repository's, the hidden ones
+    /// left out — what its checkout holds on the plane, read for it alone
+    /// and not out of the whole plane's groups, once per board and frame.
     pub(super) fn board_notes(&self, path: &Path) -> Vec<PathBuf> {
         let hidden = &self.overview_hand.hidden;
-        let groups = self.overview_groups();
-        let group = groups
-            .iter()
-            .find(|group| group.checkouts.iter().any(|c| c.path == path));
-        let checkout = group.and_then(|group| group.checkouts.iter().find(|c| c.path == path));
-        checkout
-            .map(|checkout| checkout.notes.clone())
+        let Some(repo) = self.repos.iter().find(|repo| {
+            repo.worktrees
+                .iter()
+                .any(|worktree| worktree.path == path && !worktree.prunable)
+        }) else {
+            return Vec::new();
+        };
+        self.worktree_notes(path)
             .into_iter()
-            .flatten()
-            .chain(group.map(|group| group.notes.clone()).into_iter().flatten())
+            .chain(self.repo_notes(repo))
             .filter(|note| !hidden.contains(&Node::Note(note.clone())))
             .collect()
     }
@@ -1023,13 +1018,18 @@ impl ClaudhubApp {
     /// The note a board's home shows as its principal one — see
     /// `focus::principal_note`.
     pub(super) fn principal_note(&self, path: &Path, cx: &App) -> Option<PathBuf> {
+        self.principal_among(path, &self.board_notes(path), cx)
+    }
+
+    /// The same, among a board's notes already read.
+    fn principal_among(&self, path: &Path, notes: &[PathBuf], cx: &App) -> Option<PathBuf> {
         let pinned = super::store::Store::global(cx)
             .worktrees
             .get(path)
             .and_then(|state| state.pinned_note.clone());
-        let notes: Vec<(PathBuf, Option<String>)> = self
-            .board_notes(path)
-            .into_iter()
+        let notes: Vec<(PathBuf, Option<String>)> = notes
+            .iter()
+            .cloned()
             .map(|note| {
                 let created = self
                     .canvas_entry(&note)
@@ -1270,34 +1270,25 @@ impl ClaudhubApp {
             })
             .map(|_| crate::github::unresolved(&self.github.view_threads).len())
             .filter(|open| *open > 0);
-        let buttons: Vec<AnyElement> = GitFace::ALL
-            .into_iter()
-            .map(|each| {
-                let (glyph, name) = git_face_name(each);
-                let count = match each {
-                    GitFace::Changes => files,
-                    GitFace::Pr => threads,
-                    GitFace::History | GitFace::Review => None,
-                };
-                let label = match count {
-                    Some(count) => SharedString::from(format!("{name} {count}")),
-                    None => name,
-                };
-                let board = path.to_path_buf();
-                Button::new(SharedString::from(format!("focus-git-{each:?}")))
-                    .ghost()
-                    .small()
-                    .icon(icon(glyph))
-                    .label(label)
-                    .selected(each == face)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.git_face.insert(board.clone(), each);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let bar = h_flex().flex_none().gap_1().children(buttons);
+        let faces = GitFace::ALL.map(|each| {
+            let (glyph, name) = git_face_name(each);
+            let count = match each {
+                GitFace::Changes => files,
+                GitFace::Pr => threads,
+                GitFace::History | GitFace::Review => None,
+            };
+            (each, glyph, name, count)
+        });
+        let bar = face_bar(
+            path,
+            "focus-git",
+            faces,
+            face,
+            |this, board, face| {
+                this.git_face.insert(board, face);
+            },
+            cx,
+        );
         let body = match face {
             GitFace::Changes => self.render_git_changes(path, window, cx),
             GitFace::History => self.render_git_history(path, window, cx),
@@ -1322,31 +1313,30 @@ impl ClaudhubApp {
             .and_then(|state| state.todo.as_ref())
             .map(|todo| todo.tasks.len() - todo.done())
             .filter(|open| *open > 0);
-        let buttons: Vec<AnyElement> = [NotesFace::Notes, NotesFace::Todo]
-            .into_iter()
-            .map(|each| {
-                let (glyph, name) = match each {
-                    NotesFace::Notes => ("sticky-note", tr!("focus-tab-notes")),
-                    NotesFace::Todo => ("check-check", tr!("todo-title")),
-                };
-                let label = match (each, open_tasks) {
-                    (NotesFace::Todo, Some(open)) => SharedString::from(format!("{name} {open}")),
-                    _ => name,
-                };
-                let board = path.to_path_buf();
-                Button::new(SharedString::from(format!("focus-notes-{each:?}")))
-                    .ghost()
-                    .small()
-                    .icon(icon(glyph))
-                    .label(label)
-                    .selected(each == face)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.notes_face.insert(board.clone(), each);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
+        let faces = [
+            (
+                NotesFace::Notes,
+                "sticky-note",
+                tr!("focus-tab-notes"),
+                None,
+            ),
+            (
+                NotesFace::Todo,
+                "check-check",
+                tr!("todo-title"),
+                open_tasks,
+            ),
+        ];
+        let bar = face_bar(
+            path,
+            "focus-notes",
+            faces,
+            face,
+            |this, board, face| {
+                this.notes_face.insert(board, face);
+            },
+            cx,
+        );
         let body = match face {
             NotesFace::Notes => self.render_notes_view(path, cx),
             NotesFace::Todo => self.render_todo_view(path, cx),
@@ -1354,7 +1344,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .gap_2()
-            .child(h_flex().flex_none().gap_1().children(buttons))
+            .child(bar)
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
     }
@@ -1577,12 +1567,12 @@ impl ClaudhubApp {
     /// principal one until another is pressed.
     fn render_notes_view(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let principal = self.principal_note(path, cx);
+        let mut notes = self.board_notes(path);
+        let principal = self.principal_among(path, &notes, cx);
         let pinned = super::store::Store::global(cx)
             .worktrees
             .get(path)
             .and_then(|state| state.pinned_note.clone());
-        let mut notes = self.board_notes(path);
         if let Some(principal) = &principal {
             notes.retain(|note| note != principal);
             notes.insert(0, principal.clone());
@@ -1788,10 +1778,7 @@ impl ClaudhubApp {
         let tiles: Vec<AnyElement> = ids
             .iter()
             .filter_map(|id| {
-                let terminal = self
-                    .terminals
-                    .iter()
-                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)?;
+                let terminal = self.terminal(*id)?;
                 let doing = at_work
                     .terminals
                     .get(id)
@@ -1875,9 +1862,7 @@ impl ClaudhubApp {
             Node::Worktree(path) => ("git-branch", self.project_label(path).1),
             Node::Terminal(id) => (
                 "square-terminal",
-                self.terminals
-                    .iter()
-                    .find(|terminal| terminal.view.entity_id().as_u64() == *id)
+                self.terminal(*id)
                     .map(|terminal| {
                         terminal
                             .name
@@ -1897,6 +1882,40 @@ impl ClaudhubApp {
             Node::Review(_) => view_name(View::Review),
         }
     }
+}
+
+/// The bar of a tab's faces: each its glyph, its name and what waits in it,
+/// the one `shown` lit; a press shows another on `board` — `choose`.
+fn face_bar<F: Copy + PartialEq + std::fmt::Debug + 'static>(
+    board: &Path,
+    id: &'static str,
+    faces: impl IntoIterator<Item = (F, &'static str, SharedString, Option<usize>)>,
+    shown: F,
+    choose: fn(&mut ClaudhubApp, PathBuf, F),
+    cx: &mut Context<ClaudhubApp>,
+) -> gpui_kit::Div {
+    let buttons: Vec<AnyElement> = faces
+        .into_iter()
+        .map(|(each, glyph, name, count)| {
+            let label = match count {
+                Some(count) => SharedString::from(format!("{name} {count}")),
+                None => name,
+            };
+            let board = board.to_path_buf();
+            Button::new(SharedString::from(format!("{id}-{each:?}")))
+                .ghost()
+                .small()
+                .icon(icon(glyph))
+                .label(label)
+                .selected(each == shown)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    choose(this, board.clone(), each);
+                    cx.notify();
+                }))
+                .into_any_element()
+        })
+        .collect();
+    h_flex().flex_none().gap_1().children(buttons)
 }
 
 /// A face of the git tab's glyph and name.
@@ -1960,7 +1979,7 @@ pub(super) fn edge_signal(
     theme: &gpui_kit::component::Theme,
 ) -> Option<AnyElement> {
     let doing = doing.copied().filter(|doing| *doing != Doing::Rest)?;
-    let (work, asks) = (theme.warning, theme.danger);
+    let tint = super::theme::doing_color(doing, theme)?;
     let seconds = super::overview_view::flow_seconds();
     Some(
         canvas(
@@ -1982,12 +2001,12 @@ pub(super) fn edge_signal(
                 match doing {
                     Doing::Waiting => {
                         let breath = overview::breath(seconds, super::overview_view::PULSE_PERIOD);
-                        window.paint_quad(bar(0., height, asks.opacity(0.35 + 0.65 * breath)));
+                        window.paint_quad(bar(0., height, tint.opacity(0.35 + 0.65 * breath)));
                     }
                     _ => {
-                        window.paint_quad(bar(0., height, work.opacity(0.3)));
+                        window.paint_quad(bar(0., height, tint.opacity(0.3)));
                         if let Some((top, bottom)) = focus::edge_run(height, seconds) {
-                            window.paint_quad(bar(top, bottom, work));
+                            window.paint_quad(bar(top, bottom, tint));
                         }
                     }
                 }

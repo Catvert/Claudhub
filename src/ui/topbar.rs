@@ -134,6 +134,21 @@ pub(super) fn volume_on(
     on: Option<gpui_kit::Hsla>,
     cx: &gpui_kit::App,
 ) -> impl IntoElement {
+    volume_as(summary, on, |count| count.to_string(), cx)
+}
+
+/// The same, its counts read as an order of size — `focus::short_count` —
+/// for a row that has little room.
+pub(super) fn volume_short(summary: crate::git::Summary, cx: &gpui_kit::App) -> impl IntoElement {
+    volume_as(summary, None, crate::ui::focus::short_count, cx)
+}
+
+fn volume_as(
+    summary: crate::git::Summary,
+    on: Option<gpui_kit::Hsla>,
+    count: impl Fn(usize) -> String,
+    cx: &gpui_kit::App,
+) -> impl IntoElement {
     let mut colors = crate::ui::theme::DiffColors::of(cx);
     if let Some(on) = on {
         colors.added_fg = on;
@@ -143,10 +158,11 @@ pub(super) fn volume_on(
         .flex_none()
         .gap_1()
         .text_xs()
-        .children(crate::ui::theme::volume(
+        .children(crate::ui::theme::volume_as(
             summary.added,
             summary.removed,
             &colors,
+            count,
         ))
         .when(summary.added == 0 && summary.removed == 0, |el| {
             el.child(
@@ -219,15 +235,8 @@ pub(super) fn activity_word(agent: &crate::agent::State) -> Option<SharedString>
 }
 
 fn agent_colour(agent: &crate::agent::State, cx: &gpui_kit::App) -> gpui_kit::Hsla {
-    use crate::agent::Activity;
-    match agent.activity {
-        Activity::Working => cx.theme().warning,
-        // It needs you: the one state that asks for a hand, in the colour the
-        // window keeps for what cannot go on without you.
-        Activity::Waiting(_) => cx.theme().danger,
-        Activity::Finished => cx.theme().success,
-        Activity::Idle => cx.theme().muted_foreground,
-    }
+    crate::ui::theme::activity_color(&agent.activity, cx.theme())
+        .unwrap_or(cx.theme().muted_foreground)
 }
 
 /// The badge without the name: the dot, and the count when there is more than

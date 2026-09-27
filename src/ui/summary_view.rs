@@ -30,6 +30,7 @@ use crate::ui::focus::{self, GitFace, View};
 use crate::ui::focus_view::{tab_name, view_name};
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
+use crate::ui::overview_view::heard;
 
 /// The least width of the home: its two columns side by side, and the
 /// gap between them.
@@ -48,6 +49,45 @@ const HOME_COMMITS: usize = 5;
 const HOME_FILES: usize = 8;
 /// The height the review's list of files scrolls within.
 const HOME_REVIEW_HEIGHT: f32 = 240.;
+
+/// A tab of a board — a view, or a terminal under the home's —: lit, it
+/// stands on the card's ground in its border; unlit, muted, lit under the
+/// pointer.
+fn tab_pill(
+    tab: gpui_kit::Stateful<gpui_kit::Div>,
+    lit: bool,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    tab.gap_1p5()
+        .items_center()
+        .cursor_pointer()
+        .rounded(theme.radius)
+        .text_sm()
+        .when(lit, |el| {
+            el.bg(theme.background)
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.foreground)
+        })
+        .when(!lit, |el| {
+            el.text_color(theme.muted_foreground)
+                .hover(|style| style.bg(theme.list_hover))
+        })
+}
+
+/// The review card's tree, for the range and the folds it was built under.
+/// Built once per file list — `ReviewState::rows_changed` drops it — and per
+/// fold: every board's card copied the list out and sorted it into a tree at
+/// every frame, thirty a second while an agent works.
+pub(crate) struct ReviewCard {
+    range: crate::git::DiffRange,
+    toggled: std::collections::HashSet<std::path::PathBuf>,
+    rows: std::rc::Rc<Vec<focus::ReviewRow>>,
+    files: usize,
+    added: usize,
+    removed: usize,
+}
+
 impl ClaudhubApp {
     /// A board's tabs — the home first —, each saying what waits in it,
     /// and at the right what adds one more.
@@ -103,52 +143,35 @@ impl ClaudhubApp {
                 };
                 // The agents' tab wears the loudest of them.
                 let signal = (tab == View::Terminals)
-                    .then(|| match loudest {
-                        Doing::Working => Some(theme.warning),
-                        Doing::Waiting => Some(theme.danger),
-                        Doing::Rest => None,
-                    })
+                    .then(|| super::theme::doing_color(loudest, &theme))
                     .flatten();
                 let board = path.to_path_buf();
-                h_flex()
-                    .id(SharedString::from(format!("focus-tab-{tab:?}")))
-                    .flex_none()
-                    .h(super::theme::bar_height(cx))
-                    .px_3()
-                    .gap_1p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .rounded(theme.radius)
-                    .text_sm()
-                    .when(lit, |el| {
-                        el.bg(theme.background)
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_color(theme.foreground)
-                    })
-                    .when(!lit, |el| {
-                        el.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.show_board_view(&board, tab, cx);
-                    }))
-                    .child(
-                        icon(glyph)
-                            .xsmall()
-                            .when(lit, |icon| icon.text_color(theme.ring)),
-                    )
-                    .child(title)
-                    .children(count.map(|count| {
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(count.to_string()))
-                    }))
-                    .children(
-                        signal.map(|tint| div().flex_none().size(px(6.)).rounded_full().bg(tint)),
-                    )
-                    .into_any_element()
+                tab_pill(
+                    h_flex()
+                        .id(SharedString::from(format!("focus-tab-{tab:?}")))
+                        .flex_none()
+                        .h(super::theme::bar_height(cx))
+                        .px_3(),
+                    lit,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_board_view(&board, tab, cx);
+                }))
+                .child(
+                    icon(glyph)
+                        .xsmall()
+                        .when(lit, |icon| icon.text_color(theme.ring)),
+                )
+                .child(title)
+                .children(count.map(|count| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(count.to_string()))
+                }))
+                .children(signal.map(|tint| div().flex_none().size(px(6.)).rounded_full().bg(tint)))
+                .into_any_element()
             })
             .collect();
         let detail = self.view_detail(path, view, cx);
@@ -381,12 +404,7 @@ impl ClaudhubApp {
     fn reply_to(&mut self, path: &Path, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.home_terminal.insert(path.to_path_buf(), id);
         self.show_board_view(path, View::Home, cx);
-        if let Some(view) = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id().as_u64() == id)
-            .map(|terminal| terminal.view.clone())
-        {
+        if let Some(view) = self.terminal(id).map(|terminal| terminal.view.clone()) {
             super::dialogs::focus_field(&view, window, cx);
         }
     }
@@ -404,9 +422,7 @@ impl ClaudhubApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let terminals: Vec<(u64, Option<String>)> = self
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.worktree == path)
+            .terminals_of(path)
             .map(|terminal| (terminal.view.entity_id().as_u64(), terminal.session.clone()))
             .collect();
         let waiting: Vec<(u64, bool)> = terminals
@@ -421,57 +437,42 @@ impl ClaudhubApp {
             let activity = session
                 .as_deref()
                 .and_then(|session| self.agents.session(session));
-            let tint = match (activity, doing) {
-                (_, Doing::Waiting) | (Some(crate::agent::Activity::Waiting(_)), _) => theme.danger,
-                (_, Doing::Working) | (Some(crate::agent::Activity::Working), _) => theme.warning,
-                (Some(crate::agent::Activity::Finished), _) => theme.success,
-                _ => theme.muted_foreground.opacity(0.5),
-            };
+            // A question first, from either, then work; what finished says
+            // so once nothing else speaks.
+            let loud = overview::loudest([doing, activity.map_or(Doing::Rest, heard)]);
+            let tint = super::theme::doing_color(loud, &theme)
+                .or_else(|| activity.and_then(|a| super::theme::activity_color(a, &theme)))
+                .unwrap_or(theme.muted_foreground.opacity(0.5));
             let lit = shown == Some(*id);
             let (board, pressed) = (path.to_path_buf(), *id);
             tabs.push(
-                h_flex()
-                    .id(("focus-home-terminal-tab", *id as usize))
-                    .flex_none()
-                    .max_w(px(220.))
-                    .h(super::theme::bar_height(cx))
-                    .px_2()
-                    .gap_1p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .rounded(theme.radius)
-                    .text_sm()
-                    .when(lit, |el| {
-                        el.bg(theme.background)
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_color(theme.foreground)
-                    })
-                    .when(!lit, |el| {
-                        el.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reply_to(&board, pressed, window, cx);
-                    }))
-                    .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
-                    .child(div().min_w_0().truncate().child(name))
-                    .child(
-                        Button::new(("focus-home-terminal-close", *id as usize))
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("x"))
-                            .tooltip(tr!("overview-close"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.ask_close_terminal(
-                                    gpui_kit::EntityId::from(pressed),
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .into_any_element(),
+                tab_pill(
+                    h_flex()
+                        .id(("focus-home-terminal-tab", *id as usize))
+                        .flex_none()
+                        .max_w(px(220.))
+                        .h(super::theme::bar_height(cx))
+                        .px_2(),
+                    lit,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.reply_to(&board, pressed, window, cx);
+                }))
+                .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
+                .child(div().min_w_0().truncate().child(name))
+                .child(
+                    Button::new(("focus-home-terminal-close", *id as usize))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("x"))
+                        .tooltip(tr!("overview-close"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.ask_close_terminal(gpui_kit::EntityId::from(pressed), window, cx);
+                        })),
+                )
+                .into_any_element(),
             );
         }
         let worktree = path.to_path_buf();
@@ -521,11 +522,7 @@ impl ClaudhubApp {
                         this.show_board_view(&every, View::Terminals, cx);
                     })),
             );
-        let body = match shown.and_then(|id| {
-            self.terminals
-                .iter()
-                .find(|terminal| terminal.view.entity_id().as_u64() == id)
-        }) {
+        let body = match shown.and_then(|id| self.terminal(id)) {
             // Bare: its name is its sub-tab's, and a window round a
             // terminal that fills the column had nothing to fold or move.
             Some(terminal) => {
@@ -1066,13 +1063,11 @@ impl ClaudhubApp {
     /// the git tab where it is committed.
     fn home_to_commit(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let files: Vec<crate::git::FileStatus> = if self.has_changes(path) {
-            self.review
-                .get(path)
-                .map(|state| state.status.files.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        // Borrowed: the card shows a handful, and the status can list
+        // thousands.
+        let files: &[crate::git::FileStatus] = match self.review.get(path) {
+            Some(state) if self.has_changes(path) => &state.status.files,
+            _ => &[],
         };
         let body = if files.is_empty() {
             div()
@@ -1083,7 +1078,7 @@ impl ClaudhubApp {
         } else {
             let more = files.len().saturating_sub(HOME_FILES);
             let rows: Vec<AnyElement> = files
-                .into_iter()
+                .iter()
                 .take(HOME_FILES)
                 .enumerate()
                 .map(|(index, file)| {
@@ -1167,47 +1162,28 @@ impl ClaudhubApp {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let diff = super::theme::DiffColors::of(cx);
-        let files: Option<Vec<(std::path::PathBuf, usize, usize)>> =
-            self.review.get(path).and_then(|state| {
-                let range = super::review::branch_panel_range(
-                    state.base.as_deref(),
-                    state.review_point.as_ref(),
-                    state.since_review,
-                )?;
-                state.files.get(&range).map(|files| {
-                    files
-                        .iter()
-                        .map(|file| (file.path.clone(), file.added, file.removed))
-                        .collect()
-                })
-            });
+        let card = self.review_card(path);
         let point = self
             .review
             .get(path)
             .and_then(|state| state.review_point.as_ref().map(|point| point.at));
         let open = self.open_finding_count(path);
         let mut rows: Vec<AnyElement> = Vec::new();
-        match &files {
-            Some(files) if files.is_empty() => rows.push(
+        match card {
+            Some((_, 0, _, _)) => rows.push(
                 div()
                     .text_xs()
                     .text_color(muted)
                     .child(tr!("review-clean"))
                     .into_any_element(),
             ),
-            Some(files) => {
-                let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.1, r + f.2));
+            Some((listed, files, added, removed)) => {
                 rows.push(
                     h_flex()
                         .gap_1p5()
                         .text_xs()
-                        .child(tr!("home-files", { count: files.len() }))
-                        .child(div().text_color(diff.added_fg).child(format!("+{added}")))
-                        .child(
-                            div()
-                                .text_color(diff.removed_fg)
-                                .child(format!("−{removed}")),
-                        )
+                        .child(tr!("home-files", { count: files }))
+                        .children(super::theme::volume(added, removed, &diff))
                         .into_any_element(),
                 );
                 // Every file, as a tree: what the card says of a branch is
@@ -1215,27 +1191,13 @@ impl ClaudhubApp {
                 // a folder folds it. **Virtual**: a branch can carry well over
                 // a thousand files, and every one of them laid out on every
                 // frame slowed the whole window.
-                let empty = std::collections::HashSet::new();
-                let toggled = self.home_review_toggled.get(path).unwrap_or(&empty);
-                let listed = std::rc::Rc::new(focus::review_rows(files, toggled));
                 let count = listed.len();
                 let row = super::theme::row_height(cx);
                 let guide = super::theme::indent_guide(cx);
                 let (entity, board) = (cx.entity(), path.to_path_buf());
                 let (hover, radius) = (theme.list_hover, theme.radius);
-                let (added_fg, removed_fg) = (diff.added_fg, diff.removed_fg);
-                let counts = move |added: usize, removed: usize| {
-                    [
-                        div()
-                            .flex_none()
-                            .text_color(added_fg)
-                            .child(format!("+{added}")),
-                        div()
-                            .flex_none()
-                            .text_color(removed_fg)
-                            .child(format!("−{removed}")),
-                    ]
-                };
+                let counts =
+                    move |added: usize, removed: usize| super::theme::volume(added, removed, &diff);
                 rows.push(
                     gpui_kit::uniform_list(
                         "focus-home-review-files",
@@ -1400,6 +1362,44 @@ impl ClaudhubApp {
             body,
             cx,
         )
+    }
+
+    /// The review card's tree and its totals — files, lines added and
+    /// removed —, from its cache: see `ReviewCard`. `None` while the
+    /// branch's list is not in hand.
+    fn review_card(
+        &mut self,
+        path: &Path,
+    ) -> Option<(std::rc::Rc<Vec<focus::ReviewRow>>, usize, usize, usize)> {
+        let state = self.review.get_mut(path)?;
+        let range = super::review::branch_panel_range(
+            state.base.as_deref(),
+            state.review_point.as_ref(),
+            state.since_review,
+        )?;
+        let files = state.files.get(&range)?;
+        let empty = std::collections::HashSet::new();
+        let toggled = self.home_review_toggled.get(path).unwrap_or(&empty);
+        let fresh = state
+            .home_review
+            .as_ref()
+            .is_some_and(|card| card.range == range && card.toggled == *toggled);
+        if !fresh {
+            let listed: Vec<(std::path::PathBuf, usize, usize)> = files
+                .iter()
+                .map(|file| (file.path.clone(), file.added, file.removed))
+                .collect();
+            state.home_review = Some(ReviewCard {
+                rows: std::rc::Rc::new(focus::review_rows(&listed, toggled)),
+                files: listed.len(),
+                added: listed.iter().map(|file| file.1).sum(),
+                removed: listed.iter().map(|file| file.2).sum(),
+                toggled: toggled.clone(),
+                range,
+            });
+        }
+        let card = state.home_review.as_ref()?;
+        Some((card.rows.clone(), card.files, card.added, card.removed))
     }
 
     /// What runs: the environment and the recipes running now, each with

@@ -74,6 +74,14 @@ impl Render for ReviewSheet {
     }
 }
 
+/// The changes node's list: the status's files behind an `Rc`, and how
+/// many are in the index — built once per status (`ReviewState::rows_changed`
+/// drops it), and borrowed by the virtual list at every frame.
+pub(crate) struct ChangesList {
+    files: Rc<Vec<FileStatus>>,
+    staged: usize,
+}
+
 /// The two letters git gives a file, folded into what the list shows: `?`
 /// for a file git does not know, otherwise the index's and the worktree's —
 /// the Changes panel's reading.
@@ -95,11 +103,107 @@ fn codes(file: &FileStatus) -> (String, StatusCode) {
     (text, tint)
 }
 
+/// One file of the changes node: its tick, its code, its name and folder.
+/// The tick stages or unstages it where it is; the rest opens the review on
+/// it.
+fn changes_row(
+    app: &gpui_kit::Entity<ClaudhubApp>,
+    worktree: &Path,
+    index: usize,
+    file: &FileStatus,
+    cx: &mut gpui_kit::App,
+) -> AnyElement {
+    let theme = cx.theme().clone();
+    // Ticked when all of it is in the index; a press puts the rest in, or
+    // takes all of it out — the Changes panel's box.
+    let ticked = file.is_staged() && !file.is_unstaged();
+    let conflicted = file.is_conflicted();
+    let (code, tint) = codes(file);
+    let color = super::theme::status_color(tint, cx);
+    let name = file.file_name();
+    let folder = file.directory();
+    let (tick_app, tick_worktree, tick_path) =
+        (app.clone(), worktree.to_path_buf(), file.path.clone());
+    let (open_app, open_worktree, open_path) =
+        (app.clone(), worktree.to_path_buf(), file.path.clone());
+    h_flex()
+        .id(("overview-changes-row", index))
+        .w_full()
+        .px_2()
+        .h(super::theme::row_height(cx))
+        .gap_1p5()
+        .items_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.list_hover))
+        .on_click(move |_, window, cx| {
+            open_app.update(cx, |this, cx| {
+                this.open_review_sheet(&open_worktree, Some(open_path.clone()), window, cx);
+            });
+        })
+        .child(
+            div()
+                // The tick is its own gesture, not the row's.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Checkbox::new(("overview-changes-stage", index))
+                        .checked(ticked)
+                        .disabled(conflicted || !(ticked || file.is_stageable()))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            tick_app.update(cx, |this, cx| {
+                                this.set_staged(
+                                    tick_worktree.clone(),
+                                    vec![tick_path.clone()],
+                                    !ticked,
+                                    cx,
+                                );
+                            });
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(18.))
+                .text_xs()
+                .font_family(theme.mono_font_family.clone())
+                .text_color(color)
+                .child(SharedString::from(code)),
+        )
+        .child(crate::ui::file_icons::file_icon(&file.path, cx))
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w_full()
+                        .truncate()
+                        .when(conflicted, |el| el.text_color(theme.danger))
+                        .child(SharedString::from(name)),
+                )
+                .when(!folder.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(folder)),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
 impl ClaudhubApp {
     /// A worktree's changes node: its head, its files, and the way into the
     /// review.
     pub(super) fn render_changes_node(
-        &self,
+        &mut self,
         path: &Path,
         zoom: f32,
         cx: &mut Context<Self>,
@@ -111,8 +215,7 @@ impl ClaudhubApp {
         let summary = self.summaries.get(path).copied().unwrap_or_default();
         // The list is the status's, which a worktree nobody opened has only
         // once the home screen asked for it — `ensure_changes_read`.
-        let files: Option<Vec<FileStatus>> =
-            self.listed_status(path).map(|status| status.files.clone());
+        let files = self.changes_list(path);
         let tint = theme.success;
         let app = cx.entity().downgrade();
 
@@ -167,20 +270,29 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
+    /// The node's list, from its cache — see `ChangesList`.
+    fn changes_list(&mut self, path: &Path) -> Option<(Rc<Vec<FileStatus>>, usize)> {
+        self.listed_status(path)?;
+        let state = self.review.get_mut(path)?;
+        let list = state.home_changes.get_or_insert_with(|| ChangesList {
+            staged: state.status.files.iter().filter(|f| f.is_staged()).count(),
+            files: Rc::new(state.status.files.clone()),
+        });
+        Some((list.files.clone(), list.staged))
+    }
+
     /// The node's list and its foot — how much is staged, and the way into
-    /// the review.
+    /// the review. **Virtual**: a worktree can have thousands of files in
+    /// progress, and the node is painted at every frame an agent works.
     fn changes_parts(
         &self,
         path: &Path,
-        files: Option<Vec<FileStatus>>,
+        files: Option<(Rc<Vec<FileStatus>>, usize)>,
         cx: &mut Context<Self>,
     ) -> (AnyElement, AnyElement) {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let staged = files
-            .as_ref()
-            .map_or(0, |files| files.iter().filter(|f| f.is_staged()).count());
-        let worktree = path.to_path_buf();
+        let staged = files.as_ref().map_or(0, |(_, staged)| *staged);
         let body = match files {
             None => div()
                 .flex_1()
@@ -189,22 +301,28 @@ impl ClaudhubApp {
                 .text_color(muted)
                 .child(tr!("overview-changes-reading"))
                 .into_any_element(),
-            Some(files) => v_flex()
-                .id(SharedString::from(format!(
-                    "overview-changes-list-{}",
-                    path.display()
-                )))
-                .flex_1()
-                .min_h_0()
-                .py_1()
-                .overflow_y_scroll()
-                .children(
-                    files
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, file)| self.render_changes_row(&worktree, index, file, cx)),
-                )
-                .into_any_element(),
+            Some((files, _)) => {
+                let (entity, worktree) = (cx.entity(), path.to_path_buf());
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .py_1()
+                    .child(
+                        gpui_kit::uniform_list(
+                            SharedString::from(format!("overview-changes-list-{}", path.display())),
+                            files.len(),
+                            move |range, _, cx| {
+                                range
+                                    .map(|index| {
+                                        changes_row(&entity, &worktree, index, &files[index], cx)
+                                    })
+                                    .collect()
+                            },
+                        )
+                        .size_full(),
+                    )
+                    .into_any_element()
+            }
         };
 
         let open = path.to_path_buf();
@@ -239,96 +357,6 @@ impl ClaudhubApp {
                 })),
             );
         (body, foot.into_any_element())
-    }
-
-    /// One file of the node: its tick, its code, its name and folder. The
-    /// tick stages or unstages it where it is; the rest opens the review on
-    /// it.
-    fn render_changes_row(
-        &self,
-        worktree: &Path,
-        index: usize,
-        file: FileStatus,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        // Ticked when all of it is in the index; a press puts the rest in, or
-        // takes all of it out — the Changes panel's box.
-        let ticked = file.is_staged() && !file.is_unstaged();
-        let conflicted = file.is_conflicted();
-        let (code, tint) = codes(&file);
-        let color = super::theme::status_color(tint, cx);
-        let name = file.file_name();
-        let folder = file.directory();
-        let (tick_worktree, tick_path) = (worktree.to_path_buf(), file.path.clone());
-        let (open_worktree, open_path) = (worktree.to_path_buf(), file.path.clone());
-        h_flex()
-            .id(("overview-changes-row", index))
-            .w_full()
-            .px_2()
-            .h(super::theme::row_height(cx))
-            .gap_1p5()
-            .items_center()
-            .cursor_pointer()
-            .hover(|style| style.bg(theme.list_hover))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.open_review_sheet(&open_worktree, Some(open_path.clone()), window, cx);
-            }))
-            .child(
-                div()
-                    // The tick is its own gesture, not the row's.
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        Checkbox::new(("overview-changes-stage", index))
-                            .checked(ticked)
-                            .disabled(conflicted || !(ticked || file.is_stageable()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.set_staged(
-                                    tick_worktree.clone(),
-                                    vec![tick_path.clone()],
-                                    !ticked,
-                                    cx,
-                                );
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(18.))
-                    .text_xs()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_color(color)
-                    .child(SharedString::from(code)),
-            )
-            .child(crate::ui::file_icons::file_icon(&file.path, cx))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w_full()
-                            .truncate()
-                            .when(conflicted, |el| el.text_color(theme.danger))
-                            .child(SharedString::from(name)),
-                    )
-                    .when(!folder.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(SharedString::from(folder)),
-                        )
-                    }),
-            )
-            .into_any_element()
     }
 
     /// The worktree's status, when it is the latest word on it: asked since

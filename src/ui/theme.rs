@@ -407,6 +407,16 @@ pub fn chip(label: gpui_kit::SharedString, colour: Hsla) -> impl IntoElement {
 /// our own would give them a second one. A zero is left out — `+0` makes the eye
 /// read a number where there is none.
 pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui_kit::Div> {
+    volume_as(added, removed, colors, |count| count.to_string())
+}
+
+/// The same, each count written by `count`.
+pub fn volume_as(
+    added: usize,
+    removed: usize,
+    colors: &DiffColors,
+    count: impl Fn(usize) -> String,
+) -> Vec<gpui_kit::Div> {
     let mut parts = Vec::new();
     if added > 0 {
         parts.push(
@@ -414,7 +424,7 @@ pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui_kit
                 .flex_none()
                 .text_xs()
                 .text_color(colors.added_fg)
-                .child(format!("+{added}")),
+                .child(format!("+{}", count(added))),
         );
     }
     if removed > 0 {
@@ -423,7 +433,7 @@ pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui_kit
                 .flex_none()
                 .text_xs()
                 .text_color(colors.removed_fg)
-                .child(format!("−{removed}")),
+                .child(format!("−{}", count(removed))),
         );
     }
     parts
@@ -531,6 +541,29 @@ pub fn status_color(code: crate::git::StatusCode, cx: &App) -> Hsla {
         S::Untracked => rgb(0x8b949e),
         S::Unmerged => rgb(0xdb6d28),
         S::Ignored | S::Unmodified => theme.muted_foreground,
+    }
+}
+
+/// What an agent wears wherever it shows — a tab, a sidebar's edge, a
+/// terminal's outline: the tone of work while it works, the one the window
+/// keeps for what cannot go on without a hand while it asks. Nothing at rest.
+pub fn doing_color(doing: crate::ui::overview::Doing, theme: &Theme) -> Option<Hsla> {
+    use crate::ui::overview::Doing;
+    match doing {
+        Doing::Working => Some(theme.warning),
+        Doing::Waiting => Some(theme.danger),
+        Doing::Rest => None,
+    }
+}
+
+/// The same for what an agent said of itself, which also says it finished.
+pub fn activity_color(activity: &crate::agent::Activity, theme: &Theme) -> Option<Hsla> {
+    use crate::agent::Activity;
+    match activity {
+        Activity::Working => Some(theme.warning),
+        Activity::Waiting(_) => Some(theme.danger),
+        Activity::Finished => Some(theme.success),
+        Activity::Idle => None,
     }
 }
 

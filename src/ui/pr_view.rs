@@ -23,7 +23,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputState, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
-    v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
 use gpui_kit::{div, prelude::*, px, AnyElement, Context, Entity, SharedString, Window};
 
@@ -427,23 +427,15 @@ impl ClaudhubApp {
             MergeHow::Rebase => tr!("pr-merge-rebase"),
         };
         let body = tr!("pr-merge-body", { n: number, base: base, way: way });
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            dialog
-                .title(tr!("pr-merge-title"))
-                .child(div().text_sm().child(body.clone()))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::submit(tr!("pr-merge")))
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.pr_action(merge_command(number, how), cx)
-                    });
-                    true
-                })
-        });
-        window.defer(cx, |window, cx| window.focus_dialog(cx));
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            tr!("pr-merge-title"),
+            move || div().text_sm().child(body.clone()).into_any_element(),
+            || crate::ui::dialogs::submit(tr!("pr-merge")),
+            move |this, _, cx| this.pr_action(merge_command(number, how), cx),
+            window,
+            cx,
+        );
     }
 
     /// The checks, each with its state — a press opens it —, and the

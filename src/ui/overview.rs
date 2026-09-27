@@ -843,6 +843,47 @@ pub fn loudest(doings: impl IntoIterator<Item = Doing>) -> Doing {
         })
 }
 
+/// The deepest of `worktrees` holding `cwd` — `agent::owning_worktree`,
+/// borrowed: it is asked for every agent at every frame of the home screen.
+pub fn owner<'a>(worktrees: &'a [PathBuf], cwd: &Path) -> Option<&'a Path> {
+    worktrees
+        .iter()
+        .filter(|worktree| cwd.starts_with(worktree))
+        .max_by_key(|worktree| worktree.as_os_str().len())
+        .map(PathBuf::as_path)
+}
+
+/// What each of `among` says of its agents, rest included: the loudest of
+/// the Claudes whose directory is in it — `said`, each one's directory and
+/// its own status — and, where none of them speaks, `heard`: the hooks'
+/// word, or the guess. One pass over the agents for every worktree, not one
+/// per worktree.
+pub fn worktree_doings<'p>(
+    among: &[PathBuf],
+    said: impl IntoIterator<Item = (&'p Path, Doing)>,
+    heard: impl Fn(&Path) -> Option<Doing>,
+) -> HashMap<PathBuf, Doing> {
+    let mut claudes: HashMap<&Path, Doing> = HashMap::new();
+    for (cwd, doing) in said {
+        if let Some(owner) = owner(among, cwd) {
+            claudes
+                .entry(owner)
+                .and_modify(|loud| *loud = loudest([*loud, doing]))
+                .or_insert(doing);
+        }
+    }
+    among
+        .iter()
+        .map(|path| {
+            let doing = claudes
+                .get(path.as_path())
+                .copied()
+                .unwrap_or_else(|| heard(path).unwrap_or(Doing::Rest));
+            (path.clone(), doing)
+        })
+        .collect()
+}
+
 /// A node's size before the hand touched it, and the least the hand may
 /// give it.
 pub fn start_and_least(node: &Node) -> ((f32, f32), (f32, f32)) {
@@ -1291,6 +1332,37 @@ mod tests {
         assert_eq!(loudest([Rest, Working, Rest]), Working);
         assert_eq!(loudest([Rest, Rest]), Rest);
         assert_eq!(loudest([]), Rest);
+    }
+
+    #[test]
+    fn an_agent_belongs_to_the_deepest_worktree_and_speaks_before_the_hooks() {
+        use Doing::*;
+        let among = vec![
+            PathBuf::from("/p/repo"),
+            PathBuf::from("/p/repo/nested"),
+            PathBuf::from("/p/other"),
+            PathBuf::from("/p/quiet"),
+        ];
+        assert_eq!(
+            owner(&among, Path::new("/p/repo/nested/src")),
+            Some(Path::new("/p/repo/nested"))
+        );
+        assert_eq!(owner(&among, Path::new("/elsewhere")), None);
+        let said = [
+            (Path::new("/p/repo/nested/src"), Working),
+            (Path::new("/p/repo/nested"), Waiting),
+            (Path::new("/p/repo/src"), Rest),
+            (Path::new("/elsewhere"), Waiting),
+        ];
+        // The hooks speak for every worktree; only where no Claude does are
+        // they heard — an idle Claude has spoken.
+        let doings = worktree_doings(&among, said, |_| Some(Working));
+        assert_eq!(doings[Path::new("/p/repo/nested")], Waiting);
+        assert_eq!(doings[Path::new("/p/repo")], Rest);
+        assert_eq!(doings[Path::new("/p/other")], Working);
+        let doings = worktree_doings(&among, [], |_| None);
+        assert_eq!(doings[Path::new("/p/quiet")], Rest);
+        assert_eq!(doings.len(), among.len());
     }
 
     fn checkout<'a>(
