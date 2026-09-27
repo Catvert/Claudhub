@@ -31,7 +31,7 @@ use gpui_kit::component::{
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
-use gpui_kit::{div, prelude::*, px, uniform_list, App, Context, Entity, SharedString, Window};
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
 
 use crate::git::Tag;
 use crate::runtime::Cmd;
@@ -39,32 +39,18 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
 use crate::ui::icons::icon;
+use crate::ui::listed::{Empty, Listed, Look, Panel};
 
 /// What is known of a repository's tags.
 #[derive(Default)]
 pub struct TagsState {
-    /// Behind an `Rc`: the row closure runs for every visible row on every
-    /// frame and cannot read the application back, so it has to capture the
-    /// list — and copying a few hundred tags to do so was the panel's whole
-    /// cost.
-    pub tags: Rc<Vec<Tag>>,
+    pub list: Listed<Tag>,
     /// The names `origin` carries. **`None` until it has been asked for**: a
     /// panel that showed "only local" without having read the remote would be
     /// saying something it does not know. Behind an `Rc` for the same reason as
     /// the tags.
     pub remote: Option<Rc<HashSet<String>>>,
-    /// A read has gone out and has not come back. Without this guard, every
-    /// frame would restart the command for the whole length of the read — it is
-    /// the panel that asks, and it asks at render time.
-    pub pending: bool,
     pub remote_pending: bool,
-    /// The list has come back at least once.
-    ///
-    /// Without it, a repository with no tag would ask again on every frame: an
-    /// empty list and a list never read are the same thing to look at and two
-    /// different things to act on — the four-state `Load` of the database tree,
-    /// cut down to what this panel needs.
-    pub loaded: bool,
 }
 
 /// The tag being created, while the dialog is open.
@@ -158,20 +144,14 @@ impl ClaudhubApp {
     /// worktree must not pay for a read nobody will look at, and a panel that
     /// asks on every frame asks a hundred times a second.
     fn ensure_tags(&mut self, main: PathBuf, cx: &mut Context<Self>) {
-        let state = self.tags.entry(main.clone()).or_default();
-        if state.pending || state.loaded {
-            return;
+        if self.tags.entry(main.clone()).or_default().list.ask() {
+            self.git.send(Cmd::LoadTags { main });
+            cx.notify();
         }
-        state.pending = true;
-        self.git.send(Cmd::LoadTags { main });
-        cx.notify();
     }
 
     pub(super) fn tags_arrived(&mut self, main: PathBuf, tags: Vec<Tag>, cx: &mut Context<Self>) {
-        let state = self.tags.entry(main).or_default();
-        state.tags = Rc::new(tags);
-        state.pending = false;
-        state.loaded = true;
+        self.tags.entry(main).or_default().list.arrived(tags);
         cx.notify();
     }
 
@@ -210,10 +190,8 @@ impl ClaudhubApp {
             return;
         };
         let state = self.tags.entry(main.clone()).or_default();
-        state.tags = Rc::new(Vec::new());
+        state.list.refresh(true);
         state.remote = None;
-        state.loaded = false;
-        state.pending = true;
         self.git.send(Cmd::LoadTags { main });
         cx.notify();
     }
@@ -434,80 +412,52 @@ impl ClaudhubApp {
         let remote = state.and_then(|state| state.remote.clone());
         // The list is captured, not read back: the row closure runs for every
         // visible row on every frame, with the application already borrowed —
-        // reading the entity from inside it is the panic gpui refuses. What the
-        // search keeps is a list of **indices** into it, so a frame costs no
-        // copy of a tag.
-        let tags = state.map(|state| state.tags.clone()).unwrap_or_default();
-        let rows: Rc<Vec<usize>> = Rc::new(
-            tags.iter()
-                .enumerate()
-                .filter(|(_, tag)| {
+        // reading the entity from inside it is the panic gpui refuses.
+        let panel = Panel {
+            id: "tags",
+            items: state
+                .map(|state| state.list.items.clone())
+                .unwrap_or_default(),
+            rows: state.map_or_else(Vec::new, |state| {
+                state.list.kept(|tag| {
                     crate::ui::find::matches(&query, &tag.name)
                         || crate::ui::find::matches(&query, &tag.subject)
                 })
-                .map(|(index, _)| index)
-                .collect(),
-        );
-        if rows.is_empty() {
-            let pending = state.is_some_and(|state| state.pending);
-            return v_flex()
-                .size_full()
-                .child(bar)
-                .children(find)
-                .child(empty_tags(&query, pending, cx))
-                .into_any_element();
-        }
-
+            }),
+            pending: state.is_some_and(|state| state.list.pending),
+            query: &query,
+            scroll: &self.tags_scroll.clone(),
+            empty: Empty {
+                icon: "tag",
+                loading: tr!("tags-loading"),
+                none: tr!("tags-empty"),
+            },
+        };
         let look = Look::of(cx);
         let entity = cx.entity();
-        let scroll = self.tags_scroll.clone();
-        let count = rows.len();
-        v_flex()
-            .size_full()
-            .child(bar)
-            .children(find)
-            .child(
-                div().flex_1().min_h_0().child(
-                    self.scrolled(
-                        "tags-bar",
-                        &scroll,
-                        crate::ui::motion::Axes::Vertical,
-                        window,
-                        uniform_list("tags-rows", count, move |visible, _window, cx| {
-                            visible
-                                .map(|index| match rows.get(index) {
-                                    Some(at) => render_tag(
-                                        index,
-                                        &tags,
-                                        *at,
-                                        remote.as_deref(),
-                                        &look,
-                                        &entity,
-                                        cx,
-                                    ),
-                                    None => div().into_any_element(),
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .size_full()
-                        .track_scroll(&scroll.clone()),
-                        cx,
-                    ),
-                ),
-            )
-            .into_any_element()
+        self.render_listed(
+            panel,
+            bar,
+            find,
+            move |index, tags, at, cx| {
+                render_tag(index, tags, at, remote.as_deref(), &look, &entity, cx)
+            },
+            window,
+            cx,
+        )
     }
 
     fn render_tags_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.tags_of_active();
-        let count = state.map(|state| state.tags.len()).unwrap_or(0);
+        let count = state.map(|state| state.list.items.len()).unwrap_or(0);
         let known = state.and_then(|state| state.remote.as_ref());
         let unpushed = known
             .map(|remote| {
                 state
                     .map(|state| {
                         state
-                            .tags
+                            .list
+                            .items
                             .iter()
                             .filter(|tag| !remote.contains(&tag.name))
                             .count()
@@ -582,29 +532,6 @@ impl ClaudhubApp {
                     .tooltip(tr!("action-refresh"))
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_tags(cx))),
             )
-    }
-}
-
-/// What the theme gives a row, read once per frame and not per row.
-#[derive(Clone, Copy)]
-struct Look {
-    row: gpui_kit::Pixels,
-    muted: gpui_kit::Hsla,
-    accent: gpui_kit::Hsla,
-    warning: gpui_kit::Hsla,
-    info: gpui_kit::Hsla,
-}
-
-impl Look {
-    fn of(cx: &App) -> Self {
-        Self {
-            // Two storeys: the tag, then the commit it marks.
-            row: crate::ui::theme::row_height(cx) * 2.,
-            muted: cx.theme().muted_foreground,
-            accent: cx.theme().accent,
-            warning: cx.theme().warning,
-            info: cx.theme().info,
-        }
     }
 }
 
@@ -776,26 +703,4 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, tag: &Tag) -> PopupM
                 });
             })
     })
-}
-
-/// Nothing to show: a read under way, a search that found nothing, or a
-/// repository with no tag at all — three different things, and saying the wrong
-/// one is how a panel reads as broken.
-fn empty_tags(query: &str, pending: bool, cx: &App) -> gpui_kit::AnyElement {
-    let message = if pending {
-        tr!("tags-loading")
-    } else if query.trim().is_empty() {
-        tr!("tags-empty")
-    } else {
-        tr!("find-no-match")
-    };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("tag"))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
 }
