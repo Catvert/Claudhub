@@ -17,6 +17,7 @@
 //! the panel rather than in a settings page one would have to go and find.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
@@ -44,7 +45,9 @@ use crate::ui::settings::Settings;
 pub struct SentryState {
     /// The repository this reading is about, which is what says it is stale.
     pub main: Option<PathBuf>,
-    pub issues: Vec<Issue>,
+    /// Behind an `Rc`: the row closure captures the list, and copying it was
+    /// every frame's cost.
+    pub issues: Rc<Vec<Issue>>,
     /// The rank in `issues` — **not** in the filtered rows: a filter changes
     /// which row is which, and what one is reading must survive a keystroke.
     pub chosen: Option<usize>,
@@ -396,11 +399,11 @@ impl ClaudhubApp {
                 crate::sentry::parse_issues(&body).map_err(|why| format!("{why:#}"))
             }) {
                 Ok(issues) => {
-                    self.sentry.issues = issues;
+                    self.sentry.issues = Rc::new(issues);
                     self.sentry.error = None;
                 }
                 Err(why) => {
-                    self.sentry.issues = Vec::new();
+                    self.sentry.issues = Rc::default();
                     self.sentry.error = Some(SharedString::from(why));
                 }
             }
@@ -571,7 +574,7 @@ impl ClaudhubApp {
                 .into_any_element();
         }
 
-        let issues = std::rc::Rc::new(self.sentry.issues.clone());
+        let issues = self.sentry.issues.clone();
         let chosen = self.sentry.chosen;
         let scroll = self.sentry.scroll.clone();
         let count = rows.len();
