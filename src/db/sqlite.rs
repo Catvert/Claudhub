@@ -13,10 +13,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context as _, Result};
-use futures::TryStreamExt as _;
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow},
-    Column as _, ConnectOptions as _, Either, Row as _, TypeInfo as _, ValueRef as _,
+    sqlite::{Sqlite, SqliteConnectOptions, SqliteConnection, SqliteRow},
+    ConnectOptions as _, Row as _, TypeInfo as _, ValueRef as _,
 };
 
 use super::{bytes_to_string, Cell, Column, Connection, Database, Rows, Table};
@@ -34,12 +33,6 @@ async fn open(connection: &Connection) -> Result<SqliteConnection> {
         .await
         .with_context(|| format!("opening {} timed out", path.display()))?
         .with_context(|| format!("opening {}", path.display()))
-}
-
-/// A quoted identifier, for the places where SQL takes no parameter — a schema
-/// name in `schema.table`.
-fn quote(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 pub async fn databases(connection: &Connection) -> Result<Vec<Database>> {
@@ -67,7 +60,7 @@ async fn read_tables(db: &mut SqliteConnection, database: &str) -> Result<Vec<Ta
     let sql = format!(
         "SELECT name, type FROM {}.sqlite_master \
          WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        quote(database)
+        super::link::quote(super::Engine::Sqlite, database)
     );
     let rows = sqlx::query(&sql).fetch_all(db).await?;
     rows.into_iter()
@@ -200,64 +193,7 @@ pub async fn query(
     limit: usize,
 ) -> Result<Rows> {
     let mut db = open(connection).await?;
-    // The page is asked of the engine when the query lets itself be wrapped —
-    // see `super::paged`. Reading from the start stays as the fallback, for
-    // what does not let itself be wrapped and for a wrap the engine refuses.
-    if let Some(paged) = super::paged(sql, offset, limit) {
-        match run(&mut db, &paged, offset, 0, limit).await {
-            Ok(rows) => return Ok(rows),
-            Err(error) => {
-                log::debug!("the paged query was refused, reading from the start: {error}")
-            }
-        }
-    }
-    run(&mut db, sql, offset, offset, limit).await
-}
-
-/// Runs `sql` and keeps `limit` rows, `skip` of them dropped on the way.
-///
-/// `offset` is what the page says of itself; `skip` is how many rows this has
-/// to throw away to get there — zero when the engine was asked for the page.
-async fn run(
-    db: &mut SqliteConnection,
-    sql: &str,
-    offset: usize,
-    skip: usize,
-    limit: usize,
-) -> Result<Rows> {
-    // `raw_sql` accepts several statements — that is what one pastes from a
-    // migration file — and `fetch_many` streams what each produces: a count of
-    // affected rows for a write, rows for a read.
-    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
-    let mut out = Rows {
-        offset,
-        ..Default::default()
-    };
-    let mut skipped = 0;
-    while let Some(item) = stream.try_next().await? {
-        match item {
-            Either::Left(done) => *out.affected.get_or_insert(0) += done.rows_affected(),
-            Either::Right(row) => {
-                if out.columns.is_empty() {
-                    out.columns = row
-                        .columns()
-                        .iter()
-                        .map(|column| column.name().to_string())
-                        .collect();
-                }
-                if skipped < skip {
-                    skipped += 1;
-                    continue;
-                }
-                if out.rows.len() >= limit {
-                    out.more = true;
-                    break;
-                }
-                out.rows.push(cells(&row));
-            }
-        }
-    }
-    Ok(out)
+    super::read_page::<Sqlite, _>(&mut db, sql, offset, limit, |_| cells).await
 }
 
 /// Writes the whole result as it streams. See `super::export_csv`.
@@ -267,23 +203,7 @@ pub async fn export(
     out: &mut dyn std::io::Write,
 ) -> Result<u64> {
     let mut db = open(connection).await?;
-    let mut stream = sqlx::raw_sql(sql).fetch_many(&mut db);
-    let mut written = 0;
-    let mut header = false;
-    while let Some(item) = stream.try_next().await? {
-        if let Either::Right(row) = item {
-            if !header {
-                out.write_all(
-                    super::csv_line(row.columns().iter().map(|column| Some(column.name())))
-                        .as_bytes(),
-                )?;
-                header = true;
-            }
-            out.write_all(super::csv_line(cells(&row).iter().map(|c| c.as_deref())).as_bytes())?;
-            written += 1;
-        }
-    }
-    Ok(written)
+    super::write_csv::<Sqlite, _>(&mut db, sql, out, |_| cells).await
 }
 
 fn cells(row: &SqliteRow) -> Vec<Cell> {
