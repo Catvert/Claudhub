@@ -178,6 +178,10 @@ pub struct RunState {
     /// to watch it. **One image, replaced in place**: a screencast is watched,
     /// not replayed, and each frame kept would be a decoded texture kept.
     pub cast: Option<Cast>,
+    /// A frame being decoded off the interface thread, and the newest one
+    /// that arrived meanwhile — see [`TestsView::pest_frame`].
+    pub decoding: bool,
+    pub waiting: Option<crate::suite::Frame>,
     /// Put away for this run: the cast's tab was crossed out. Cleared by the
     /// next run, never by the next frame — see [`TestsView::close_cast`].
     pub cast_hidden: bool,
@@ -1007,6 +1011,8 @@ impl ClaudhubApp {
                 started_at: now(),
                 lines: VecDeque::new(),
                 cast: None,
+                decoding: false,
+                waiting: None,
                 cast_hidden: false,
                 hidden: false,
                 settled: HashSet::new(),
@@ -1048,16 +1054,13 @@ impl ClaudhubApp {
 
     /// The newest picture of the browser a run drives.
     ///
-    /// Decoded here, rather than handed to `img()` as JPEG bytes: that path
-    /// goes through gpui's asset cache, which decodes off-thread and draws
-    /// **nothing** until it is done. A stream of one-shot images therefore
-    /// blinks — every frame starts as a hole. A `RenderImage` is drawn the
-    /// moment it is set, so the previous frame stays up until this one is
-    /// ready to replace it.
-    ///
-    /// The texture it leaves behind has to be dropped by hand: nothing else
-    /// reaches the atlas — `remove_asset` only forgets a decode task, and
-    /// `RenderImage` has no `Drop` — and a run is thousands of frames.
+    /// **Decoded off the interface thread, one at a time.** A frame arrives
+    /// every few dozen milliseconds, and decoding each one here, in turn,
+    /// fell behind: the events piled up, and the window stayed slow long
+    /// after the run ended, chewing through frames nobody would see. One
+    /// decode is in flight; what arrives meanwhile waits in a single slot,
+    /// each frame replacing the one before — a screencast is watched live,
+    /// not replayed.
     pub(super) fn pest_frame(
         &mut self,
         worktree: PathBuf,
@@ -1072,27 +1075,81 @@ impl ClaudhubApp {
         if id < state.since || id > state.id {
             return;
         }
-        let Ok(image) = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Jpeg, frame.jpeg)
-            .to_image_data(cx.svg_renderer())
+        if state.decoding {
+            state.waiting = Some(frame);
+            return;
+        }
+        state.decoding = true;
+        let since = state.since;
+        let svg = cx.svg_renderer();
+        cx.spawn_in(window, async move |this, cx| {
+            let (width, height) = (frame.width, frame.height);
+            let decoded = cx
+                .background_spawn(async move {
+                    gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Jpeg, frame.jpeg)
+                        .to_image_data(svg)
+                })
+                .await;
+            let cast = decoded.ok().map(|image| Cast {
+                image,
+                width,
+                height,
+            });
+            _ = this.update_in(cx, |app, window, cx| {
+                app.cast_decoded(worktree, since, cast, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// A frame back from its decoding.
+    ///
+    /// Decoded, rather than handed to `img()` as JPEG bytes: that path goes
+    /// through gpui's asset cache, which decodes off-thread and draws
+    /// **nothing** until it is done. A stream of one-shot images therefore
+    /// blinks — every frame starts as a hole. A `RenderImage` is drawn the
+    /// moment it is set, so the previous frame stays up until this one is
+    /// ready to replace it.
+    ///
+    /// The texture it leaves behind has to be dropped by hand: nothing else
+    /// reaches the atlas — `remove_asset` only forgets a decode task, and
+    /// `RenderImage` has no `Drop` — and a run is thousands of frames.
+    fn cast_decoded(
+        &mut self,
+        worktree: PathBuf,
+        since: u64,
+        cast: Option<Cast>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The run it was decoded for may have been replaced or wiped since:
+        // never uploaded, the image goes with its last reference.
+        let Some(state) = self
+            .pest_runs
+            .get_mut(&worktree)
+            .filter(|state| state.since == since)
         else {
             return;
         };
-        let previous = state.cast.replace(Cast {
-            image,
-            width: frame.width,
-            height: frame.height,
-        });
-        let first = previous.is_none();
-        drop_cast(previous, window, cx);
-        // The centre comes forward on the run's **first** frame and not on
-        // each: the panel is asked for by turning the toggle on, and a tab
-        // that took the centre back thirty times a second would be taking it
-        // from whatever one moved to since.
-        // On the home screen, the board's Tests tab shows it itself.
-        if first && !self.overview {
-            self.travel_to_panel(crate::ui::panels::CastPanel::NAME, window, cx);
+        state.decoding = false;
+        let waiting = state.waiting.take();
+        if let Some(cast) = cast {
+            let previous = state.cast.replace(cast);
+            let first = previous.is_none();
+            drop_cast(previous, window, cx);
+            // The centre comes forward on the run's **first** frame and not on
+            // each: the panel is asked for by turning the toggle on, and a tab
+            // that took the centre back thirty times a second would be taking
+            // it from whatever one moved to since.
+            // On the home screen, the board's Tests tab shows it itself.
+            if first && !self.overview {
+                self.travel_to_panel(crate::ui::panels::CastPanel::NAME, window, cx);
+            }
+            cx.notify();
         }
-        cx.notify();
+        if let Some(frame) = waiting {
+            self.pest_frame(worktree, since, frame, window, cx);
+        }
     }
 
     /// The readable description of a test the live channel names by its

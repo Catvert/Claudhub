@@ -25,18 +25,20 @@ let attached = null
 // Rien, depuis l'hôte, ne tue un processus lancé par `docker exec` : la fin de son stdin
 // est le seul signal qui traverse. Claudhub tient ce tuyau ouvert le temps du run, et le
 // referme à la fin — sans quoi le relais attendrait un navigateur jusqu'à la mort du
-// conteneur, une fois par run. Le serveur Playwright part avec lui, pour la même raison :
-// il n'a pas d'autre laisse.
-let server = null
-
-const stop = () => {
-    server?.kill('SIGTERM')
-    process.exit(0)
-}
+// conteneur, une fois par run.
+//
+// Le serveur Playwright a la même laisse : le relais ne le tue pas, il meurt, et le tuyau
+// qu'il lui tenait se ferme — voir plus bas. Un `kill` au moment de sortir ne suffisait
+// pas : un relais emporté autrement (le client `docker` tué d'abord, puis une écriture
+// en EPIPE, un SIGHUP) laissait un serveur orphelin par run, quarante mégaoctets chacun.
+const stop = () => process.exit(0)
 
 process.stdin.on('end', stop)
 process.stdin.resume()
-process.on('SIGTERM', stop)
+process.stdout.on('error', stop)
+for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT']) {
+    process.on(signal, stop)
+}
 
 if (serverPort > 0) {
     // `require` et non `import` : le script est passé à `node -e`, qui l'évalue en CommonJS
@@ -47,9 +49,16 @@ if (serverPort > 0) {
     // Le binaire du projet, pas un `npx` qui irait le chercher sur le réseau : le conteneur
     // a déjà celui contre lequel la suite tourne, et deux versions de Playwright ne se
     // parlent pas — le serveur refuse un client trop vieux.
-    server = spawn('node_modules/.bin/playwright', [
-        'run-server', '--host', '127.0.0.1', '--port', String(serverPort), '--unsafe',
-    ], { stdio: ['ignore', 'pipe', 'ignore'] })
+    //
+    // Derrière un `sh` qui garde : son `cat` lit un tuyau dont le relais tient l'autre
+    // bout, et qu'aucune mort du relais, même par SIGKILL, ne laisse ouvert. Quand `cat`
+    // voit la fin, le serveur est tué. En arrière-plan, le serveur lit `/dev/null` : `cat`
+    // est seul sur le tuyau.
+    const server = spawn('sh', ['-c', [
+        'node_modules/.bin/playwright run-server --host 127.0.0.1 --port "$1" --unsafe &',
+        'cat > /dev/null',
+        'kill $!',
+    ].join('\n'), 'relay', String(serverPort)], { stdio: ['pipe', 'pipe', 'ignore'] })
 
     // « Listening on » est la ligne que le plugin attend lui aussi ; on la dit à Claudhub
     // pour le journal, et le harnais du projet, lui, attend le port par une boucle de
