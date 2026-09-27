@@ -176,7 +176,7 @@ fn files_in(
     tree: Option<&str>,
     seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<Vec<DiffFile>> {
-    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+    if !super::first_visit(seen, dir) {
         return Ok(Vec::new());
     }
     let mut args: Vec<String> = vec![
@@ -267,23 +267,15 @@ pub fn file_against(
             super::LITERAL_PATHS.into(),
             "diff".into(),
             format!("-U{context}"),
-            "-M".into(),
-            // Without this, a `diff.external` or a `.gitattributes` driver
-            // replaces the unified output with a format we do not know how to
-            // read.
-            "--no-ext-diff".into(),
-            "--no-color".into(),
-            "--ignore-submodules=none".into(),
-            "--submodule=short".into(),
         ];
+        args.extend(super::UNIFIED.map(String::from));
         args.extend(revisions.iter().cloned());
         args.push("--".into());
         args.extend(original.map(|original| original.to_string_lossy().into_owned()));
         args.push(path.to_string_lossy().into_owned());
         // Bytes and not `git`'s answer: that one strips the last line's `\r`,
         // and this diff is what a hunk's patch is rebuilt from.
-        let out = super::git_bytes(dir, &args)?;
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        Ok(super::into_text(super::git_bytes(dir, &args)?))
     };
     let mut out = read(original.as_deref())?;
     // The status and this range need not agree on the rename: a file moved
@@ -311,21 +303,16 @@ fn pairs_a_rename(out: &str) -> bool {
 pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff> {
     let (owner, local) = super::repo::file_repository(dir, path);
     let (dir, path) = (owner.as_path(), local.as_path());
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         super::LITERAL_PATHS.into(),
         "diff".into(),
         format!("-U{context}"),
-        "-M".into(),
-        "--no-ext-diff".into(),
-        "--no-color".into(),
-        "--ignore-submodules=none".into(),
-        "--submodule=short".into(),
-        "--".into(),
-        path.to_string_lossy().into_owned(),
     ];
+    args.extend(super::UNIFIED.map(String::from));
+    args.extend(["--".into(), path.to_string_lossy().into_owned()]);
     // Bytes, for `file`'s reason: the remainder's hunks are staged from this.
     let out = super::git_bytes(dir, &args)?;
-    Ok(parse_unified(&String::from_utf8_lossy(&out)))
+    Ok(parse_unified(&super::into_text(out)))
 }
 
 /// The raw text of what is staged, as git writes it.
@@ -339,19 +326,9 @@ pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff
 /// of tokens sent. A changed binary only puts one line in it — git does not
 /// write it without `--text`, and that is what we want.
 pub fn staged_text(dir: &Path) -> Result<String> {
-    git(
-        dir,
-        &[
-            "diff",
-            "--cached",
-            "-U3",
-            "-M",
-            "--no-ext-diff",
-            "--no-color",
-            "--ignore-submodules=none",
-            "--submodule=short",
-        ],
-    )
+    let mut args = vec!["diff", "--cached", "-U3"];
+    args.extend(super::UNIFIED);
+    git(dir, &args)
 }
 
 /// An untracked file's diff: git does not know it, so `diff` alone returns

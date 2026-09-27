@@ -287,7 +287,7 @@ pub fn status(dir: &Path) -> Result<Status> {
 }
 
 fn status_in(dir: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Result<Status> {
-    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+    if !super::first_visit(seen, dir) {
         return Ok(Status::default());
     }
     let mut args: Vec<String> = [

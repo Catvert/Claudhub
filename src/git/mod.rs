@@ -39,11 +39,11 @@ pub use tags::Tag;
 
 use std::ffi::OsStr;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 /// Goes **before** the subcommand of every command that names files: paths are
 /// then paths, and not patterns.
@@ -57,6 +57,22 @@ use anyhow::{bail, Context, Result};
 /// Per command and not in `command()`: `git grep` is given the user's globs
 /// (`*.php`, `!vendor`) on purpose, and needs them read as such.
 pub(crate) const LITERAL_PATHS: &str = "--literal-pathspecs";
+
+/// Goes with every diff this layer parses: without them a `diff.external`, a
+/// `.gitattributes` driver or `color.diff = always` replaces the unified output
+/// with a format we do not know how to read.
+pub(crate) const PARSABLE: [&str; 2] = ["--no-ext-diff", "--no-color"];
+
+/// Goes with every unified diff the review reads: `PARSABLE`, renames paired,
+/// and a submodule shown as the commit it moved to whatever the user's
+/// configuration hides.
+pub(crate) const UNIFIED: [&str; 5] = [
+    PARSABLE[0],
+    PARSABLE[1],
+    "-M",
+    "--ignore-submodules=none",
+    "--submodule=short",
+];
 
 /// Beyond this, the command is killed and the failure comes back as a message.
 ///
@@ -77,16 +93,69 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// `GIT_TERMINAL_PROMPT=0` makes git say no rather than letting it try, and
 /// the failure comes back as an ordinary error message.
 pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
+    let out = exec(dir, args, Opts::default())?;
+    Ok(strip_trailing_newline(into_text(out.stdout)))
+}
+
+/// What a command is run with, beyond its directory and its arguments.
+#[derive(Default)]
+struct Opts<'a> {
+    /// Variables of its own in the command's environment.
+    env: &'a [(&'a str, &'a OsStr)],
+    /// Written on its standard input, which stays closed without it.
+    input: Option<Vec<u8>>,
+    /// The highest exit code that is an answer rather than a failure: zero
+    /// for all but `git_tolerant`'s commands.
+    max_code: i32,
+}
+
+/// The one runner behind every `git_*` of this module: launches the command,
+/// waits for it without exceeding `TIMEOUT`, files it in the journal, and turns
+/// an exit code past `max_code` into an error carrying what git said on stderr.
+///
+/// The variants differ only in what they make of the output — text or bytes,
+/// stdout alone or stderr with it — which is why they are conversions of what
+/// this returns and not copies of its wait.
+fn exec<S: AsRef<OsStr>>(dir: &Path, args: &[S], opts: Opts) -> Result<std::process::Output> {
     let started = Instant::now();
-    let out = run(dir, args)?;
-    report(dir, args, started.elapsed(), &out);
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", describe(args), stderr.trim());
+    let mut cmd = command(dir, args);
+    cmd.envs(opts.env.iter().copied())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if opts.input.is_some() {
+        cmd.stdin(Stdio::piped());
     }
-    Ok(strip_trailing_newline(
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
+    let out = wait_feeding(cmd, opts.input, TIMEOUT, || {
+        format!("git {}", describe(args))
+    })?;
+    report(dir, args, started.elapsed(), &out);
+    if refused(out.status, opts.max_code) {
+        return Err(failure(args, &out.stderr));
+    }
+    Ok(out)
+}
+
+/// An exit code past what the caller accepts — or none at all, the command
+/// having been killed by a signal.
+fn refused(status: std::process::ExitStatus, max_code: i32) -> bool {
+    let code = status.code().unwrap_or(-1);
+    code < 0 || code > max_code
+}
+
+/// The error of a command git refused, in git's own words.
+fn failure<S: AsRef<OsStr>>(args: &[S], stderr: &[u8]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "git {}: {}",
+        describe(args),
+        String::from_utf8_lossy(stderr).trim()
+    )
+}
+
+/// An output as text, **without copying it** when it is valid UTF-8 — which
+/// nearly every output is, where `from_utf8_lossy(..).into_owned()` copied a
+/// diff of megabytes whole to say so — and lossily when it is not.
+pub(crate) fn into_text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Files a command in the journal: what was run, where, how long it took, and
@@ -136,32 +205,22 @@ fn report<S: AsRef<OsStr>>(dir: &Path, args: &[S], elapsed: Duration, out: &std:
 
 /// The same as `git`, with something written on the command's standard input.
 ///
-/// For the one write that takes a patch rather than arguments: `git apply`,
-/// fed what `git show` said. The input never touches the disk — a temporary
-/// file would be a path to translate on the Windows target — and the wait is
-/// `wait_feeding`'s, which writes from a thread so a slow reader cannot
-/// deadlock against the pipes we drain.
+/// For the writes that take a patch rather than arguments: `git apply`, fed
+/// what `git show` said or a hunk the review rebuilt. The input never touches
+/// the disk — a temporary file would be a path to translate on the Windows
+/// target — and the wait is `wait_feeding`'s, which writes from a thread so a
+/// slow reader cannot deadlock against the pipes we drain.
 pub(crate) fn git_feeding<S: AsRef<OsStr>>(
     dir: &Path,
     args: &[S],
     input: Vec<u8>,
 ) -> Result<String> {
-    let started = Instant::now();
-    let mut cmd = command(dir, args);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = wait_feeding(cmd, Some(input), TIMEOUT, || {
-        format!("git {}", describe(args))
-    })?;
-    report(dir, args, started.elapsed(), &out);
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", describe(args), stderr.trim());
-    }
-    Ok(strip_trailing_newline(
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
+    let opts = Opts {
+        input: Some(input),
+        ..Opts::default()
+    };
+    let out = exec(dir, args, opts)?;
+    Ok(strip_trailing_newline(into_text(out.stdout)))
 }
 
 /// The same as `git`, with variables of its own in the command's environment.
@@ -174,37 +233,17 @@ pub(crate) fn git_env<S: AsRef<OsStr>>(
     args: &[S],
     env: &[(&str, &OsStr)],
 ) -> Result<String> {
-    let started = Instant::now();
-    let mut cmd = command(dir, args);
-    cmd.envs(env.iter().copied())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = wait_with_timeout(cmd, TIMEOUT, || format!("git {}", describe(args)))?;
-    report(dir, args, started.elapsed(), &out);
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", describe(args), stderr.trim());
-    }
-    Ok(strip_trailing_newline(
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
-}
-
-/// Launches the command and waits for it, without exceeding `TIMEOUT`.
-///
-/// Both outputs are read by threads: a full pipe blocks the writer, and `git
-/// diff` of a large file fills the pipe's sixty-four kilobytes well before it
-/// finishes. Reading them after the wait would deadlock — the process waits
-/// for us to drain the pipe, we wait for it to finish.
-fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<std::process::Output> {
-    let mut cmd = command(dir, args);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    wait_with_timeout(cmd, TIMEOUT, || format!("git {}", describe(args)))
+    let opts = Opts {
+        env,
+        ..Opts::default()
+    };
+    let out = exec(dir, args, opts)?;
+    Ok(strip_trailing_newline(into_text(out.stdout)))
 }
 
 /// Waits for a process to finish, or interrupts it once `limit` passes.
 ///
-/// Separated from `run` so it can be verified: testing it with `git` would
+/// Separated from `exec` so it can be verified: testing it with `git` would
 /// need a git command that hangs reproducibly, and there is none.
 ///
 /// `pub(crate)` and taking its ceiling as an argument because it is not only
@@ -269,13 +308,7 @@ pub(crate) fn wait_feeding(
         }
         let now = Instant::now();
         if now >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!(
-                "{} did not answer within {:?} and was interrupted",
-                describe(),
-                limit
-            );
+            return Err(interrupt(&mut child, &describe(), limit));
         }
         // Both outputs already closed: nothing will wake us any more, and the
         // exit status is a hair away — a short step, not the residual one.
@@ -320,6 +353,13 @@ pub(crate) fn wait_feeding(
         stdout: take(&out_read),
         stderr: take(&err_read),
     })
+}
+
+/// Kills a command that overran its ceiling, and says so.
+fn interrupt(child: &mut std::process::Child, what: &str, limit: Duration) -> anyhow::Error {
+    let _ = child.kill();
+    let _ = child.wait();
+    anyhow::anyhow!("{what} did not answer within {limit:?} and was interrupted")
 }
 
 /// How long the outputs of an exited process are still waited for.
@@ -375,14 +415,8 @@ fn take(buffer: &std::sync::Mutex<Vec<u8>>) -> Vec<u8> {
 /// stderr **first**: git leads with the account (`To …`) and finishes with the
 /// advice, and it is the first line the bar keeps.
 pub(crate) fn git_reporting<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
-    let started = Instant::now();
-    let out = run(dir, args)?;
-    report(dir, args, started.elapsed(), &out);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        bail!("git {}: {}", describe(args), stderr.trim());
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let out = exec(dir, args, Opts::default())?;
+    let (stderr, stdout) = (into_text(out.stderr), into_text(out.stdout));
     let mut output = String::with_capacity(stderr.len() + stdout.len());
     output.push_str(stderr.trim_end());
     if !output.is_empty() && !stdout.trim().is_empty() {
@@ -404,13 +438,7 @@ pub(crate) fn git_reporting<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<S
 /// nothing to show in three columns, and replacing its bytes with question
 /// marks would resolve it into something no one wrote.
 pub(crate) fn git_blob<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
-    let started = Instant::now();
-    let out = run(dir, args)?;
-    report(dir, args, started.elapsed(), &out);
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", describe(args), stderr.trim());
-    }
+    let out = exec(dir, args, Opts::default())?;
     String::from_utf8(out.stdout).context("this file is binary")
 }
 
@@ -421,14 +449,7 @@ pub(crate) fn git_blob<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String
 /// CRLF file lost its `\r` on the way — and a patch whose context line lacks it
 /// no longer applies to the file it came from.
 pub(crate) fn git_bytes<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<Vec<u8>> {
-    let started = Instant::now();
-    let out = run(dir, args)?;
-    report(dir, args, started.elapsed(), &out);
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", describe(args), stderr.trim());
-    }
-    Ok(out.stdout)
+    Ok(exec(dir, args, Opts::default())?.stdout)
 }
 
 /// The same, but failure counts as `None`: for optional reads (an upstream
@@ -451,17 +472,12 @@ pub(crate) fn git_tolerant<S: AsRef<OsStr>>(
     args: &[S],
     max_code: i32,
 ) -> Result<String> {
-    let started = Instant::now();
-    let out = run(dir, args)?;
-    report(dir, args, started.elapsed(), &out);
-    let code = out.status.code().unwrap_or(-1);
-    if code < 0 || code > max_code {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", describe(args), stderr.trim());
-    }
-    Ok(strip_trailing_newline(
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
+    let opts = Opts {
+        max_code,
+        ..Opts::default()
+    };
+    let out = exec(dir, args, opts)?;
+    Ok(strip_trailing_newline(into_text(out.stdout)))
 }
 
 /// A reader of a command's standard output, line by line, free to decide it has
@@ -518,7 +534,7 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
             let Ok(line) = line else { break };
             // A line git wrote is not necessarily UTF-8 — a match inside a
             // file with an odd encoding — and losing it beats losing the search.
-            let line = String::from_utf8_lossy(&line).into_owned();
+            let line = into_text(line);
             if lines.send(line).is_err() {
                 break; // the sink has had enough
             }
@@ -530,12 +546,8 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
     loop {
         let now = Instant::now();
         if now >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!(
-                "git {} did not answer within {TIMEOUT:?} and was interrupted",
-                describe(args)
-            );
+            let what = format!("git {}", describe(args));
+            return Err(interrupt(&mut child, &what, TIMEOUT));
         }
         match incoming.recv_timeout(deadline - now) {
             Ok(line) => {
@@ -565,26 +577,20 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
         if interrupted { " (capped)" } else { "" }
     );
 
-    if !interrupted {
-        let code = status.code().unwrap_or(-1);
-        if code < 0 || code > max_code {
-            let stderr = err_reader.join().unwrap_or_default();
-            let stderr = String::from_utf8_lossy(&stderr);
-            bail!("git {}: {}", describe(args), stderr.trim());
-        }
+    if !interrupted && refused(status, max_code) {
+        return Err(failure(args, &err_reader.join().unwrap_or_default()));
     }
     Ok(sink.finish(interrupted))
 }
 
 /// True if the command exits with code 0. For closed questions
 /// (`show-ref --verify --quiet`) whose output interests nobody.
+///
+/// Through `exec` like the rest, for its ceiling: `status()` waited without
+/// one, and a question asked of a vanished network mount took its worker away
+/// for good.
 pub(crate) fn git_ok<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> bool {
-    command(dir, args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    exec(dir, args, Opts::default()).is_ok()
 }
 
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Command {
@@ -632,6 +638,17 @@ fn strip_trailing_newline(mut s: String) -> String {
         s.pop();
     }
     s
+}
+
+/// Records a repository about to be walked into, and says whether it is the
+/// first time.
+///
+/// For the reads that descend into submodules — status, diff, file list,
+/// watch plan: a gitlink can point back at a checkout already on the way down,
+/// through a symbolic link or a relative `.git`, and the walk would not end.
+/// The path is canonical so that two spellings of one folder are one visit.
+pub(crate) fn first_visit(seen: &mut std::collections::HashSet<PathBuf>, dir: &Path) -> bool {
+    seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
 }
 
 /// Splits a `-z` output (records separated by null bytes).
@@ -710,6 +727,36 @@ mod tests {
             elapsed < LINGER + Duration::from_secs(3),
             "the wait took {elapsed:?}: it waited for the daemon"
         );
+    }
+
+    /// Valid UTF-8 is taken as it is; anything else is replaced, not lost.
+    #[test]
+    fn an_output_becomes_text_whether_or_not_it_is_utf8() {
+        assert_eq!(into_text(b"caf\xc3\xa9".to_vec()), "café");
+        assert_eq!(into_text(b"caf\xe9!".to_vec()), "caf\u{fffd}!");
+    }
+
+    /// One runner, and the exit code judged against what each caller accepts:
+    /// `diff --no-index` says "they differ" with 1, which `git` refuses and
+    /// `git_tolerant` reads as the answer.
+    #[test]
+    fn the_exit_code_is_judged_against_what_the_caller_accepts() {
+        let dir = std::env::temp_dir().join(format!("claudhub-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), "one\n").unwrap();
+        std::fs::write(dir.join("b"), "two\n").unwrap();
+        let args = ["diff", "--no-index", "--no-color", "a", "b"];
+
+        let refused = git(&dir, &args).expect_err("a difference exits with 1");
+        assert!(
+            refused.to_string().starts_with("git diff --no-index"),
+            "{refused}"
+        );
+        let diff = git_tolerant(&dir, &args, 1).expect("1 is an answer here");
+        assert!(diff.contains("+two"), "{diff}");
+        assert!(!git_ok(&dir, &args));
+        assert!(git_ok(&dir, &["diff", "--no-index", "a", "a"]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Writing and reading at the same time, both past a pipe's size: writing

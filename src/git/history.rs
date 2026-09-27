@@ -118,13 +118,17 @@ const FIELD: char = '\u{1f}';
 /// commit became `gpg: Signature made …`, and the list read as garbage.
 const NO_SIGNATURE: &str = "--no-show-signature";
 
+/// The fields of a commit as `parse_commit` reads them, in its order and cut by
+/// `FIELD` (`%x1f`): one format for the list and for the history of lines, so
+/// that a field added to one cannot shift the other's.
+const COMMIT_FORMAT: &str = "%H%x1f%h%x1f%P%x1f%an%x1f%ar%x1f%D%x1f%s";
+
 pub fn commits(dir: &Path, range: &LogRange, limit: usize) -> Result<Vec<Commit>> {
-    let format = format!("--format=%H{f}%h{f}%P{f}%an{f}%ar{f}%D{f}%s", f = "%x1f");
     let mut args: Vec<String> = vec![
         "log".into(),
         "-z".into(),
         NO_SIGNATURE.into(),
-        format,
+        format!("--format={COMMIT_FORMAT}"),
         format!("--max-count={limit}"),
     ];
     // Without this, `-L` writes its patch after the format, and it would spill
@@ -155,10 +159,6 @@ pub fn line_history(
     end: usize,
     limit: usize,
 ) -> Result<Vec<(Commit, FileDiff)>> {
-    let format = format!(
-        "--format=%x01%H{f}%h{f}%P{f}%an{f}%ar{f}%D{f}%s",
-        f = "%x1f"
-    );
     let range = LogRange::Lines {
         path: path.to_path_buf(),
         start,
@@ -167,13 +167,10 @@ pub fn line_history(
     let mut args: Vec<String> = vec![
         "log".into(),
         NO_SIGNATURE.into(),
-        format,
+        format!("--format=%x01{COMMIT_FORMAT}"),
         format!("--max-count={limit}"),
-        // A `diff.external` or a `.gitattributes` driver would replace the
-        // unified output with a format we do not know how to read.
-        "--no-ext-diff".into(),
-        "--no-color".into(),
     ];
+    args.extend(super::PARSABLE.map(String::from));
     args.extend(range.args());
     let out = git(dir, &args)?;
     Ok(parse_line_history(&out))
