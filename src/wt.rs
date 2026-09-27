@@ -622,24 +622,19 @@ fn succeeds_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) ->
 /// A project's shell line, run with the probe's ceiling.
 ///
 /// `WT_SHELL` and its `sh` default are `wt`'s own: hooks are written for a
-/// POSIX shell, whatever the user's login shell may be.
+/// POSIX shell, whatever the user's login shell may be. A worker's guards are
+/// `outside::Bounded`'s — with stdin open, a probe asking anything of the user
+/// held the worker for ever — and the locale is left alone: what the line
+/// prints is shown to the user as it wrote it.
 fn run_within(
     command: &str,
     cwd: &Path,
     env: &BTreeMap<String, String>,
 ) -> Result<std::process::Output> {
-    let shell = std::env::var("WT_SHELL").unwrap_or_else(|_| "sh".to_string());
-    let mut cmd = std::process::Command::new(shell);
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .envs(env)
-        // The same guard as every git command's: with stdin open, a probe
-        // asking anything of the user holds the worker for ever.
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    crate::git::wait_with_timeout(cmd, STATUS_TIMEOUT, || format!("wt status: {command}"))
+    let shell = std::env::var("WT_SHELL").ok();
+    let mut cmd = crate::outside::sh(command, shell.as_deref());
+    cmd.current_dir(cwd).envs(env);
+    crate::outside::Bounded::new(cmd, format!("wt status: {command}"), STATUS_TIMEOUT).output()
 }
 
 /// A task's arguments, from the answers to the prompts it declares.

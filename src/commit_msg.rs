@@ -16,7 +16,7 @@
 //! that is what makes them testable.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -148,12 +148,14 @@ pub fn suggest(worktree: &Path, command_line: &str) -> Result<String> {
 /// Runs the configured program, gives it the prompt on standard input, and
 /// returns its standard output.
 ///
-/// The wait is the git layer's (`wait_feeding`): all three streams go through
-/// threads because a full pipe blocks whoever writes, and both the prompt and
-/// the answer go well past a pipe's sixty-four kilobytes. Writing first and
-/// then waiting would give the classic deadlock — the process waits for us to
-/// read, we wait for it to finish. What differs here is only the ceiling, an
-/// agent taking seconds where git takes milliseconds.
+/// The wait is a worker's (`outside::Bounded`, over the git layer's
+/// `wait_feeding`): all three streams go through threads because a full pipe
+/// blocks whoever writes, and both the prompt and the answer go well past a
+/// pipe's sixty-four kilobytes. Writing first and then waiting would give the
+/// classic deadlock — the process waits for us to read, we wait for it to
+/// finish. What differs here is only the ceiling, an agent taking seconds
+/// where git takes milliseconds — and the locale, left as the user has it: the
+/// answer is text for them.
 fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
     let mut parts = crate::cmdline::split_command(command_line).into_iter();
     let program = parts
@@ -162,28 +164,10 @@ fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
     let args: Vec<String> = parts.collect();
 
     let mut cmd = Command::new(&program);
-    cmd.args(&args)
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = crate::git::wait_feeding(cmd, Some(prompt.as_bytes().to_vec()), TIMEOUT, || {
-        program.clone()
-    })?;
-
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr);
-        let message = message.trim();
-        bail!(
-            "{program} failed: {}",
-            if message.is_empty() {
-                "no message".into()
-            } else {
-                message.to_string()
-            }
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    cmd.args(&args).current_dir(worktree);
+    crate::outside::Bounded::new(cmd, program, TIMEOUT)
+        .feeding(prompt.as_bytes().to_vec())
+        .stdout()
 }
 
 #[cfg(test)]

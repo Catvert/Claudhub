@@ -29,7 +29,7 @@
 //! dump carries them under `modules` when something does.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -148,22 +148,12 @@ fn dump(dir: &Path, file: &Path) -> Result<String> {
         .arg(dir)
         .arg("--dump")
         .arg("--dump-format")
-        .arg("json")
-        // Closed, like git's: an assignment evaluating a backtick inherits
-        // these, and a command deciding to read from its input would hold the
-        // worker for good.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Error messages we quote are read in English, for the same reason the
-        // git layer reads them there.
-        .env("LC_ALL", "C");
-    crate::wsl::no_console(&mut cmd);
-    let out = crate::git::wait_with_timeout(cmd, TIMEOUT, || "just --dump".to_string())?;
-    if !out.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        .arg("json");
+    // Closed stdin among the guards: an assignment evaluating a backtick
+    // inherits it. English, because the complaint is quoted.
+    crate::outside::Bounded::new(cmd, "just --dump", TIMEOUT)
+        .in_english()
+        .stdout()
 }
 
 /// Reads the dump: the public recipes, and the one a bare `just` runs.

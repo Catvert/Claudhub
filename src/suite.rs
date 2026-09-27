@@ -255,23 +255,16 @@ pub fn report(worktree: &Path) -> Report {
     Report::Tests(tests)
 }
 
-/// One listing subprocess, whatever the runner: closed stdin, both streams
-/// read, the ceiling applied — and the complaint built from both streams on
-/// refusal.
+/// One listing subprocess, whatever the runner: a worker's guards
+/// (`outside::Bounded` — a bootstrap deciding to read from its input would
+/// hold the worker for good), English — and the complaint built from both
+/// streams on refusal.
 fn listing(mut cmd: Command, what: &str) -> Result<String> {
-    cmd
-        // Closed, like git's and just's: a bootstrap deciding to read from
-        // its input would hold the worker for good.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Error messages we quote are read in English, for the same reason
-        // the git layer reads them there. `NO_COLOR` is the convention node
-        // tools follow.
-        .env("LC_ALL", "C")
-        .env("NO_COLOR", "1");
-    crate::wsl::no_console(&mut cmd);
-    let out = crate::git::wait_with_timeout(cmd, TIMEOUT, || what.to_string())?;
+    // The convention node tools follow.
+    cmd.env("NO_COLOR", "1");
+    let out = crate::outside::Bounded::new(cmd, what, TIMEOUT)
+        .in_english()
+        .output()?;
     if !out.status.success() {
         anyhow::bail!(
             "{}",
