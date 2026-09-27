@@ -653,7 +653,12 @@ pub async fn export_csv(
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("l'export n'a pas abouti en {} s", EXPORT_TIMEOUT.as_secs()))??;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "the export did not finish in {} s",
+            EXPORT_TIMEOUT.as_secs()
+        )
+    })??;
     std::io::Write::flush(&mut out)?;
     Ok(written)
 }
