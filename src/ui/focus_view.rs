@@ -44,7 +44,7 @@ use gpui_kit::{
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use crate::ui::focus::{self, GitFace, View};
+use crate::ui::focus::{self, Face, GitFace, NotesFace, View};
 use crate::ui::icons::icon;
 use crate::ui::motion::Axes;
 use crate::ui::overview::{self, Doing, HomeMode, Node};
@@ -1066,8 +1066,14 @@ impl ClaudhubApp {
     /// on its face, for the review or the pull request.
     pub(super) fn show_board_view(&mut self, path: &Path, view: View, cx: &mut Context<Self>) {
         let (view, face) = focus::landing(view);
-        if let Some(face) = face {
-            self.git_face.insert(path.to_path_buf(), face);
+        match face {
+            Some(Face::Git(face)) => {
+                self.git_face.insert(path.to_path_buf(), face);
+            }
+            Some(Face::Notes(face)) => {
+                self.notes_face.insert(path.to_path_buf(), face);
+            }
+            None => {}
         }
         super::store::Store::update_global(cx, |store| {
             store
@@ -1110,8 +1116,13 @@ impl ClaudhubApp {
                     GitFace::Pr => column_min,
                 }
             }
-            View::Notes => NOTES_LIST_WIDTH + 8. + column_min,
-            View::Todo | View::Terminals => column_min,
+            View::Notes | View::Todo => {
+                match self.notes_face.get(path).copied().unwrap_or_default() {
+                    NotesFace::Notes => NOTES_LIST_WIDTH + 8. + column_min,
+                    NotesFace::Todo => column_min,
+                }
+            }
+            View::Terminals => column_min,
             View::Tests => TESTS_LIST_WIDTH + 8. + column_min,
         };
         let open = path.to_path_buf();
@@ -1173,8 +1184,7 @@ impl ClaudhubApp {
             View::Home => self.render_home_view(path, at_work, window, cx),
             View::Git | View::Review | View::Pr => self.render_git_view(path, window, cx),
             View::Tests => self.render_tests_view(path, window, cx),
-            View::Notes => self.render_notes_view(path, cx),
-            View::Todo => self.render_todo_view(path, cx),
+            View::Notes | View::Todo => self.render_notes_tab(path, cx),
             View::Terminals => self.render_terminals_view(path, at_work, window, cx),
         }
     }
@@ -1292,6 +1302,53 @@ impl ClaudhubApp {
             .size_full()
             .gap_2()
             .child(bar)
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .into_any_element()
+    }
+
+    /// The notes tab: its two faces — the notes, and the to-do list —, the
+    /// face's count beside its name.
+    fn render_notes_tab(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let face = self.notes_face.get(path).copied().unwrap_or_default();
+        let open_tasks = self
+            .review
+            .get(path)
+            .and_then(|state| state.todo.as_ref())
+            .map(|todo| todo.tasks.len() - todo.done())
+            .filter(|open| *open > 0);
+        let buttons: Vec<AnyElement> = [NotesFace::Notes, NotesFace::Todo]
+            .into_iter()
+            .map(|each| {
+                let (glyph, name) = match each {
+                    NotesFace::Notes => ("sticky-note", tr!("focus-tab-notes")),
+                    NotesFace::Todo => ("check-check", tr!("todo-title")),
+                };
+                let label = match (each, open_tasks) {
+                    (NotesFace::Todo, Some(open)) => SharedString::from(format!("{name} {open}")),
+                    _ => name,
+                };
+                let board = path.to_path_buf();
+                Button::new(SharedString::from(format!("focus-notes-{each:?}")))
+                    .ghost()
+                    .small()
+                    .icon(icon(glyph))
+                    .label(label)
+                    .selected(each == face)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.notes_face.insert(board.clone(), each);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let body = match face {
+            NotesFace::Notes => self.render_notes_view(path, cx),
+            NotesFace::Todo => self.render_todo_view(path, cx),
+        };
+        v_flex()
+            .size_full()
+            .gap_2()
+            .child(h_flex().flex_none().gap_1().children(buttons))
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
     }
@@ -1832,6 +1889,15 @@ fn git_face_name(face: GitFace) -> (&'static str, SharedString) {
         GitFace::History => ("history", tr!("focus-git-history")),
         GitFace::Review => ("file-diff", tr!("focus-review")),
         GitFace::Pr => ("git-pull-request", tr!("focus-view-pr")),
+    }
+}
+
+/// A tab's glyph and name: the view's, but for the notes tab, which holds
+/// the to-do list too and is named for both.
+pub(super) fn tab_name(view: View) -> (&'static str, SharedString) {
+    match view {
+        View::Notes => ("sticky-note", tr!("focus-tab-notes")),
+        other => view_name(other),
     }
 }
 

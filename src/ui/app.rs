@@ -1138,6 +1138,8 @@ pub struct ClaudhubApp {
     pub(super) home_terminal: HashMap<PathBuf, u64>,
     /// The face each board's git tab shows — see `focus::GitFace`; not kept.
     pub(super) git_face: HashMap<PathBuf, crate::ui::focus::GitFace>,
+    /// The face each board's notes tab shows; not kept.
+    pub(super) notes_face: HashMap<PathBuf, crate::ui::focus::NotesFace>,
     /// The dividers of each board's two-sided views, by board and view —
     /// see `focus_view::two_sides`.
     pub(super) board_splits:
@@ -1646,6 +1648,7 @@ impl ClaudhubApp {
             focus_note_shown: HashMap::new(),
             home_terminal: HashMap::new(),
             git_face: HashMap::new(),
+            notes_face: HashMap::new(),
             board_splits: HashMap::new(),
             pr_form: None,
             pr_reply: None,

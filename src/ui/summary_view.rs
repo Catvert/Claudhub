@@ -27,7 +27,7 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
 use crate::ui::focus::{self, View};
-use crate::ui::focus_view::view_name;
+use crate::ui::focus_view::{tab_name, view_name};
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
 
@@ -70,7 +70,7 @@ impl ClaudhubApp {
         let tabs: Vec<AnyElement> = View::ALL
             .into_iter()
             .map(|tab| {
-                let (glyph, title) = view_name(tab);
+                let (glyph, title) = tab_name(tab);
                 let lit = tab == view;
                 let count = match tab {
                     View::Git => self
@@ -78,7 +78,8 @@ impl ClaudhubApp {
                         .get(path)
                         .filter(|summary| !summary.is_empty())
                         .map(|summary| summary.files),
-                    View::Todo => self
+                    // The notes tab counts its to-do list's open tasks.
+                    View::Notes | View::Todo => self
                         .review
                         .get(path)
                         .and_then(|state| state.todo.as_ref())
@@ -98,7 +99,7 @@ impl ClaudhubApp {
                         })
                         .filter(|failed| *failed > 0),
                     // The review and the PR are faces of the git tab.
-                    View::Home | View::Review | View::Pr | View::Notes => None,
+                    View::Home | View::Review | View::Pr => None,
                 };
                 // The agents' tab wears the loudest of them.
                 let signal = (tab == View::Terminals)

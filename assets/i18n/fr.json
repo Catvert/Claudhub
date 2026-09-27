@@ -1008,6 +1008,7 @@
   "focus-git-changes": "Modifications",
   "focus-git-history": "Historique",
   "focus-git-pick-commit": "Choisissez un commit dans l'historique pour voir son diff.",
+  "focus-tab-notes": "Notes",
   "focus-review": "Revue",
   "focus-home-terminals-all": "Tous les terminaux, côte à côte",
   "focus-attention-commit": "Valider",

@@ -29,9 +29,11 @@ pub enum View {
     /// Its tests — the ones the branch touched, by default — and the run
     /// being followed.
     Tests,
-    /// The notes, the principal one first.
+    /// The notes, the principal one first — and, a face of the same tab,
+    /// the worktree's `TODO.md`.
     Notes,
-    /// The worktree's `TODO.md`.
+    /// The worktree's `TODO.md` — a face of the notes tab (`NotesFace::Todo`),
+    /// kept as a view for the store and the home's cards.
     Todo,
     /// Its terminals, side by side: where its agents work.
     Terminals,
@@ -39,12 +41,11 @@ pub enum View {
 
 impl View {
     /// In the tabs' order.
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 5] = [
         View::Home,
         View::Git,
         View::Tests,
         View::Notes,
-        View::Todo,
         View::Terminals,
     ];
 }
@@ -71,12 +72,29 @@ impl GitFace {
     ];
 }
 
+/// A face of the notes tab: the notes, and the to-do list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum NotesFace {
+    #[default]
+    Notes,
+    Todo,
+}
+
+/// A face of a tab that has several.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Face {
+    Git(GitFace),
+    Notes(NotesFace),
+}
+
 /// Where asking for a view lands: the review and the pull request are faces
-/// of the git tab, which is the tab shown, on that face.
-pub fn landing(view: View) -> (View, Option<GitFace>) {
+/// of the git tab, the to-do list one of the notes tab — the tab shown, on
+/// that face.
+pub fn landing(view: View) -> (View, Option<Face>) {
     match view {
-        View::Review => (View::Git, Some(GitFace::Review)),
-        View::Pr => (View::Git, Some(GitFace::Pr)),
+        View::Review => (View::Git, Some(Face::Git(GitFace::Review))),
+        View::Pr => (View::Git, Some(Face::Git(GitFace::Pr))),
+        View::Todo => (View::Notes, Some(Face::Notes(NotesFace::Todo))),
         other => (other, None),
     }
 }
@@ -347,10 +365,17 @@ mod tests {
     #[test]
     fn a_board_opens_on_its_home() {
         assert_eq!(view_of(None), View::Home);
-        assert_eq!(view_of(Some(View::Todo)), View::Todo);
+        assert_eq!(view_of(Some(View::Tests)), View::Tests);
         assert_eq!(view_of(Some(View::Pr)), View::Git);
-        assert_eq!(landing(View::Review), (View::Git, Some(GitFace::Review)));
-        assert!(!View::ALL.contains(&View::Pr));
+        assert_eq!(
+            landing(View::Review),
+            (View::Git, Some(Face::Git(GitFace::Review)))
+        );
+        assert_eq!(
+            landing(View::Todo),
+            (View::Notes, Some(Face::Notes(NotesFace::Todo)))
+        );
+        assert!(!View::ALL.contains(&View::Pr) && !View::ALL.contains(&View::Todo));
     }
 
     /// The heaviest first, each against the heaviest.

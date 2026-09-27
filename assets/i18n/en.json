@@ -1008,6 +1008,7 @@
   "focus-git-changes": "Changes",
   "focus-git-history": "History",
   "focus-git-pick-commit": "Pick a commit in the history to see its diff.",
+  "focus-tab-notes": "Notes",
   "focus-review": "Review",
   "focus-home-terminals-all": "Every terminal, side by side",
   "focus-attention-commit": "Commit",

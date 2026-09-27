@@ -403,7 +403,7 @@ bord. **Le titre d'un tableau est à lui et défile avec lui** (`board_title`) :
 placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
 
 - **Des onglets et une seule vue** (`focus::View`, retenue par worktree) :
-  Accueil, Git, Tests, note principale, TODO, Terminaux. Des vues de types
+  Accueil, Git, Tests, Notes, Terminaux. Des vues de types
   différents côte à côte ont été essayées et refusées.
 - **L'Accueil** (`ui::summary_view`) : à gauche l'état en cartes (branche, PR
   et CI, ce qui attend un commit, revue, tâches, note principale, ce qui
@@ -416,6 +416,9 @@ placé d'après ce que la rangée mesurait à chaque frame, il clignotait.
   qu'aucune feuille ne peint les mêmes panneaux — une liste virtuelle peinte
   deux fois partagerait son défilement. La PR et la CI ne sont lues que pour le
   worktree regardé : l'état GitHub n'en suit qu'un.
+- **L'onglet Notes a deux faces** (`focus::NotesFace`) : les notes, la
+  principale en tête, et le TODO ; `View::Todo` reste une vue qui atterrit
+  sur sa face, comme `Review` et `Pr` sur celles de Git (`focus::Face`).
 - **La PR** (`ui::pr_view`, une face de Git) : sans PR, le formulaire est l'onglet (titre
   et corps d'après les commits, base de la revue) ; avec une PR, son état, ses
   vérifications, ses fils de revue — répondus et résolus d'ici par GraphQL,
