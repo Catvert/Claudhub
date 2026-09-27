@@ -58,6 +58,22 @@ use anyhow::{Context, Result};
 /// (`*.php`, `!vendor`) on purpose, and needs them read as such.
 pub(crate) const LITERAL_PATHS: &str = "--literal-pathspecs";
 
+/// Goes with every diff this layer parses: without them a `diff.external`, a
+/// `.gitattributes` driver or `color.diff = always` replaces the unified output
+/// with a format we do not know how to read.
+pub(crate) const PARSABLE: [&str; 2] = ["--no-ext-diff", "--no-color"];
+
+/// Goes with every unified diff the review reads: `PARSABLE`, renames paired,
+/// and a submodule shown as the commit it moved to whatever the user's
+/// configuration hides.
+pub(crate) const UNIFIED: [&str; 5] = [
+    PARSABLE[0],
+    PARSABLE[1],
+    "-M",
+    "--ignore-submodules=none",
+    "--submodule=short",
+];
+
 /// Beyond this, the command is killed and the failure comes back as a message.
 ///
 /// No git read takes thirty seconds: a `status` costs ten milliseconds on a
