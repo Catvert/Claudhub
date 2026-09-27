@@ -1268,16 +1268,21 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             }
             Vec::new()
         }
-        Cmd::ReadCanvas { worktree, dirs } => {
+        Cmd::ReadCanvas {
+            worktree,
+            dirs,
+            known,
+        } => {
+            let known: std::collections::HashMap<PathBuf, u64> = known.into_iter().collect();
             let mut files = Vec::new();
             let mut pictures = Vec::new();
             for (dir, private) in dirs {
                 // A folder that is not there is a worktree without nodes.
-                if let Ok(read) = crate::files::read_notes(&dir) {
-                    files
-                        .extend(read.into_iter().map(|(name, text)| {
-                            (crate::wslpath::join(&dir, &name), private, text)
-                        }));
+                if let Ok(read) = crate::files::read_notes_since(&dir, &known) {
+                    files.extend(
+                        read.into_iter()
+                            .map(|(path, stamp, text)| (path, private, stamp, text)),
+                    );
                 }
                 pictures.extend(
                     crate::files::picture_stamps(&dir)
@@ -1303,20 +1308,19 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                 anyhow::Error::new(e).context(format!("deleting {}", path.display())),
             )],
         },
-        Cmd::ReadCanvasPicture { worktree, path } => match std::fs::read(&path) {
-            Ok(bytes) => {
-                let stamp = crate::files::picture_stamps(path.parent().unwrap_or(&path))
-                    .into_iter()
-                    .find(|(p, _)| *p == path)
-                    .map_or(0, |(_, stamp)| stamp);
-                vec![Evt::CanvasPicture { path, stamp, bytes }]
+        // The stamp before the bytes: a picture rewritten in between is then
+        // stamped older than what was read, and asked for again.
+        Cmd::ReadCanvasPicture { worktree, path } => {
+            let stamp = crate::files::stamp(&path).unwrap_or(0);
+            match std::fs::read(&path) {
+                Ok(bytes) => vec![Evt::CanvasPicture { path, stamp, bytes }],
+                Err(e) => vec![fail(
+                    Some(worktree),
+                    Action::Notes,
+                    anyhow::Error::new(e).context(format!("reading {}", path.display())),
+                )],
             }
-            Err(e) => vec![fail(
-                Some(worktree),
-                Action::Notes,
-                anyhow::Error::new(e).context(format!("reading {}", path.display())),
-            )],
-        },
+        }
         Cmd::CreateCanvasNote {
             worktree,
             dir,

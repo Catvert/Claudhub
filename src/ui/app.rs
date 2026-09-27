@@ -1101,6 +1101,10 @@ pub struct ClaudhubApp {
     pub(super) canvas: HashMap<PathBuf, Vec<crate::ui::canvas_view::CanvasEntry>>,
     /// A note just created, to open for writing once it has been read.
     pub(super) canvas_created: Option<PathBuf>,
+    /// What the readings of the node files leave beside the entries: the
+    /// files that are not nodes, where each entry is, the context sheets
+    /// sent — see `canvas_view::CanvasReads`.
+    pub(super) canvas_reads: crate::ui::canvas_view::CanvasReads,
     /// The diagrams' pictures, decoded once per stamp — see
     /// `canvas_view::CanvasPicture`.
     pub(super) canvas_pictures: HashMap<PathBuf, crate::ui::canvas_view::CanvasPicture>,
@@ -1635,6 +1639,7 @@ impl ClaudhubApp {
             note_editors: HashMap::new(),
             canvas: HashMap::new(),
             canvas_created: None,
+            canvas_reads: Default::default(),
             skill_status: HashMap::new(),
             generations: Vec::new(),
             canvas_pictures: HashMap::new(),
@@ -2424,7 +2429,14 @@ impl ClaudhubApp {
                 worktree,
                 files,
                 pictures,
-            } => self.canvas_read(worktree, files, pictures, window, cx),
+            } => {
+                // Read every two seconds, and most of the time unchanged:
+                // nothing to redraw then — `canvas_read` notifies itself
+                // when something moved.
+                if !self.canvas_read(worktree, files, pictures, window, cx) {
+                    return;
+                }
+            }
             Evt::CanvasPicture { path, stamp, bytes } => {
                 self.canvas_picture(path, stamp, bytes, cx)
             }
@@ -2724,6 +2736,8 @@ impl ClaudhubApp {
                 // answer for it. A spinner that turns for ever says less than
                 // one that never turned — the status bar carries the reason.
                 self.clear_running();
+                // The context sheets go again to the next one.
+                self.canvas_reads.forget_sent();
             }
         }
         cx.notify();

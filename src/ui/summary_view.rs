@@ -1185,7 +1185,7 @@ impl ClaudhubApp {
             .review
             .get(path)
             .and_then(|state| state.review_point.as_ref().map(|point| point.at));
-        let open = self.open_findings(path).len();
+        let open = self.open_finding_count(path);
         let mut rows: Vec<AnyElement> = Vec::new();
         match &files {
             Some(files) if files.is_empty() => rows.push(

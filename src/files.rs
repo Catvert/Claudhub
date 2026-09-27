@@ -537,14 +537,38 @@ pub fn write_vault_file(path: &Path, text: &str, expect: Option<u64>) -> Result<
     }
 }
 
-/// The Markdown files of a notes folder, name and content.
-///
-/// A missing folder is not an error: it is the state of a worktree that has not
-/// been annotated yet.
-/// The pictures of a folder, each with a stamp that changes when the file
-/// does — its length and its modification time together. It is what lets a
-/// reader ask for the bytes only of what changed: a folder read every two
-/// seconds would otherwise carry every diagram across the wire each time.
+/// A file's stamp: its length and its modification time together, which
+/// change when it does. It is what lets a reader ask for the content only of
+/// what changed: a folder read every two seconds would otherwise carry every
+/// file across the wire each time.
+fn stamp_of(meta: &std::fs::Metadata) -> u64 {
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64);
+    modified ^ meta.len().rotate_left(32)
+}
+
+/// Younger than this, a file's stamp does not vouch for its content: two
+/// writes within one tick of the file system's clock — a box ticked, same
+/// length — leave the same stamp, and a reader stopping at the stamp would
+/// miss the second for good. The "racily clean" index entry of the version
+/// control we drive, for the same reason; a few seconds cover the coarse
+/// clocks of a Windows disk seen from WSL.
+const RACY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether a file was written too recently for its stamp to be trusted — a
+/// date in the future included.
+fn racy(meta: &std::fs::Metadata) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .is_none_or(|age| age < RACY)
+}
+
+/// The pictures of a folder, each with its stamp: a diagram's bytes cross
+/// the wire only when it moves.
 pub fn picture_stamps(dir: &Path) -> Vec<(PathBuf, u64)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -555,16 +579,21 @@ pub fn picture_stamps(dir: &Path) -> Vec<(PathBuf, u64)> {
         .filter(|path| picture_of(path).is_some())
         .filter_map(|path| {
             let meta = std::fs::metadata(&path).ok()?;
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos() as u64);
-            Some((path, modified ^ meta.len().rotate_left(32)))
+            Some((path, stamp_of(&meta)))
         })
         .collect()
 }
 
+/// One file's stamp — what `picture_stamps` says of it, without listing its
+/// whole folder.
+pub fn stamp(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|meta| stamp_of(&meta))
+}
+
+/// The Markdown files of a notes folder, name and content.
+///
+/// A missing folder is not an error: it is the state of a worktree that has not
+/// been annotated yet.
 pub fn read_notes(dir: &Path) -> Result<Vec<(String, String)>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -586,6 +615,50 @@ pub fn read_notes(dir: &Path) -> Result<Vec<(String, String)>> {
         out.push((name, text));
     }
     out.sort();
+    Ok(out)
+}
+
+/// A node file as `read_notes_since` answers: full path, stamp, and the text
+/// when the reader has to see it.
+pub type NoteRead = (PathBuf, u64, Option<String>);
+
+/// The Markdown files of a notes folder against what the reader holds: each
+/// with its stamp, and its text only when `known` gives another stamp for it
+/// — or when the stamp is too young to vouch for it (`RACY`). Every file there
+/// is named, read or not: one missing from the answer is gone.
+///
+/// The paths are `wslpath::join`ed: the reader compares them with the ones
+/// it gave.
+pub fn read_notes_since(
+    dir: &Path,
+    known: &std::collections::HashMap<PathBuf, u64>,
+) -> Result<Vec<NoteRead>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if Path::new(&name).extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let path = crate::wslpath::join(dir, &name);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let stamp = stamp_of(&meta);
+        if known.get(&path) == Some(&stamp) && !racy(&meta) {
+            out.push((path, stamp, None));
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        out.push((path, stamp, Some(text)));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
@@ -640,6 +713,49 @@ mod tests {
         std::fs::write(dir.join("flow.svg"), "<svg viewBox='0 0 1 1'/>").unwrap();
         assert_ne!(picture_stamps(&dir)[0].1, before[0].1);
         assert!(picture_stamps(&dir.join("absent")).is_empty());
+        assert_eq!(
+            stamp(&dir.join("flow.svg")),
+            Some(picture_stamps(&dir)[0].1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A note's text crosses only when its stamp is not the one the reader
+    /// holds — or too young to vouch for it; every note is named either way.
+    #[test]
+    fn a_note_is_read_again_only_when_its_stamp_moves() {
+        let dir = std::env::temp_dir().join(format!("claudhub-since-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new) = (dir.join("a.md"), dir.join("b.md"));
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&new, "new").unwrap();
+        std::fs::write(dir.join("flow.svg"), "<svg/>").unwrap();
+        // Old enough to be trusted.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+
+        let first = read_notes_since(&dir, &Default::default()).unwrap();
+        assert_eq!(first.len(), 2, "the Markdown files only");
+        assert!(first.iter().all(|(_, _, text)| text.is_some()));
+
+        let known = first.iter().map(|(p, s, _)| (p.clone(), *s)).collect();
+        let again = read_notes_since(&dir, &known).unwrap();
+        assert_eq!(again[0], (old.clone(), first[0].1, None), "unchanged");
+        // Just written: its stamp is too young to be trusted.
+        assert_eq!(again[1].2.as_deref(), Some("new"));
+
+        std::fs::write(&old, "odd").unwrap();
+        let moved = read_notes_since(&dir, &known).unwrap();
+        assert_eq!(moved[0].2.as_deref(), Some("odd"));
+        assert!(read_notes_since(&dir.join("absent"), &known)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
