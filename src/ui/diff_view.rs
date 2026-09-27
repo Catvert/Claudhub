@@ -8,12 +8,16 @@
 //! Flattening is what makes virtualisation possible: a list can only address its
 //! entries by an index, whereas a diff is a two-level tree (hunks, then lines).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use gpui_kit::component::highlighter::HighlightTheme;
 
 use crate::git::{DiffLineKind, FileDiff};
-use crate::ui::highlight::DiffHighlights;
+use crate::ui::highlight::{cut_runs, DiffHighlights, LineStyles};
+
+/// One styled run of a line, as gpui takes it.
+type LineStyle = (std::ops::Range<usize>, gpui_kit::HighlightStyle);
 
 /// A diff ready to display.
 ///
@@ -40,6 +44,10 @@ pub struct Rendered {
     pub texts: Vec<Vec<SharedString>>,
     /// The `@@ … @@` headers, for the same reason.
     pub headers: Vec<SharedString>,
+    /// Every line's two numbers, old then new — empty where that version has
+    /// none — for the same reason again: formatting them cost two strings per
+    /// visible line of every frame. Indexed like `texts`.
+    numbers: Vec<Vec<[SharedString; 2]>>,
     /// The words that changed **inside** a line, as byte ranges of its text,
     /// indexed like `texts`.
     ///
@@ -104,6 +112,9 @@ pub struct Rendered {
     /// a `Rendered` never changing again: the key is those two, and a resize or
     /// a zoom is what rebuilds them — not every frame.
     wrap_sizes: std::cell::RefCell<Option<WrapSizes>>,
+    /// What the palette lays over the highlighting, kept between frames for
+    /// the palette it was laid with — see `Painted`.
+    painted: std::cell::RefCell<Option<Rc<Painted>>>,
 }
 
 /// The wrapped list's sizes, and the three things they depend on.
@@ -147,11 +158,26 @@ impl Rendered {
                 .iter()
                 .map(|hunk| SharedString::from(hunk.header.clone()))
                 .collect(),
+            numbers: file
+                .hunks
+                .iter()
+                .map(|hunk| {
+                    hunk.lines
+                        .iter()
+                        .map(|line| {
+                            [line.old_no, line.new_no].map(|number| {
+                                number.map_or_else(SharedString::default, |n| n.to_string().into())
+                            })
+                        })
+                        .collect()
+                })
+                .collect(),
             gutter_digits: gutter_digits(&file),
             longest_row,
             longest_chars,
             split,
             wrap_sizes: std::cell::RefCell::new(None),
+            painted: std::cell::RefCell::new(None),
             rows,
             file,
         };
@@ -200,6 +226,27 @@ impl Rendered {
     /// A line's text as gpui takes it: an `Arc` clone, not a copy.
     fn line_text(&self, hunk: usize, line: usize) -> Option<&SharedString> {
         self.texts.get(hunk)?.get(line)
+    }
+
+    /// A line's two numbers, old then new, as gpui takes them.
+    fn line_numbers(&self, hunk: usize, line: usize) -> Option<&[SharedString; 2]> {
+        self.numbers.get(hunk)?.get(line)
+    }
+
+    /// What this palette lays over the highlighting, from the cache.
+    ///
+    /// Asked once per frame by the render and handed to every visible line;
+    /// laid again only when the palette changes — a switch between light and
+    /// dark — which is also the only thing it depends on besides the diff.
+    fn painted(&self, colors: &DiffColors) -> Rc<Painted> {
+        let key = (colors.added_word_bg, colors.removed_word_bg);
+        let mut slot = self.painted.borrow_mut();
+        if let Some(painted) = slot.as_ref().filter(|painted| painted.key == key) {
+            return painted.clone();
+        }
+        let painted = Rc::new(Painted::new(self, colors));
+        *slot = Some(painted.clone());
+        painted
     }
 
     /// The changed-word ranges of a line — empty for context lines, for a
@@ -440,6 +487,120 @@ impl Rendered {
     }
 }
 
+/// What the palette lays over a diff's highlighting: the changed words' tint,
+/// and the wrapped lines cut into segments.
+///
+/// Both are fixed once the diff and the palette are — only the search and the
+/// hovered word change from one frame to the next — and both were redone for
+/// every visible line of every frame: the words rebuilt and laid over the
+/// grammar, the wrapped text rewalked and its runs sliced three times per
+/// segment. Kept by `Rendered` for the palette it was laid with.
+pub struct Painted {
+    /// The changed words' two backgrounds: the key.
+    key: (gpui_kit::Hsla, gpui_kit::Hsla),
+    /// Every line carrying changed words, its styles with the words laid on;
+    /// empty for the others, which read `Rendered::highlights` as they are.
+    worded: Vec<Vec<LineStyles>>,
+    /// The wrapped lines' segments, by unified entry, for one column count:
+    /// a resize is what throws them away, not a frame. Filled as the lines
+    /// come on screen, never for the whole file.
+    segments: std::cell::RefCell<Segments>,
+}
+
+/// The wrapped lines' segments, and the column count they were cut for.
+type Segments = (usize, HashMap<usize, Rc<[Segment]>>);
+
+/// One visible line of a wrapped diff line.
+struct Segment {
+    /// Its bytes in the line's text: what the search's hits are cut against.
+    bytes: std::ops::Range<usize>,
+    text: SharedString,
+    /// The line's styles, changed words included, cut to the segment.
+    styles: LineStyles,
+    /// The grammar coloured something here — see `line_content`.
+    grammar: bool,
+}
+
+impl Painted {
+    fn new(diff: &Rendered, colors: &DiffColors) -> Self {
+        let worded = diff
+            .file
+            .hunks
+            .iter()
+            .enumerate()
+            .map(|(h, hunk)| {
+                hunk.lines
+                    .iter()
+                    .enumerate()
+                    .map(|(l, source)| {
+                        let words = diff.word_ranges(h, l);
+                        let Some(bg) =
+                            word_color(source.kind, colors).filter(|_| !words.is_empty())
+                        else {
+                            return LineStyles::new();
+                        };
+                        let marks: Vec<_> = words.iter().map(|range| (range.clone(), bg)).collect();
+                        crate::ui::highlight::overlay(diff.highlights.line(h, l), &marks)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            key: (colors.added_word_bg, colors.removed_word_bg),
+            worded,
+            segments: std::cell::RefCell::new((0, HashMap::new())),
+        }
+    }
+
+    /// A line's styles: the grammar's, with the changed words laid on when it
+    /// has any.
+    fn styles<'a>(&'a self, diff: &'a Rendered, hunk: usize, line: usize) -> &'a [LineStyle] {
+        match self.worded.get(hunk).and_then(|h| h.get(line)) {
+            Some(styles) if !styles.is_empty() => styles,
+            _ => diff.highlights.line(hunk, line),
+        }
+    }
+
+    /// A wrapped line's segments, from the cache.
+    fn segments(&self, diff: &Rendered, row: usize, cols: usize) -> Rc<[Segment]> {
+        let mut cache = self.segments.borrow_mut();
+        if cache.0 != cols {
+            *cache = (cols, HashMap::new());
+        }
+        cache
+            .1
+            .entry(row)
+            .or_insert_with(|| self.cut(diff, row, cols))
+            .clone()
+    }
+
+    /// Cuts a line into its wrapped segments: one sweep of its text for the
+    /// offsets, one of each run list for the pieces.
+    fn cut(&self, diff: &Rendered, row: usize, cols: usize) -> Rc<[Segment]> {
+        let Some(Row::Line { hunk, line }) = diff.rows.get(row).copied() else {
+            return Rc::from([]);
+        };
+        let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
+            return Rc::from([]);
+        };
+        let own = wrapped_lines(diff.row_chars.get(row).copied().unwrap_or(0), cols);
+        let bounds = wrap_offsets(&source.text, cols, own);
+        let spans = || bounds.windows(2).map(|pair| pair[0]..pair[1]);
+        let styles = cut_runs(self.styles(diff, hunk, line), spans(), |_| true);
+        let grammar = cut_runs(diff.highlights.line(hunk, line), spans(), |_| true);
+        spans()
+            .zip(styles)
+            .zip(grammar)
+            .map(|((bytes, styles), grammar)| Segment {
+                text: SharedString::from(source.text[bytes.clone()].to_string()),
+                bytes,
+                styles,
+                grammar: !grammar.is_empty(),
+            })
+            .collect()
+    }
+}
+
 /// The widest entry, in number of characters.
 ///
 /// Counted in characters and not in bytes: at fixed pitch, it is the number of
@@ -546,7 +707,7 @@ fn wrap_offsets(text: &str, cols: usize, segments: usize) -> Vec<usize> {
     out
 }
 
-/// A slice's ranges, brought back to its start.
+/// A slice's ranges, brought back to its start: `cut_runs`, for one span.
 ///
 /// They stay **sorted and disjoint**, the invariant gpui does not check and
 /// whose violation shifts everything after it — the slicing only clips ranges
@@ -555,13 +716,9 @@ fn slice_runs<T: Clone>(
     runs: &[(std::ops::Range<usize>, T)],
     span: &std::ops::Range<usize>,
 ) -> Vec<(std::ops::Range<usize>, T)> {
-    runs.iter()
-        .filter_map(|(range, style)| {
-            let start = range.start.max(span.start);
-            let end = range.end.min(span.end);
-            (start < end).then(|| (start - span.start..end - span.start, style.clone()))
-        })
-        .collect()
+    cut_runs(runs, std::iter::once(span.clone()), |_| true)
+        .pop()
+        .unwrap_or_default()
 }
 
 /// One entry of the list.
@@ -1584,6 +1741,9 @@ impl ClaudhubApp {
         } = layout;
 
         let colors = DiffColors::of(cx);
+        // The changed words and the wrapped segments, laid once for the diff
+        // and the palette: the closure below only reads them.
+        let painted = diff.painted(&colors);
         let entity = cx.entity();
         let rows = diff.clone();
         let count = diff.len(split);
@@ -1643,11 +1803,12 @@ impl ClaudhubApp {
             };
             if split {
                 render_split_row(
-                    &rows, ix, &colors, column, cols, &style, &search, &entity, cx,
+                    &rows, &painted, ix, &colors, column, cols, &style, &search, &entity, cx,
                 )
             } else {
                 render_row(
                     &rows,
+                    &painted,
                     ix,
                     &colors,
                     content_width,
@@ -2320,6 +2481,7 @@ impl RowStyle {
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     diff: &Rc<Rendered>,
+    painted: &Painted,
     index: usize,
     colors: &DiffColors,
     content_width: Pixels,
@@ -2335,131 +2497,186 @@ fn render_row(
     let Some(row) = diff.rows.get(index).copied() else {
         return div().into_any_element();
     };
-    let (selected, selection_bg) = (style.selected, style.selection_bg);
     match row {
         Row::Header { hunk } => {
             render_header(diff, index, hunk, colors, content_width, style, entity, cx)
         }
         Row::Line { hunk, line } => {
-            let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
+            let (Some(source), Some(numbers)) = (
+                diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)),
+                diff.line_numbers(hunk, line),
+            ) else {
                 return div().into_any_element();
             };
-            let (bg, fg) = line_colors(source.kind, colors);
-            let word_bg = word_color(source.kind, colors);
-            let marks = search.marks(hunk, line);
-            let line_height = style.line_height;
-            // Wrapped, the entry becomes a stack of fixed-height lines, as a
-            // half does in two columns: the numbers and the sign stay on the
-            // first, aligned to the top, and what follows is the continuation
-            // of the text. Its height is then exactly the one announced to the
-            // list — `unified_heights`, from this very count.
+            // Wrapped, the entry is exactly as tall as its own line: the height
+            // announced to the list — `unified_heights`, from this very count.
             let wrapped = cols > 0;
             let lines = if wrapped {
                 wrapped_lines(diff.row_chars.get(index).copied().unwrap_or(0), cols)
             } else {
                 1
             };
-            let follow = |segment: usize| {
-                style.armed.then(|| Armed {
-                    id: ("diff-word", index).into(),
-                    spot: Spot::Diff {
-                        row: index,
-                        side: 0,
-                        segment,
-                    },
-                    hovered: style.hovered_word(index, 0, segment),
-                    entity,
-                })
-            };
-
-            let row = h_flex()
+            let shell = h_flex()
                 .id(("line", index))
-                .h(line_height * lines as f32)
+                .h(style.line_height * lines as f32)
                 // No floor on the width once it wraps: the width is the view's,
                 // there is nothing left to scroll to, and a minimum taken from
                 // the longest line of the file would put a bar under a list
                 // that has nowhere to go.
                 .when(!wrapped, |el| el.min_w(content_width))
-                .map(|el| {
-                    if wrapped {
-                        el.items_start()
-                    } else {
-                        el.items_center()
-                    }
-                })
-                .whitespace_nowrap()
-                // The selection replaces the row's background rather than adding
-                // to it: gpui does not stack two backgrounds on one node, and a
-                // selection barely distinguishable from the addition it covers
-                // is useless.
-                .when_some(bg.filter(|_| !selected), |el, bg| el.bg(bg))
-                .when(selected, |el| el.bg(selection_bg))
                 // The annotation marker is a rule in the margin, before the
                 // numbers: it has to be visible without moving a column, and the
                 // gutter is the only place horizontal scrolling does not take
                 // out of view.
-                .child(note_mark(style))
-                .child(
-                    number(source.old_no, style.gutter, colors)
-                        .when(wrapped, |el| el.h(line_height)),
-                )
-                .child(
-                    number(source.new_no, style.gutter, colors)
-                        .when(wrapped, |el| el.h(line_height)),
-                )
-                .child(
-                    div()
-                        .w(px(14.))
-                        .flex_none()
-                        .text_center()
-                        .when(wrapped, |el| el.h(line_height))
-                        .when_some(fg, |el, fg| el.text_color(fg))
-                        .child(sign(source.kind)),
-                )
-                .map(|el| {
-                    if !wrapped {
-                        return el.child(line_content(
-                            diff,
-                            hunk,
-                            line,
-                            fg,
-                            word_bg,
-                            &marks,
-                            None,
-                            follow(0),
-                        ));
-                    }
-                    let bounds = wrap_offsets(&source.text, cols, lines);
-                    el.child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .children((0..lines).map(|segment| {
-                                // An id per segment, as in `half`: an element is
-                                // named by the path of the ids above it, and the
-                                // words of two segments would otherwise share one
-                                // name.
-                                div()
-                                    .id(("segment", segment))
-                                    .h(line_height)
-                                    .child(line_content(
-                                        diff,
-                                        hunk,
-                                        line,
-                                        fg,
-                                        word_bg,
-                                        &marks,
-                                        Some(bounds[segment]..bounds[segment + 1]),
-                                        follow(segment),
-                                    ))
-                            })),
-                    )
-                });
+                .child(note_mark(style));
+            let cell = LineCell {
+                painted,
+                row: index,
+                hunk,
+                line,
+                kind: source.kind,
+                // Both versions' numbers: the list has one column for both.
+                numbers: numbers.as_slice(),
+                side: 0,
+                index,
+                lines,
+            };
+            let row = line_body(shell, cell, diff, colors, cols, style, search, entity);
             style
                 .hunk_rule(with_row_gestures(row, index, entity))
                 .into_any_element()
         }
     }
+}
+
+/// A diff line where it is painted: in the unified list's entry, or in a half
+/// of a two-column pair.
+///
+/// The two painted the same body — the tint or the selection, the gutters, the
+/// sign column, the text whole or cut into its wrapped segments — from two
+/// copies of it. What differs is the shell the caller hands in, its gutters,
+/// and how many segments tall it is.
+struct LineCell<'a> {
+    painted: &'a Painted,
+    /// The line, as the unified list numbers it.
+    row: usize,
+    hunk: usize,
+    line: usize,
+    kind: DiffLineKind,
+    /// One number per gutter.
+    numbers: &'a [SharedString],
+    /// Which text of the entry the words belong to: `0` in the unified list,
+    /// the column's in a pair — see `Spot::Diff`.
+    side: u8,
+    /// The displayed entry, which names the clickable words.
+    index: usize,
+    /// The visible lines the entry takes: the line's own, or the taller
+    /// half's in a pair, where what lies past the line's own stays empty.
+    lines: usize,
+}
+
+/// Fills a line's shell — see `LineCell`.
+///
+/// Wrapped, the line becomes a stack of fixed-height lines: the numbers and
+/// the sign stay on the first, aligned to the top, and what follows is the
+/// continuation of the text. The entry's height is then exactly the one
+/// announced to the list.
+#[allow(clippy::too_many_arguments)]
+fn line_body(
+    shell: gpui_kit::Stateful<gpui_kit::Div>,
+    cell: LineCell,
+    diff: &Rendered,
+    colors: &DiffColors,
+    cols: usize,
+    style: &RowStyle,
+    search: &SearchPaint,
+    entity: &Entity<ClaudhubApp>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let (bg, fg) = line_colors(cell.kind, colors);
+    let marks = search.marks(cell.hunk, cell.line);
+    let line_height = style.line_height;
+    let wrapped = cols > 0;
+    let (index, side) = (cell.index, cell.side);
+    let follow = |segment: usize| {
+        style.armed.then(|| Armed {
+            id: ("diff-word", index).into(),
+            spot: Spot::Diff {
+                row: index,
+                side,
+                segment,
+            },
+            hovered: style.hovered_word(index, side, segment),
+            entity,
+        })
+    };
+    let el = shell
+        .map(|el| {
+            if wrapped {
+                el.items_start()
+            } else {
+                el.items_center()
+            }
+        })
+        .whitespace_nowrap()
+        // The selection replaces the row's background rather than adding to
+        // it: gpui does not stack two backgrounds on one node, and a selection
+        // barely distinguishable from the addition it covers is useless.
+        .when_some(bg.filter(|_| !style.selected), |el, bg| el.bg(bg))
+        .when(style.selected, |el| el.bg(style.selection_bg))
+        .children(cell.numbers.iter().map(|number_text| {
+            number(number_text.clone(), style.gutter, colors).when(wrapped, |el| el.h(line_height))
+        }))
+        .child(
+            div()
+                .w(px(14.))
+                .flex_none()
+                .text_center()
+                .when(wrapped, |el| el.h(line_height))
+                .when_some(fg, |el, fg| el.text_color(fg))
+                .child(sign(cell.kind)),
+        );
+    if !wrapped {
+        return el.child(line_content(
+            diff.line_text(cell.hunk, cell.line)
+                .cloned()
+                .unwrap_or_default(),
+            cell.painted.styles(diff, cell.hunk, cell.line),
+            !diff.highlights.line(cell.hunk, cell.line).is_empty(),
+            &marks,
+            fg,
+            follow(0),
+        ));
+    }
+    let segments = cell.painted.segments(diff, cell.row, cols);
+    el.child(
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .children((0..cell.lines).map(|segment| {
+                // An id per segment: an element is named by the path of the ids
+                // above it, and the words of two segments would otherwise share
+                // one name. Past the line's own segments — the half opposite is
+                // taller — the line stays empty.
+                div().id(("segment", segment)).h(line_height).when_some(
+                    segments.get(segment),
+                    |el, piece| {
+                        let marks = if marks.is_empty() {
+                            Vec::new()
+                        } else {
+                            slice_runs(&marks, &piece.bytes)
+                        };
+                        el.child(line_content(
+                            piece.text.clone(),
+                            &piece.styles,
+                            piece.grammar,
+                            &marks,
+                            fg,
+                            follow(segment),
+                        ))
+                    },
+                )
+            })),
+    )
 }
 
 /// The three gestures every entry of the list carries: the click that selects,
@@ -2575,80 +2792,33 @@ fn word_color(kind: DiffLineKind, colors: &DiffColors) -> Option<gpui_kit::Hsla>
 /// Tabs are rendered as they are by the font: replacing them here would keep the
 /// alignment but shift the highlighting ranges, which are computed on the
 /// original text.
-#[allow(clippy::too_many_arguments)]
 fn line_content(
-    diff: &Rc<Rendered>,
-    hunk: usize,
-    line: usize,
-    fg: Option<gpui_kit::Hsla>,
-    // `word_bg`: the background of the words that changed inside this line,
-    // on the side that carries them. `None` on a context line, which has no
-    // other version to differ from.
-    word_bg: Option<gpui_kit::Hsla>,
+    // `text`: the whole line, or one wrapped segment of it; `styles` and
+    // `marks` are in its own bytes.
+    text: SharedString,
+    // `styles`: the grammar's, with the changed words of the pair already laid
+    // on — both are fixed with the diff, see `Painted`.
+    styles: &[LineStyle],
+    // `grammar`: the grammar coloured something here, the words aside.
+    grammar: bool,
     marks: &[(std::ops::Range<usize>, gpui_kit::Hsla)],
-    // `span`: the slice of the text to show, in **bytes**, when the line is
-    // wrapped. Its ends are computed once per line by `wrap_offsets`, where
-    // taking them a column count at a time walked the text once per segment.
-    span: Option<std::ops::Range<usize>>,
+    fg: Option<gpui_kit::Hsla>,
     // `follow`: what makes the words clickable. `None` while nobody holds the
     // modifier, which is all the time: no ranges are computed, and the text is
     // the plain element it has always been.
     follow: Option<Armed>,
 ) -> gpui_kit::AnyElement {
-    let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
-        return div().into_any_element();
-    };
-    let words: Vec<(std::ops::Range<usize>, gpui_kit::Hsla)> = match word_bg {
-        Some(bg) => diff
-            .word_ranges(hunk, line)
-            .iter()
-            .map(|range| (range.clone(), bg))
-            .collect(),
-        None => Vec::new(),
-    };
-    // The whole line is borrowed — its text is an `Arc` clone and its runs stay
-    // where they are; only a wrapped segment owns anything.
-    let sliced;
-    let (text, styles, words, marks) = match span {
-        None => (
-            diff.line_text(hunk, line).cloned().unwrap_or_default(),
-            diff.highlights.line(hunk, line),
-            words.as_slice(),
-            marks,
-        ),
-        Some(bytes) => {
-            sliced = (
-                slice_runs(diff.highlights.line(hunk, line), &bytes),
-                slice_runs(&words, &bytes),
-                slice_runs(marks, &bytes),
-            );
-            (
-                SharedString::from(source.text[bytes].to_string()),
-                sliced.0.as_slice(),
-                sliced.1.as_slice(),
-                sliced.2.as_slice(),
-            )
-        }
-    };
-    // Four layers, in the order they were decided: the grammar, the changed
-    // words of the pair, the search hits, and the underline of the word being
-    // pointed at. Each is laid on the one below rather than replacing it — a
-    // hit in coloured code keeps its colours, and so does an underlined
-    // symbol.
-    let base = if words.is_empty() {
-        styles.to_vec()
-    } else {
-        crate::ui::highlight::overlay(styles, words)
-    };
-    let base = if marks.is_empty() {
-        base
-    } else {
-        crate::ui::highlight::overlay(&base, marks)
-    };
-    let highlights = match follow.as_ref().and_then(|follow| follow.hovered.clone()) {
-        Some(word) => crate::ui::highlight::underline(&base, word),
-        None => base,
-    };
+    // What changes from one frame to the next is laid here, on top of what
+    // does not: the search hits, then the underline of the word being pointed
+    // at. Each is laid on the one below rather than replacing it — a hit in
+    // coloured code keeps its colours, and so does an underlined symbol.
+    let mut highlights = std::borrow::Cow::Borrowed(styles);
+    if !marks.is_empty() {
+        highlights = crate::ui::highlight::overlay(&highlights, marks).into();
+    }
+    if let Some(word) = follow.as_ref().and_then(|follow| follow.hovered.clone()) {
+        highlights = crate::ui::highlight::underline(&highlights, word).into();
+    }
     // Nothing to colour and nobody holding the modifier — which is the common
     // case by far: the line is the plain element it has always been, painted by
     // the code that painted it before, at the same cost.
@@ -2658,12 +2828,12 @@ fn line_content(
             .child(text)
             .into_any_element();
     }
-    let styled = StyledText::new(text.clone()).with_highlights(highlights);
+    let styled = StyledText::new(text.clone()).with_highlights(highlights.iter().cloned());
     let content = match follow {
         None => styled.into_any_element(),
         Some(follow) => followable(follow, text, styled),
     };
-    if !styles.is_empty() {
+    if grammar {
         return content;
     }
     // The addition or removal colour stays carried by the container when the
@@ -2679,6 +2849,7 @@ fn line_content(
 #[allow(clippy::too_many_arguments)]
 fn render_split_row(
     diff: &Rc<Rendered>,
+    painted: &Painted,
     index: usize,
     colors: &DiffColors,
     column: Pixels,
@@ -2722,6 +2893,7 @@ fn render_split_row(
     .child(note_mark(style))
     .child(half(
         diff,
+        painted,
         old,
         Column::Old,
         colors,
@@ -2735,6 +2907,7 @@ fn render_split_row(
     ))
     .child(half(
         diff,
+        painted,
         new,
         Column::New,
         colors,
@@ -2761,11 +2934,6 @@ fn note_mark(style: &RowStyle) -> impl IntoElement {
         .when(style.annotated, |el| el.bg(style.note_color))
 }
 
-/// Half a row: its number, its sign and its text.
-///
-/// With no line to show — an addition has nothing opposite — the half stays
-/// empty and greyed: that is what makes it visible that the change has no
-/// counterpart on that side.
 /// Which of the two versions a column shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Column {
@@ -2773,9 +2941,15 @@ enum Column {
     New,
 }
 
+/// Half a row: its number, its sign and its text.
+///
+/// With no line to show — an addition has nothing opposite — the half stays
+/// empty and greyed: that is what makes it visible that the change has no
+/// counterpart on that side.
 #[allow(clippy::too_many_arguments)]
 fn half(
     diff: &Rc<Rendered>,
+    painted: &Painted,
     row: Option<usize>,
     side: Column,
     colors: &DiffColors,
@@ -2791,61 +2965,42 @@ fn half(
     index: usize,
     entity: &Entity<ClaudhubApp>,
 ) -> gpui_kit::AnyElement {
-    let (gutter, selected, selection_bg) = (style.gutter, style.selected, style.selection_bg);
     let source = row
-        .and_then(|index| diff.rows.get(index).copied())
-        .and_then(|row| match row {
-            Row::Line { hunk, line } => Some((hunk, line)),
+        .and_then(|unified| Some((unified, diff.rows.get(unified).copied()?)))
+        .and_then(|(unified, row)| match row {
+            Row::Line { hunk, line } => Some((unified, hunk, line)),
             Row::Header { .. } => None,
         })
-        .and_then(|(hunk, line)| {
+        .and_then(|(unified, hunk, line)| {
             let source = diff.file.hunks.get(hunk)?.lines.get(line)?;
-            Some((hunk, line, source))
+            Some((unified, hunk, line, source, diff.line_numbers(hunk, line)?))
         });
 
-    let Some((hunk, line, source)) = source else {
+    let Some((unified, hunk, line, source, [old_no, new_no])) = source else {
         return div()
             .w(column)
             .flex_none()
             .h_full()
-            .bg(if selected {
-                selection_bg
+            .bg(if style.selected {
+                style.selection_bg
             } else {
                 colors.absent_bg
             })
             .into_any_element();
     };
 
-    let (bg, fg) = line_colors(source.kind, colors);
-    let word_bg = word_color(source.kind, colors);
     // *This* version's number: a context line has two, and showing the same one
     // on both sides would make the left column lie as soon as the file has
-    // gained or lost lines above.
-    let number_of = match side {
-        Column::Old => source.old_no.or(source.new_no),
-        Column::New => source.new_no.or(source.old_no),
+    // gained or lost lines above. One gutter per column: each shows its own
+    // version, and repeating both numbers there would pay twice the width for
+    // information the column opposite already carries.
+    let own = match side {
+        Column::Old if !old_no.is_empty() => old_no,
+        Column::New if !new_no.is_empty() => new_no,
+        Column::Old => new_no,
+        Column::New => old_no,
     };
-    let kind = source.kind;
-    let marks = search.marks(hunk, line);
-    let line_height = style.line_height;
-    // Wrapped, the half becomes a stack of fixed-height lines: the gutter and
-    // the sign stay on the first, aligned to the top, and the following ones are
-    // the continuation of the text. The entry's height is then exactly the one
-    // announced to the list.
-    let wrapped = cols > 0;
-    let follow = |segment: usize| {
-        style.armed.then(|| Armed {
-            id: ("diff-word", index).into(),
-            spot: Spot::Diff {
-                row: index,
-                side: side as u8,
-                segment,
-            },
-            hovered: style.hovered_word(index, side as u8, segment),
-            entity,
-        })
-    };
-    h_flex()
+    let shell = h_flex()
         // An id of its own, and it is not decoration: an element's identity is
         // the path of the ids above it, and the two halves would otherwise give
         // the same name to two different lines' words.
@@ -2853,78 +3008,19 @@ fn half(
         .w(column)
         .flex_none()
         .h_full()
-        .map(|el| {
-            if wrapped {
-                el.items_start()
-            } else {
-                el.items_center()
-            }
-        })
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .when_some(bg.filter(|_| !selected), |el, bg| el.bg(bg))
-        .when(selected, |el| el.bg(selection_bg))
-        // One gutter per column: each shows its own version, and repeating both
-        // numbers there would pay twice the width for information the column
-        // opposite already carries.
-        .child(number(number_of, gutter, colors).when(wrapped, |el| el.h(line_height)))
-        .child(
-            div()
-                .w(px(14.))
-                .flex_none()
-                .text_center()
-                .when(wrapped, |el| el.h(line_height))
-                .when_some(fg, |el, fg| el.text_color(fg))
-                .child(sign(kind)),
-        )
-        .map(|el| {
-            if !wrapped {
-                return el.child(line_content(
-                    diff,
-                    hunk,
-                    line,
-                    fg,
-                    word_bg,
-                    &marks,
-                    None,
-                    follow(0),
-                ));
-            }
-            // The entry's index, which `row_chars` indexes: finding it by
-            // walking `rows` would cost a sweep of the file per visible half
-            // line, on every frame.
-            let chars = row
-                .and_then(|index| diff.row_chars.get(index).copied())
-                .unwrap_or(0);
-            let own = wrapped_lines(chars, cols);
-            let bounds = wrap_offsets(&source.text, cols, own);
-            el.child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .children((0..lines).map(|segment| {
-                        // Same reason as the half's own id: each wrapped
-                        // segment is a line of its own, and its words with it.
-                        div().id(("segment", segment)).h(line_height).map(|el| {
-                            if segment < own {
-                                el.child(line_content(
-                                    diff,
-                                    hunk,
-                                    line,
-                                    fg,
-                                    word_bg,
-                                    &marks,
-                                    Some(bounds[segment]..bounds[segment + 1]),
-                                    follow(segment),
-                                ))
-                            } else {
-                                el
-                            }
-                        })
-                    })),
-            )
-        })
-        .into_any_element()
+        .overflow_hidden();
+    let cell = LineCell {
+        painted,
+        row: unified,
+        hunk,
+        line,
+        kind: source.kind,
+        numbers: std::slice::from_ref(own),
+        side: side as u8,
+        index,
+        lines,
+    };
+    line_body(shell, cell, diff, colors, cols, style, search, entity).into_any_element()
 }
 
 /// Where the selection goes after an arrow.
@@ -3010,14 +3106,14 @@ fn drag(
     });
 }
 
-fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> gpui_kit::Div {
+fn number(value: SharedString, width: Pixels, colors: &DiffColors) -> gpui_kit::Div {
     div()
         .w(width)
         .flex_none()
         .text_right()
         .pr_1()
         .text_color(colors.line_number)
-        .child(value.map(|n| n.to_string()).unwrap_or_default())
+        .child(value)
 }
 
 /// The diff view's empty state.
@@ -3253,6 +3349,96 @@ mod tests {
         // The addition with nothing opposite has no other version to differ
         // from.
         assert!(rendered.word_ranges(0, 3).is_empty());
+    }
+
+    fn palette() -> DiffColors {
+        let tint = |h| gpui_kit::hsla(h, 0.5, 0.5, 1.);
+        DiffColors {
+            added_bg: tint(0.1),
+            added_fg: tint(0.2),
+            removed_bg: tint(0.3),
+            removed_fg: tint(0.4),
+            hunk_bg: tint(0.5),
+            line_number: tint(0.6),
+            absent_bg: tint(0.7),
+            added_word_bg: tint(0.8),
+            removed_word_bg: tint(0.9),
+        }
+    }
+
+    /// The changed words are laid once, on the side that carries them, and a
+    /// line with none reads the grammar's styles untouched.
+    #[test]
+    fn the_changed_words_are_laid_once_on_their_side() {
+        use DiffLineKind::*;
+        let mut one = hunk("@@ a @@", &[Context, Removed, Added]);
+        one.lines[0].text = "let total = 0;".into();
+        one.lines[1].text = "foo(alpha, beta)".into();
+        one.lines[2].text = "foo(alpha, gamma)".into();
+        let diff = FileDiff {
+            hunks: vec![one],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("a.rs"), diff, &Theme::default_light());
+        let colors = palette();
+        let painted = rendered.painted(&colors);
+        assert!(
+            Rc::ptr_eq(&painted, &rendered.painted(&colors)),
+            "laid once per palette"
+        );
+        let background = |line: usize, word: &str| {
+            let text = rendered.row_text(Row::Line { hunk: 0, line });
+            let at = text.find(word).unwrap();
+            painted
+                .styles(&rendered, 0, line)
+                .iter()
+                .find(|(range, _)| range.contains(&at))
+                .and_then(|(_, style)| style.background_color)
+        };
+        assert_eq!(background(1, "beta"), Some(colors.removed_word_bg));
+        assert_eq!(background(2, "gamma"), Some(colors.added_word_bg));
+        assert_eq!(background(2, "alpha"), None, "an unchanged word");
+        assert_eq!(
+            painted.styles(&rendered, 0, 0),
+            rendered.highlights.line(0, 0),
+            "no words, the grammar as it is"
+        );
+    }
+
+    /// A wrapped line's segments put the text back together, each with its
+    /// own slice of the styles; a column count change cuts them again.
+    #[test]
+    fn a_wrapped_line_is_cut_once_per_column_count() {
+        let mut one = hunk("@@ a @@", &[DiffLineKind::Added]);
+        one.lines[0].text = "fn calcule(x: u32) -> u32 { x + 1 }".into();
+        let diff = FileDiff {
+            hunks: vec![one],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("src/x.rs"), diff, &Theme::default_dark());
+        let painted = rendered.painted(&palette());
+        let text = rendered
+            .row_text(Row::Line { hunk: 0, line: 0 })
+            .to_string();
+        for cols in [8, 13] {
+            let segments = painted.segments(&rendered, 1, cols);
+            assert_eq!(segments.len(), wrapped_lines(text.chars().count(), cols));
+            assert!(Rc::ptr_eq(&segments, &painted.segments(&rendered, 1, cols)));
+            let joined: String = segments.iter().map(|piece| piece.text.as_ref()).collect();
+            assert_eq!(joined, text);
+            for piece in segments.iter() {
+                assert_eq!(&text[piece.bytes.clone()], piece.text.as_ref());
+                assert!(piece
+                    .styles
+                    .iter()
+                    .all(|(range, _)| range.end <= piece.text.len()));
+            }
+            assert!(segments.iter().any(|piece| piece.grammar));
+        }
+        // A header is not a line, and has nothing to cut.
+        assert!(painted.segments(&rendered, 0, 8).is_empty());
     }
 
     /// A trailing "no newline" marker belongs to the change before it, and a
