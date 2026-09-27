@@ -1012,7 +1012,7 @@
   "focus-home-create-pr": "Create the PR",
   "focus-review": "Review",
   "focus-home-terminals-all": "Every terminal, side by side",
-  "focus-attention-commit": "Commit",
+  "focus-home-commit": "Commit",
   "focus-home-branch": "Branch",
   "focus-home-to-commit": "To commit",
   "focus-home-run": "Run",

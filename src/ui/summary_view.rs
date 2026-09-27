@@ -26,7 +26,7 @@ use gpui_kit::{div, prelude::*, px, AnyElement, Context, Focusable as _, SharedS
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::canvas_view::Hang;
-use crate::ui::focus::{self, View};
+use crate::ui::focus::{self, GitFace, View};
 use crate::ui::focus_view::{tab_name, view_name};
 use crate::ui::icons::icon;
 use crate::ui::overview::{self, Doing, Node};
@@ -309,7 +309,13 @@ impl ClaudhubApp {
                             .cursor_pointer()
                             .hover(|style| style.text_color(theme.ring))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.show_board_view(&board, tab, cx);
+                                // A card of the git tab opens it on what waits for a commit,
+                                // whatever face it was left on.
+                                if tab == View::Git {
+                                    this.show_git_face(&board, GitFace::Changes, cx);
+                                } else {
+                                    this.show_board_view(&board, tab, cx);
+                                }
                             }))
                             .child(icon(glyph).xsmall().text_color(theme.muted_foreground))
                             .child(
@@ -1084,10 +1090,10 @@ impl ClaudhubApp {
             .xsmall()
             .primary()
             .icon(icon("git-commit-horizontal"))
-            .label(tr!("focus-attention-commit"))
+            .label(tr!("focus-home-commit"))
             .disabled(!self.has_changes(path))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.show_board_view(&worktree, View::Git, cx);
+                this.show_git_face(&worktree, GitFace::Changes, cx);
             }))
             .into_any_element()];
         let detail = self.view_detail(path, View::Git, cx);

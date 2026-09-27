@@ -1062,6 +1062,12 @@ impl ClaudhubApp {
         focus::view_of(chosen)
     }
 
+    /// Puts the git tab on a board, on `face`.
+    pub(super) fn show_git_face(&mut self, path: &Path, face: GitFace, cx: &mut Context<Self>) {
+        self.git_face.insert(path.to_path_buf(), face);
+        self.show_board_view(path, View::Git, cx);
+    }
+
     /// Puts a view on a board, in the place of the one there — the git tab,
     /// on its face, for the review or the pull request.
     pub(super) fn show_board_view(&mut self, path: &Path, view: View, cx: &mut Context<Self>) {
