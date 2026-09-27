@@ -1121,7 +1121,12 @@ impl ClaudhubApp {
         } else {
             0.
         };
-        let overflows = max > 0.5;
+        // A lone board has no column to slide to, and its line is all its
+        // title's: nothing here reads what the row measured, which moved
+        // under a sideways scroll inside the board — the terminals' — and
+        // made the line flicker while the tabs under it stood still.
+        let alone = shown.len() == 1;
+        let overflows = !alone && max > 0.5;
         let arrows_width = if overflows { 72. } else { 0. };
         let (strip, boards) = {
             let laid = self.focus_laid_out.borrow();
@@ -1130,18 +1135,18 @@ impl ClaudhubApp {
         let room = strip.1 - corner - arrows_width;
         let mut cells: Vec<AnyElement> = Vec::new();
         for path in shown {
-            // Before the row has been measured — the first frame — a lone
-            // board's title takes the line; the others wait the one frame.
+            // Several: each where its board stands, from what the row
+            // measured — before it has, the one frame, they wait.
             let span = match boards.get(path) {
+                _ if alone => Some((0., room.max(0.))),
                 Some(board) => focus::header_span(*board, at, room),
-                None if shown.len() == 1 => Some((0., room.max(0.))),
                 None => None,
             };
             let Some((left, right)) = span else {
                 continue;
             };
-            let (open, review) = (path.to_path_buf(), path.to_path_buf());
-            let mut actions = vec![Button::new("focus-edit")
+            let open = path.to_path_buf();
+            let actions = vec![Button::new("focus-edit")
                 .ghost()
                 .small()
                 .icon(icon("pencil"))
@@ -1151,23 +1156,12 @@ impl ClaudhubApp {
                     this.work_in_worktree(&open, window, cx);
                 }))
                 .into_any_element()];
-            // What runs in it — the environment, the recipes — beside
-            // where one goes to work: see `run_view`.
-            actions.extend(self.render_run(path, gpui_kit::component::Size::Small, cx));
-            actions.push(
-                Button::new("focus-review")
-                    .ghost()
-                    .small()
-                    .icon(icon("file-diff"))
-                    .label(tr!("focus-review"))
-                    .tooltip(tr!("overview-review"))
-                    // The board's own tab, not the sheet: a dialog over a
-                    // board that has the review under a tab said it twice.
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.show_board_view(&review, View::Review, cx);
-                    }))
-                    .into_any_element(),
-            );
+            // What runs in it — the environment, the recipes —, at the far
+            // right: see `run_view`. No « Review »: the board has its tab.
+            let run: Vec<AnyElement> = self
+                .render_run(path, gpui_kit::component::Size::Small, cx)
+                .into_iter()
+                .collect();
             cells.push(
                 h_flex()
                     .absolute()
@@ -1182,7 +1176,7 @@ impl ClaudhubApp {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(self.board_title(path, actions, cx)),
+                            .child(self.board_title(path, actions, run, cx)),
                     )
                     .into_any_element(),
             );

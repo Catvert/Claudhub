@@ -2452,11 +2452,13 @@ impl ClaudhubApp {
     /// editor's title bar said of a checkout: its name, its branch as the
     /// picker, pull and push when there is something to move — then
     /// `actions`, the board's own gestures — and at the far end whether it
-    /// is up, its address, and the rest of its menu.
+    /// is up, its address, `trailing` — what runs in it —, and the rest of
+    /// its menu.
     pub(super) fn board_title(
         &self,
         path: &Path,
         actions: Vec<AnyElement>,
+        trailing: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -2521,6 +2523,7 @@ impl ClaudhubApp {
             .children(actions)
             .child(div().flex_1())
             .children(self.render_wt_links(path, Size::Small, cx))
+            .children(trailing)
             .children(menu)
             .into_any_element()
     }

@@ -674,10 +674,12 @@ worktree.
   dans les coordonnées de la rangée — que le défilement ne change pas — et
   relue au défilement de la frame, sans quoi il traînait d'une image. **Il
   porte ce que la carte et la barre de l'éditeur disaient du checkout**
-  (`board_title`) — la branche en sélecteur, pull et push, « Éditer », le
-  widget d'exécution, « Revue », les liens, le `…`. À droite, deux flèches font
-  glisser la rangée d'une colonne (`focus::next_stop`), par le lissage de la
-  molette. Un clic montre un worktree seul et le rend regardé
+  (`board_title`) — la branche en sélecteur, pull et push, « Éditer », les
+  liens, le widget d'exécution tout à droite, le `…`. Avec plusieurs
+  tableaux, deux flèches font glisser la rangée d'une colonne
+  (`focus::next_stop`), par le lissage de la molette ; **un tableau seul a
+  la ligne entière, sans rien lire de ce que la rangée a mesuré** — un
+  défilement de côté dans ses terminaux faisait clignoter la ligne. Un clic montre un worktree seul et le rend regardé
   (`active`, celui de toute la fenêtre), `Ctrl`+clic l'ajoute à côté ou le
   retire, jamais le dernier ; choisir un worktree ailleurs dans la fenêtre le
   montre seul (`focus::shown_worktrees`). La sélection et la barre repliée en
