@@ -214,7 +214,8 @@ src/
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
     canvas_view.rs  les notes de l'accueil : les fichiers lus, écrits, déplacés
     changes_view.rs le nœud « Modifications » d'une carte, et la relecture qu'il
-                    ouvre : le panneau des changements et le diff, en dialogue
+                    ouvre : le panneau des changements et le diff, en dialogue ;
+                    la carte « Revue » d'un tableau
     context.rs      la fiche qu'un agent lit de son environnement — pur
     overview.rs     l'accueil : l'arbre de chaque dépôt, où va chaque nœud, le
                     zoom, ses deux vues — pur, testé
@@ -712,7 +713,12 @@ worktree.
   Un terminal n'a pas d'identité qui survive au processus : le magasin garde
   **qu'un terminal était là**, et ceux qui reviennent reprennent ces places
   dans l'ordre de lecture. **La carte du worktree porte ses modifications**
-  (`render_changes_section`) : sur ce tableau, c'est une seule carte. Un
+  (`render_changes_section`) : sur ce tableau, c'est une seule carte. **La
+  carte « Revue »** (`Node::Review`, des tableaux seulement — le plan n'a
+  pas de place pour un diff) vient sous elle : la revue de branche de la
+  feuille, sa base au choix, le diff dessous. Elle n'est vivante que sur le
+  worktree regardé et tant qu'aucune feuille ne peint les mêmes panneaux :
+  une liste virtuelle peinte deux fois partagerait son défilement. Un
   terminal au pied d'une colonne en prend le reste. Ce sont les **mêmes
   nœuds peints par les mêmes fonctions** que le plan (`column_node`) : ce que
   le plan retient (replis, masqués, hauteurs) vaut ici. Un terminal y mesure

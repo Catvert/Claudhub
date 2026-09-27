@@ -1081,8 +1081,8 @@ impl ClaudhubApp {
 
     // — The board ——————————————————————————————————————————————————
 
-    /// What of a worktree is on its board: its card, its terminals, and its
-    /// notes and the repository's that are not hidden.
+    /// What of a worktree is on its board: its card, its branch review, its
+    /// terminals, and its notes and the repository's that are not hidden.
     fn focus_present(&self, path: &Path) -> Vec<Node> {
         let hidden = &self.overview_hand.hidden;
         let groups = self.overview_groups();
@@ -1091,6 +1091,10 @@ impl ClaudhubApp {
             .find(|group| group.checkouts.iter().any(|c| c.path == path));
         let checkout = group.and_then(|group| group.checkouts.iter().find(|c| c.path == path));
         let mut present = vec![Node::Worktree(path.to_path_buf())];
+        let review = Node::Review(path.to_path_buf());
+        if !hidden.contains(&review) {
+            present.push(review);
+        }
         present.extend(
             self.terminals
                 .iter()
@@ -1790,7 +1794,7 @@ impl ClaudhubApp {
     /// are in it — the others the one the hand gave them, with a grip at
     /// their foot; a terminal that `fills` takes the rest of its column.
     fn render_focus_card(
-        &self,
+        &mut self,
         node: &Node,
         fills: bool,
         at_work: &overview::AtWork,
@@ -1928,7 +1932,7 @@ impl ClaudhubApp {
             .find(|(_, geometry)| geometry.borrow().covers(x))
             .map(|(path, _)| path.clone());
         let own = match &node {
-            Node::Worktree(path) | Node::Changes(path) => Some(path.clone()),
+            Node::Worktree(path) | Node::Changes(path) | Node::Review(path) => Some(path.clone()),
             Node::Terminal(id) => self
                 .terminals
                 .iter()
@@ -2269,6 +2273,7 @@ impl ClaudhubApp {
                     .unwrap_or_else(|| tr!("overview-note")),
             ),
             Node::Git(_) | Node::Changes(_) => ("file-diff", tr!("overview-changes")),
+            Node::Review(_) => ("file-diff", tr!("focus-review")),
         }
     }
 }

@@ -32,6 +32,9 @@ pub const GIT: (f32, f32) = (300., 150.);
 pub const NOTE: (f32, f32) = (280., 200.);
 /// A worktree's changes: the files a commit would take.
 pub const CHANGES: (f32, f32) = (300., 220.);
+/// A worktree's branch review on its board: a list and a diff, one above
+/// the other — code wants lines.
+pub const REVIEW: (f32, f32) = (480., 620.);
 /// Between two siblings.
 const SIBLING_GAP: f32 = 40.;
 /// Between two levels.
@@ -53,6 +56,7 @@ pub const MIN_CARD: (f32, f32) = (220., 140.);
 pub const MIN_TILE: (f32, f32) = (300., 160.);
 pub const MIN_NOTE: (f32, f32) = (160., 90.);
 pub const MIN_CHANGES: (f32, f32) = (200., 90.);
+pub const MIN_REVIEW: (f32, f32) = (300., 240.);
 
 pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 2.;
@@ -151,6 +155,10 @@ pub enum Node {
     Note(PathBuf),
     /// A worktree's changes waiting for a commit, by the worktree's path.
     Changes(PathBuf),
+    /// What a worktree's branch has written since its base, by the
+    /// worktree's path: a card of its focus board, never of the plane —
+    /// the tree has no place for a diff two columns of code wide.
+    Review(PathBuf),
 }
 
 /// Where the hand has put nodes, as offsets from where the tree would.
@@ -443,6 +451,7 @@ impl Plan {
                 .iter()
                 .find(|c| &c.path == path)
                 .map(|c| c.rect),
+            Node::Review(_) => None,
         }
     }
 
@@ -801,6 +810,7 @@ pub fn plan(groups: &[Group], hand: &Hand) -> Plan {
                     path: path.clone(),
                     rect,
                 }),
+                Node::Review(_) => {}
             }
         }
         left += widths.first().copied().unwrap_or(0.) + GROUP_GAP;
@@ -841,6 +851,7 @@ pub fn start_and_least(node: &Node) -> ((f32, f32), (f32, f32)) {
         Node::Worktree(_) => (CARD, MIN_CARD),
         Node::Note(_) => (NOTE, MIN_NOTE),
         Node::Changes(_) => (CHANGES, MIN_CHANGES),
+        Node::Review(_) => (REVIEW, MIN_REVIEW),
         Node::Terminal(_) => (Tile::default().size(), MIN_TILE),
     }
 }

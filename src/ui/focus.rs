@@ -23,6 +23,8 @@ use crate::ui::overview::Node;
 pub enum Key {
     /// The worktree's own card.
     Card,
+    /// Its branch review.
+    Review,
     Note(PathBuf),
     Terminal,
 }
@@ -95,6 +97,7 @@ impl Board {
                     .iter()
                     .map(|key| match key {
                         Key::Card => Slot::Card(Node::Worktree(path.to_path_buf())),
+                        Key::Review => Slot::Card(Node::Review(path.to_path_buf())),
                         Key::Note(note) => Slot::Card(Node::Note(note.clone())),
                         Key::Terminal => Slot::Vacant,
                     })
@@ -163,6 +166,7 @@ impl Board {
                     .iter()
                     .filter_map(|slot| match slot {
                         Slot::Card(Node::Worktree(_)) => Some(Key::Card),
+                        Slot::Card(Node::Review(_)) => Some(Key::Review),
                         Slot::Card(Node::Note(path)) => Some(Key::Note(path.clone())),
                         Slot::Card(Node::Terminal(_)) | Slot::Vacant => Some(Key::Terminal),
                         Slot::Card(Node::Git(_) | Node::Changes(_)) => None,
@@ -186,7 +190,7 @@ impl Board {
     /// a card new comes in by rule. Returns whether anything moved.
     ///
     /// The rule, for what the hand has not placed: the worktree's card at
-    /// the top of the first column; a note where `pending` says — the column
+    /// the top of the first column, its review under it; a note where `pending` says — the column
     /// whose « Note » was pressed — else under the card, in the first column;
     /// a terminal where `pending` says, else in the place a terminal of the
     /// last session held, else in a column of its own at the right. A
@@ -209,6 +213,20 @@ impl Board {
                         self.push_column(Vec::new());
                     }
                     self.columns[0].insert(0, Slot::Card(node.clone()));
+                }
+                Node::Review(path) => {
+                    if self.columns.is_empty() {
+                        self.push_column(Vec::new());
+                    }
+                    // Under the card when the card is in the first column,
+                    // else at its top: what the branch says comes before
+                    // what was written beside it.
+                    let card = Slot::Card(Node::Worktree(path.clone()));
+                    let at = self.columns[0]
+                        .iter()
+                        .position(|slot| *slot == card)
+                        .map_or(0, |index| index + 1);
+                    self.columns[0].insert(at, Slot::Card(node.clone()));
                 }
                 Node::Terminal(_) => {
                     let vacant = self.columns.iter().enumerate().find_map(|(c, column)| {
@@ -716,6 +734,40 @@ mod tests {
             ]
         );
         assert!(!board.settle(&present, Pending::default()));
+    }
+
+    /// The review comes under the card, before the notes already there —
+    /// and at the top of the first column when the card was moved away.
+    /// It is kept by name, like the card.
+    #[test]
+    fn the_review_comes_under_the_card() {
+        let review = Node::Review(PathBuf::from("/r"));
+        let mut board = Board::default();
+        board.settle(&[card(), note("a")], Pending::default());
+        board.settle(&[card(), note("a"), review.clone()], Pending::default());
+        assert_eq!(
+            nodes(&board),
+            vec![vec![Some(card()), Some(review.clone()), Some(note("a"))]]
+        );
+        let keys = board.keys();
+        assert_eq!(keys[0][1], Key::Review);
+        let back = Board::from_keys(std::path::Path::new("/r"), &keys, &[]);
+        assert_eq!(nodes(&back), nodes(&board));
+
+        let mut board = Board::default();
+        board.settle(&[card(), note("a")], Pending::default());
+        board.move_card(
+            &card(),
+            Target {
+                column: 1,
+                index: 0,
+            },
+        );
+        board.settle(&[card(), note("a"), review.clone()], Pending::default());
+        assert_eq!(
+            nodes(&board),
+            vec![vec![Some(review), Some(note("a"))], vec![Some(card())]]
+        );
     }
 
     /// A terminal opened from a column's own button stacks in it; one that

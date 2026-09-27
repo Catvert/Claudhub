@@ -45,6 +45,9 @@ pub struct WorktreeState {
     pub home_hidden: bool,
     /// Where its changes node stands on the home screen, and how.
     pub home_changes: NodePlace,
+    /// Its branch review on its focus board: its height, fold and whether
+    /// it was taken off.
+    pub home_review: NodePlace,
     /// Its cards' columns in the home screen's focus view, as the hand left
     /// them — see `ui::focus`.
     pub focus_board: Vec<Vec<crate::ui::focus::Key>>,

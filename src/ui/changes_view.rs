@@ -12,6 +12,12 @@
 //! show, so opening the review selects the card first, as the branch picker
 //! does: one surface, and what is started here is finished in the editor and
 //! back. A second copy of either panel would be a second set of bugs.
+//!
+//! **The review card** is the branch review's sheet laid on the focus board:
+//! the same list, the same base selector, the same diff. For the reason
+//! above it is live only on the worktree on show, and only while no sheet
+//! paints the same panels over it — two copies of one virtual list in a
+//! frame would share its scroll.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -37,6 +43,8 @@ const MAX_WIDTH: gpui_kit::Pixels = px(1440.);
 const MAX_HEIGHT: gpui_kit::Pixels = px(900.);
 /// The list's column in the review; the diff takes the rest.
 const LIST_WIDTH: gpui_kit::Pixels = px(380.);
+/// The list's height in the review card; the diff takes the rest.
+const CARD_LIST_HEIGHT: gpui_kit::Pixels = px(200.);
 /// What a maximized sheet leaves of the window round it.
 const SHEET_MARGIN: gpui_kit::Pixels = px(16.);
 
@@ -547,6 +555,199 @@ impl ClaudhubApp {
             self.show_sheet(SheetKind::Review, window, cx);
         }
         cx.notify();
+    }
+
+    /// A worktree's branch review as a card of its board: a head that names
+    /// it and what it compares against, then the list above the diff — side
+    /// by side when the card fills the middle, `wide`.
+    pub(super) fn render_review_card(
+        &mut self,
+        path: &Path,
+        wide: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let node = Node::Review(path.to_path_buf());
+        let app = cx.entity().downgrade();
+        let on_show = self.active.as_deref() == Some(path);
+        let sheet_open = self.commit_sheet || self.branch_sheet;
+        let against = self.review.get(path).and_then(|state| {
+            match (state.since_review, state.review_point.as_ref()) {
+                (true, Some(_)) => Some(tr!("sheet-review-since")),
+                _ => state
+                    .base
+                    .clone()
+                    .map(|base| tr!("sheet-review-against", { base: base })),
+            }
+        });
+
+        let head = h_flex()
+            .flex_none()
+            .h(px(overview::HEAD))
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .bg(theme.info.opacity(0.14))
+            .cursor_grab()
+            .on_mouse_down(
+                MouseButton::Left,
+                super::overview_view::grab(app.clone(), node.clone()),
+            )
+            .child(icon("file-diff").text_color(theme.info))
+            .child(
+                div()
+                    .flex_none()
+                    .truncate()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(tr!("focus-review")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .children(against),
+            )
+            .child(self.window_controls(node.clone(), cx));
+
+        let message =
+            |text: SharedString| div().text_xs().text_color(muted).text_center().child(text);
+        let folded = self.overview_hand.collapsed.contains(&node);
+        let body = if folded {
+            div().into_any_element()
+        } else if on_show && !sheet_open {
+            let ready = self.pick_card_file(path, cx);
+            let list = self.render_branch_review(window, cx).into_any_element();
+            let diff = if ready {
+                self.render_diff(window, cx).into_any_element()
+            } else {
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(message(tr!("review-pick-a-file")))
+                    .into_any_element()
+            };
+            let border = theme.border;
+            if wide {
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .w(LIST_WIDTH)
+                            .h_full()
+                            .overflow_hidden()
+                            .border_r_1()
+                            .border_color(border)
+                            .child(list),
+                    )
+                    .child(div().flex_1().min_w_0().h_full().child(diff))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .h(CARD_LIST_HEIGHT)
+                            .w_full()
+                            .overflow_hidden()
+                            .border_b_1()
+                            .border_color(border)
+                            .child(list),
+                    )
+                    .child(div().flex_1().min_h_0().w_full().child(diff))
+                    .into_any_element()
+            }
+        } else {
+            let worktree = path.to_path_buf();
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .p_3()
+                .gap_2()
+                .items_center()
+                .justify_center()
+                .child(message(if sheet_open {
+                    tr!("focus-review-sheet")
+                } else {
+                    tr!("focus-review-idle")
+                }))
+                .when(!sheet_open, |el| {
+                    el.child(
+                        Button::new(SharedString::from(format!(
+                            "focus-review-show-{}",
+                            path.display()
+                        )))
+                        .small()
+                        .icon(icon("eye"))
+                        .label(tr!("focus-review-show"))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.select_worktree(worktree.clone(), window, cx);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                })
+                .into_any_element()
+        };
+
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .text_sm()
+            // Its rows are pressed, not the card dragged by them; and a
+            // press here neither selects the board nor, twice, leaves the
+            // screen for the editor.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(head)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// Brings the diff to the branch's range for the review card — the
+    /// file shown kept when it is in the list, else the first one — and
+    /// says whether the diff is on that range. The commit sheet leaves it on
+    /// the changes in progress, the editor on whatever it was reading.
+    fn pick_card_file(&mut self, worktree: &Path, cx: &mut Context<Self>) -> bool {
+        let Some(state) = self.review.get(worktree) else {
+            return false;
+        };
+        let Some(range) = super::review::branch_panel_range(
+            state.base.as_deref(),
+            state.review_point.as_ref(),
+            state.since_review,
+        ) else {
+            return false;
+        };
+        if state.range == range && state.selected.is_some() {
+            return true;
+        }
+        // Its list may still be on its way: the next frame asks again.
+        let Some(first) = state
+            .files
+            .get(&range)
+            .and_then(|files| files.first())
+            .map(|file| file.path.clone())
+        else {
+            return false;
+        };
+        self.open_file(worktree.to_path_buf(), first, range, cx);
+        true
     }
 
     /// A sheet closed from its own head. **`close_dialog` does not call the

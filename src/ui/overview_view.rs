@@ -735,7 +735,7 @@ impl ClaudhubApp {
     /// one they start at there. Folded, any node is its head. Unfolded, its
     /// bottom edge is a grip for its height.
     pub(super) fn column_node(
-        &self,
+        &mut self,
         node: &Node,
         in_column: bool,
         at_work: &overview::AtWork,
@@ -772,6 +772,11 @@ impl ClaudhubApp {
                 kept(overview::CHANGES),
                 self.render_changes_node(path, 1., cx),
             ),
+            Node::Review(path) => {
+                let height = kept(overview::REVIEW);
+                let card = self.render_review_card(path, !in_column, window, cx);
+                boxed(height, card)
+            }
             Node::Worktree(path) => {
                 let doing = at_work
                     .cards
@@ -867,7 +872,11 @@ impl ClaudhubApp {
                                 overview::resized(terminal.size, delta, overview::MIN_TILE);
                         }
                     }
-                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) | Node::Changes(_) => {
+                    Node::Git(_)
+                    | Node::Worktree(_)
+                    | Node::Note(_)
+                    | Node::Changes(_)
+                    | Node::Review(_) => {
                         let (default, min) = overview::start_and_least(&node);
                         let size = self
                             .overview_hand
@@ -892,7 +901,11 @@ impl ClaudhubApp {
                                 (terminal.column_height + dy).max(overview::MIN_COLUMN_TILE);
                         }
                     }
-                    Node::Git(_) | Node::Worktree(_) | Node::Note(_) | Node::Changes(_) => {
+                    Node::Git(_)
+                    | Node::Worktree(_)
+                    | Node::Note(_)
+                    | Node::Changes(_)
+                    | Node::Review(_) => {
                         // The plane's own size, height only: what one gives a
                         // note here is what it has there.
                         let (default, min) = overview::start_and_least(&node);
@@ -977,6 +990,10 @@ impl ClaudhubApp {
                         .home_changes;
                     (&mut place.offset, &mut place.size)
                 }
+                Node::Review(path) => {
+                    let place = &mut store.worktrees.entry(path.clone()).or_default().home_review;
+                    (&mut place.offset, &mut place.size)
+                }
                 Node::Terminal(_) => return,
             };
             if offset.is_some() {
@@ -1013,6 +1030,8 @@ impl ClaudhubApp {
                             .home_changes
                             .offset = offset
                     }
+                    // Never moved off a tree it is not in.
+                    Node::Review(_) => {}
                     Node::Terminal(_) => {}
                 }
             }
@@ -1051,6 +1070,16 @@ impl ClaudhubApp {
                 let place = &worktree.home_changes;
                 (
                     Node::Changes(path.clone()),
+                    place.offset,
+                    place.size,
+                    place.collapsed,
+                    place.hidden,
+                )
+            }))
+            .chain(store.worktrees.iter().map(|(path, worktree)| {
+                let place = &worktree.home_review;
+                (
+                    Node::Review(path.clone()),
                     place.offset,
                     place.size,
                     place.collapsed,
@@ -1152,6 +1181,11 @@ impl ClaudhubApp {
             .chain(plan.tiles.iter().map(|tile| Node::Terminal(tile.id)))
             .chain(plan.notes.iter().map(|note| Node::Note(note.path.clone())))
             .chain(plan.changes.iter().map(|c| Node::Changes(c.path.clone())))
+            .chain(
+                plan.cards
+                    .iter()
+                    .map(|card| Node::Review(card.path.clone())),
+            )
             .collect();
         // And what was taken off the plane comes back: a hidden worktree is
         // in no plan to be read from, so it is found among the repositories.
@@ -1201,6 +1235,11 @@ impl ClaudhubApp {
                     Node::Changes(path) => {
                         if let Some(worktree) = store.worktrees.get_mut(path) {
                             worktree.home_changes = Default::default();
+                        }
+                    }
+                    Node::Review(path) => {
+                        if let Some(worktree) = store.worktrees.get_mut(path) {
+                            worktree.home_review = Default::default();
                         }
                     }
                     Node::Terminal(_) => {}
@@ -1481,7 +1520,7 @@ impl ClaudhubApp {
                 let doing = match &link.child {
                     Node::Terminal(id) => at_work.terminals.get(id).copied(),
                     Node::Worktree(path) => at_work.cards.get(path).copied(),
-                    Node::Git(_) | Node::Note(_) | Node::Changes(_) => None,
+                    Node::Git(_) | Node::Note(_) | Node::Changes(_) | Node::Review(_) => None,
                 };
                 let mut link = link.clone();
                 link.from = view.point(link.from);
@@ -2968,7 +3007,9 @@ impl ClaudhubApp {
                         .xsmall()
                         .icon(icon("x"))
                         .tooltip(match close {
-                            Node::Worktree(_) | Node::Changes(_) => tr!("overview-hide"),
+                            Node::Worktree(_) | Node::Changes(_) | Node::Review(_) => {
+                                tr!("overview-hide")
+                            }
                             Node::Note(_) => tr!("overview-note-delete"),
                             _ => tr!("overview-close"),
                         })
@@ -3096,7 +3137,7 @@ impl ClaudhubApp {
             Node::Git(_) => {}
             // Nothing is lost by taking it off: the files stay what they are,
             // and the « Hidden » menu brings it back — no question to ask.
-            Node::Changes(_) => {
+            Node::Changes(_) | Node::Review(_) => {
                 self.overview_hand.hidden.insert(node.clone());
                 self.remember_folds(node, cx);
                 cx.notify();
@@ -3244,6 +3285,14 @@ impl ClaudhubApp {
                         tr!("overview-changes-of", { name: label.to_string() }),
                     ));
                 }
+                let review = Node::Review(worktree.path.clone());
+                if self.overview_hand.hidden.contains(&review) {
+                    let (_, label) = self.project_label(&worktree.path);
+                    hidden.push((
+                        review,
+                        tr!("sheet-review-title", { name: label.to_string() }),
+                    ));
+                }
                 for entry in self.canvas.get(&worktree.path).into_iter().flatten() {
                     let node = Node::Note(entry.path.clone());
                     if self.overview_hand.hidden.contains(&node)
@@ -3357,6 +3406,11 @@ impl ClaudhubApp {
                     .entry(path.clone())
                     .or_default()
                     .home_changes;
+                place.collapsed = folded;
+                place.hidden = hidden;
+            }
+            Node::Review(path) => {
+                let place = &mut store.worktrees.entry(path.clone()).or_default().home_review;
                 place.collapsed = folded;
                 place.hidden = hidden;
             }
