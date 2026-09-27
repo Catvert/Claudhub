@@ -851,7 +851,29 @@ impl ClaudhubApp {
     /// state reads for.
     fn home_pr(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let (glyph, title) = view_name(View::Pr);
-        let body = if self.active.as_deref() == Some(path) {
+        let on_show = self.active.as_deref() == Some(path);
+        // Without a pull request, the button that opens one stands at the
+        // head of the card, where every card keeps what acts on it.
+        let can_open = on_show
+            && self.branch_pr().is_none()
+            && !self.github.pr_loading
+            && self.github.error.is_none();
+        let actions: Vec<AnyElement> = can_open
+            .then(|| {
+                let board = path.to_path_buf();
+                Button::new("focus-home-create-pr")
+                    .xsmall()
+                    .primary()
+                    .icon(icon("git-pull-request"))
+                    .label(tr!("focus-home-create-pr"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_board_view(&board, View::Pr, cx);
+                    }))
+                    .into_any_element()
+            })
+            .into_iter()
+            .collect();
+        let body = if on_show {
             if let Some(number) = self.branch_pr().map(|pr| pr.number) {
                 self.ensure_pr_threads(number);
             }
@@ -863,7 +885,7 @@ impl ClaudhubApp {
                 .child(tr!("focus-review-idle"))
                 .into_any_element()
         };
-        self.home_card(path, glyph, title, View::Pr, None, Vec::new(), body, cx)
+        self.home_card(path, glyph, title, View::Pr, None, actions, body, cx)
     }
 
     fn home_github(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
@@ -953,26 +975,10 @@ impl ClaudhubApp {
                     })
                     .into_any_element()
             }
-            None => h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(tr!("focus-home-no-pr")),
-                )
-                .child(
-                    Button::new("focus-home-create-pr")
-                        .small()
-                        .primary()
-                        .icon(icon("git-pull-request"))
-                        .label(tr!("pr-form-create"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.show_board_view(&board, View::Pr, cx);
-                        })),
-                )
+            None => div()
+                .text_xs()
+                .text_color(muted)
+                .child(tr!("focus-home-no-pr"))
                 .into_any_element(),
         };
         let threads_line = (open_threads > 0).then(|| {
