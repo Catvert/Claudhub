@@ -35,14 +35,22 @@ pub struct Outline {
     pub upstream: Option<(usize, usize)>,
 }
 
-/// Reads a worktree's outline: four commands, none of which reads a file.
+/// Reads a worktree's outline: two commands, none of which reads a file.
+///
+/// One `for-each-ref` (`branch::Refs`) answers the base, how far HEAD has
+/// walked from it and where it stands against its upstream — each of those
+/// a distance it has already measured — and the `log` lists the commits.
+/// Only a git too old to measure distances asks the counts the old way.
 pub fn outline(dir: &Path, limit: usize) -> Result<Outline> {
-    let base = branch::guess_base(dir);
-    let ahead_of_base = base
-        .as_deref()
-        .and_then(|base| git_opt(dir, &["rev-list", "--count", &format!("{base}..HEAD")]))
-        .and_then(|count| count.trim().parse().ok())
-        .unwrap_or(0);
+    let refs = branch::Refs::read(dir);
+    let base = refs.base(|| branch::configured_default(dir));
+    let ahead_of_base = match base.as_deref() {
+        Some(base) if refs.measured => refs.ahead_of(base),
+        Some(base) => git_opt(dir, &["rev-list", "--count", &format!("{base}..HEAD")])
+            .and_then(|count| count.trim().parse().ok()),
+        None => None,
+    }
+    .unwrap_or(0);
     let mut args = vec![
         "log".to_string(),
         "-z".to_string(),
@@ -58,11 +66,15 @@ pub fn outline(dir: &Path, limit: usize) -> Result<Outline> {
     let commits = git(dir, &args)
         .map(|out| parse_log(&out))
         .unwrap_or_default();
-    let upstream = git_opt(
-        dir,
-        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-    )
-    .and_then(|out| parse_counts(&out));
+    let upstream = if refs.measured {
+        refs.upstream()
+    } else {
+        git_opt(
+            dir,
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        )
+        .and_then(|out| parse_counts(&out))
+    };
     Ok(Outline {
         base,
         ahead_of_base,
@@ -147,6 +159,10 @@ mod tests {
         let subjects: Vec<_> = feature.commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, ["Two", "One"]);
         assert_eq!(feature.upstream, None);
+        // Tracking `main`, a local branch: two commits ahead of it, as
+        // `rev-list HEAD...@{upstream}` counts them.
+        run(&["branch", "-q", "--set-upstream-to=main"]);
+        assert_eq!(outline(&root, 5).unwrap().upstream, Some((2, 0)));
 
         run(&["switch", "-q", "main"]);
         let main = outline(&root, 5).unwrap();

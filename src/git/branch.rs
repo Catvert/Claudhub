@@ -52,8 +52,10 @@ impl Branch {
 }
 
 /// Lists the branches, local first then the remotes with no local twin, from
-/// the most recent commit to the oldest.
-pub fn list(main: &Path) -> Result<Vec<Branch>> {
+/// the most recent commit to the oldest — and where new work starts in the
+/// repository (`start_point`), read off the same references rather than asked
+/// again ref by ref.
+pub fn list(main: &Path) -> Result<(Vec<Branch>, Option<String>)> {
     // The separator has to be a character a commit subject does not contain;
     // `%00` is written literally by for-each-ref as a null byte. The author,
     // then the full reference, come last: adding a field at the end keeps
@@ -70,9 +72,12 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
     // and `refs/remotes/origin/HEAD` as a bare `origin`, a branch nobody has.
     // Two components off is `refs/heads/` or `refs/remotes/`, whatever else
     // exists.
+    //
+    // `%(symref)` last: on `refs/remotes/origin/HEAD` it names the branch the
+    // remote declares as its default, which `start_point` falls back on.
     const FORMAT: &str = "%(refname:lstrip=2)%00%(HEAD)%00%(committerdate:relative)%00\
                           %(contents:subject)%00%(upstream:lstrip=2)%00%(upstream:track)%00\
-                          %(authorname)%00%(refname)";
+                          %(authorname)%00%(refname)%00%(symref)";
 
     let raw = git(
         main,
@@ -90,6 +95,18 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
         .filter_map(|line| line.split('\0').nth(REFNAME_FIELD))
         .filter_map(|refname| refname.strip_prefix("refs/heads/"))
         .collect();
+    let origin_head = raw
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\0').skip(REFNAME_FIELD);
+            (fields.next()? == ORIGIN_HEAD).then(|| fields.next())?
+        })
+        .and_then(|target| target.strip_prefix("refs/remotes/"));
+    let start = start_point_among(
+        |name| locals.contains(name),
+        origin_head,
+        || configured_default(main),
+    );
 
     let mut branches: Vec<Branch> = raw
         .lines()
@@ -110,7 +127,7 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
             b.checked_out_at = holders.get(b.name.as_str()).cloned();
         }
     }
-    Ok(branches)
+    Ok((branches, start))
 }
 
 /// Where `%(refname)` sits in `FORMAT`, counted in NUL-separated fields.
@@ -303,40 +320,56 @@ pub fn merge_base(dir: &Path, a: &str, b: &str) -> Option<String> {
     git_opt(dir, &["merge-base", a, b]).filter(|s| !s.is_empty())
 }
 
-/// Guesses the repository's integration branch.
+/// Guesses the repository's integration branch, among the local branches
+/// `exists` knows.
 ///
 /// The order follows what is authoritative: what the remote declares as its
-/// default branch, then the local configuration, then the two usual names —
-/// and only if they exist.
-pub fn default_base(main: &Path) -> Option<String> {
-    if let Some(head) = git_opt(
-        main,
-        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
-    ) {
-        if let Some((_, short)) = head.split_once('/') {
-            return Some(short.to_string());
-        }
+/// default branch (`origin_head`, as `origin/main`), then the local
+/// configuration, then the two usual names — and only if they exist.
+/// `configured` is asked only when the remote says nothing: it is a command of
+/// its own, where everything else was read with the references.
+fn default_base_among(
+    exists: impl Fn(&str) -> bool,
+    origin_head: Option<&str>,
+    configured: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if let Some((_, short)) = origin_head.and_then(|head| head.split_once('/')) {
+        return Some(short.to_string());
     }
-    if let Some(name) = git_opt(main, &["config", "--get", "init.defaultBranch"]) {
-        if local_exists(main, &name) {
-            return Some(name);
-        }
+    if let Some(name) = configured().filter(|name| exists(name)) {
+        return Some(name);
     }
     ["main", "master", "develop"]
         .into_iter()
-        .find(|b| local_exists(main, b))
+        .find(|b| exists(b))
         .map(str::to_string)
+}
+
+/// `init.defaultBranch`, which the integration branch is weighed against
+/// after the remote's word.
+pub(crate) fn configured_default(dir: &Path) -> Option<String> {
+    git_opt(dir, &["config", "--get", "init.defaultBranch"])
 }
 
 /// Where new work starts in this repository: its development branch — a
 /// local `dev` or `develop` — when it has one, its integration branch
 /// otherwise.
 ///
-/// Not `default_base`: what the remote declares is the branch releases land
-/// on, and in a repository run as git-flow — `master` for releases, `dev`
-/// for work — a new branch started there held none of the work in progress.
+/// Not the integration branch alone: what the remote declares is the branch
+/// releases land on, and in a repository run as git-flow — `master` for
+/// releases, `dev` for work — a new branch started there held none of the
+/// work in progress.
 pub fn start_point(main: &Path) -> Option<String> {
-    development(|name| local_exists(main, name)).or_else(|| default_base(main))
+    Refs::read_plain(main).start_point(|| configured_default(main))
+}
+
+/// `start_point`, over what has already been read of the references.
+fn start_point_among(
+    exists: impl Fn(&str) -> bool,
+    origin_head: Option<&str>,
+    configured: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    development(&exists).or_else(|| default_base_among(&exists, origin_head, configured))
 }
 
 /// The development branch, of those `exists` says are there.
@@ -360,50 +393,161 @@ pub struct Candidate {
     pub remote: bool,
 }
 
-/// Every branch, with its distance to HEAD, in **one** command.
+/// The pointer a clone keeps to the remote's default branch.
+const ORIGIN_HEAD: &str = "refs/remotes/origin/HEAD";
+
+/// A checkout's branches, as **one** `for-each-ref` reads them from its HEAD:
+/// which one is checked out, what it tracks, what the remote declares as its
+/// default, and how far each branch stands from HEAD.
 ///
-/// `%(ahead-behind:HEAD)` walks the graph once for the lot, where a
-/// `merge-base` per branch would be one `fork` per branch. It wants git 2.41;
-/// an older one fails on the unknown field, the read comes back empty, and the
-/// caller falls back on the integration branch — which is what this replaced.
-///
-/// The full refname and not `%(refname:short)`: shortened, `refs/remotes/origin/HEAD`
-/// comes out as plain `origin`, a name that looks like a branch and is a
-/// symbolic ref to one that is already in the list.
-fn candidates(dir: &Path) -> Vec<Candidate> {
-    let out = git_opt(
-        dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname)%09%(ahead-behind:HEAD)",
-            "refs/heads",
-            "refs/remotes",
-        ],
-    );
-    parse_candidates(&out.unwrap_or_default())
+/// Everything the base, the start point and a card's counts ask is answered
+/// from here. Asked one by one, they were six to eleven processes per
+/// worktree — `symbolic-ref` for HEAD, a `show-ref` per usual name, a
+/// `rev-list` for the base and one for the upstream — on refs this command
+/// had just listed, and a distance `%(ahead-behind)` had already measured.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Refs {
+    /// The branch checked out, from `%(HEAD)`; `None` on a detached HEAD.
+    pub head: Option<String>,
+    /// Every branch but the `<remote>/HEAD` pointers, with its distance to
+    /// HEAD. Empty when `measured` is not set.
+    pub candidates: Vec<Candidate>,
+    /// Whether the distances were read. `%(ahead-behind:HEAD)` wants git 2.41
+    /// and a HEAD that resolves: an older git fails on the unknown field, a
+    /// repository with no commit on the missing HEAD, and the references are
+    /// then read without it — the base falls back on the start point, which
+    /// is what the distances replaced, and the counts are asked the old way.
+    pub measured: bool,
+    /// The local branches, by name.
+    locals: HashSet<String>,
+    /// What `refs/remotes/origin/HEAD` points at, as `origin/main`.
+    origin_head: Option<String>,
+    /// HEAD's upstream, as its full reference.
+    upstream: Option<String>,
 }
 
-fn parse_candidates(out: &str) -> Vec<Candidate> {
-    out.lines()
-        .filter_map(|line| {
-            let (refname, counts) = line.split_once('\t')?;
-            let (ahead, behind) = counts.split_once(' ')?;
-            let (name, remote) = match refname.strip_prefix("refs/heads/") {
-                Some(name) => (name, false),
-                None => (refname.strip_prefix("refs/remotes/")?, true),
+impl Refs {
+    /// Reads a checkout's references, distances included when git can give
+    /// them.
+    ///
+    /// The full refname and not `%(refname:short)`: shortened,
+    /// `refs/remotes/origin/HEAD` comes out as plain `origin`, a name that
+    /// looks like a branch and is a symbolic ref to one that is already in the
+    /// list. Tabs separate the fields: a reference cannot contain one.
+    pub fn read(dir: &Path) -> Self {
+        Self::read_with(dir, "%09%(ahead-behind:HEAD)").unwrap_or_else(|| Self::read_plain(dir))
+    }
+
+    /// The references without their distances: all a question about the
+    /// repository rather than about a HEAD needs.
+    fn read_plain(dir: &Path) -> Self {
+        Self::read_with(dir, "").unwrap_or_default()
+    }
+
+    fn read_with(dir: &Path, distance: &str) -> Option<Self> {
+        let format = format!("--format=%(refname)%09%(HEAD)%09%(upstream)%09%(symref){distance}");
+        let out = git_opt(
+            dir,
+            &["for-each-ref", &format, "refs/heads", "refs/remotes"],
+        )?;
+        Some(Self::parse(&out, !distance.is_empty()))
+    }
+
+    fn parse(out: &str, measured: bool) -> Self {
+        let mut refs = Self {
+            measured,
+            ..Self::default()
+        };
+        for line in out.lines() {
+            let mut fields = line.split('\t');
+            let refname = fields.next().unwrap_or("");
+            let is_head = fields.next() == Some("*");
+            let upstream = fields.next().unwrap_or("");
+            let symref = fields.next().unwrap_or("");
+            let counts = fields.next();
+            let Some((name, remote)) = short_ref(refname) else {
+                continue;
             };
+            if !remote {
+                refs.locals.insert(name.to_string());
+                if is_head {
+                    refs.head = Some(name.to_string());
+                    refs.upstream = (!upstream.is_empty()).then(|| upstream.to_string());
+                }
+            }
+            if refname == ORIGIN_HEAD {
+                refs.origin_head = symref.strip_prefix("refs/remotes/").map(str::to_string);
+            }
             // `origin/HEAD` is not a branch, it is a pointer to one.
             if remote && name.rsplit_once('/').is_some_and(|(_, tip)| tip == "HEAD") {
-                return None;
+                continue;
             }
-            Some(Candidate {
+            let Some((ahead, behind)) = counts.and_then(|counts| counts.split_once(' ')) else {
+                continue;
+            };
+            let (Ok(ahead), Ok(behind)) = (ahead.trim().parse(), behind.trim().parse()) else {
+                continue;
+            };
+            refs.candidates.push(Candidate {
                 name: name.to_string(),
-                ahead: ahead.trim().parse().ok()?,
-                behind: behind.trim().parse().ok()?,
+                ahead,
+                behind,
                 remote,
-            })
-        })
-        .collect()
+            });
+        }
+        refs
+    }
+
+    /// Where new work starts — see `start_point`.
+    pub fn start_point(&self, configured: impl FnOnce() -> Option<String>) -> Option<String> {
+        start_point_among(
+            |name| self.locals.contains(name),
+            self.origin_head.as_deref(),
+            configured,
+        )
+    }
+
+    /// The base this checkout most plausibly came out of — see `closest`.
+    pub fn base(&self, configured: impl FnOnce() -> Option<String>) -> Option<String> {
+        let head = self.head.as_deref().unwrap_or_default();
+        closest(
+            &self.candidates,
+            head,
+            self.start_point(configured).as_deref(),
+        )
+    }
+
+    /// The commits HEAD has and `base` does not: `rev-list --count base..HEAD`,
+    /// which is the base's own `behind`. `None` when the distances were not
+    /// read or `base` is no branch; a local branch answers before a remote one
+    /// of the same name, as git's own resolution of a name does.
+    pub fn ahead_of(&self, base: &str) -> Option<usize> {
+        self.candidates
+            .iter()
+            .filter(|c| c.name == base)
+            .min_by_key(|c| c.remote)
+            .map(|c| c.behind)
+    }
+
+    /// Ahead of and behind HEAD's upstream, as `rev-list --left-right --count
+    /// HEAD...@{upstream}` counts them — the upstream's own distance, turned
+    /// round. `None` without an upstream, or with one that is gone.
+    pub fn upstream(&self) -> Option<(usize, usize)> {
+        let (name, remote) = short_ref(self.upstream.as_deref()?)?;
+        self.candidates
+            .iter()
+            .find(|c| c.name == name && c.remote == remote)
+            .map(|c| (c.behind, c.ahead))
+    }
+}
+
+/// A branch's name without `refs/heads/` or `refs/remotes/`, and whether it
+/// was the latter.
+fn short_ref(refname: &str) -> Option<(&str, bool)> {
+    match refname.strip_prefix("refs/heads/") {
+        Some(name) => Some((name, false)),
+        None => Some((refname.strip_prefix("refs/remotes/")?, true)),
+    }
 }
 
 /// The branch this one most plausibly came out of.
@@ -465,8 +609,7 @@ pub fn closest(candidates: &[Candidate], head: &str, fallback: Option<&str>) -> 
 /// Read in the worktree and not in the main one: HEAD is what the question is
 /// about, and each checkout has its own.
 pub fn guess_base(dir: &Path) -> Option<String> {
-    let head = current(dir).unwrap_or_default();
-    closest(&candidates(dir), &head, start_point(dir).as_deref())
+    Refs::read(dir).base(|| configured_default(dir))
 }
 
 /// Attaches a branch with no upstream to `origin/<branch>` so the first `git
@@ -521,11 +664,11 @@ mod tests {
     /// not a branch.
     #[test]
     fn reads_every_branch_with_its_distance_to_head() {
-        let out = "refs/heads/master\t0 0\n\
-                   refs/heads/dockv2\t0 20\n\
-                   refs/remotes/origin/HEAD\t0 50\n\
-                   refs/remotes/origin/master\t0 50\n";
-        let read = parse_candidates(out);
+        let out = "refs/heads/master\t \t\t\t0 0\n\
+                   refs/heads/dockv2\t*\t\t\t0 20\n\
+                   refs/remotes/origin/HEAD\t \t\trefs/remotes/origin/master\t0 50\n\
+                   refs/remotes/origin/master\t \t\t\t0 50\n";
+        let read = Refs::parse(out, true).candidates;
         assert_eq!(
             read.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             ["master", "dockv2", "origin/master"],
@@ -619,6 +762,71 @@ mod tests {
             candidate("older-work", 0, 300),
         ];
         assert_eq!(closest(&list, "master", Some("master")), None);
+    }
+
+    /// One read answers what used to be asked ref by ref: which branch is
+    /// checked out, what it tracks, the remote's default, and each distance.
+    #[test]
+    fn one_read_holds_head_its_upstream_and_the_remote_default() {
+        let out = "refs/heads/feature\t*\trefs/remotes/origin/feature\t\t0 0\n\
+                   refs/heads/main\t \trefs/remotes/origin/main\t\t4 2\n\
+                   refs/remotes/origin/HEAD\t \t\trefs/remotes/origin/main\t4 2\n\
+                   refs/remotes/origin/feature\t \t\t\t1 2\n\
+                   refs/remotes/origin/main\t \t\t\t4 2\n";
+        let refs = Refs::parse(out, true);
+        assert_eq!(refs.head.as_deref(), Some("feature"));
+        // HEAD has two commits its upstream lacks, which has one HEAD lacks.
+        assert_eq!(refs.upstream(), Some((2, 1)));
+        // The remote declares `main`, and `rev-list main..HEAD` counts two.
+        assert_eq!(refs.start_point(|| None).as_deref(), Some("main"));
+        assert_eq!(refs.base(|| None).as_deref(), Some("main"));
+        assert_eq!(refs.ahead_of("main"), Some(2));
+        assert_eq!(refs.ahead_of("gone"), None);
+    }
+
+    /// A detached HEAD has no branch and no upstream; a branch with an
+    /// upstream that has been deleted has no counts, as `@{upstream}` fails.
+    #[test]
+    fn no_upstream_counts_without_an_upstream_ref() {
+        let detached = Refs::parse(
+            "refs/heads/main\t \trefs/remotes/origin/main\t\t0 1\n",
+            true,
+        );
+        assert_eq!(detached.head, None);
+        assert_eq!(detached.upstream(), None);
+        let gone = Refs::parse(
+            "refs/heads/feat\t*\trefs/remotes/origin/feat\t\t0 0\n",
+            true,
+        );
+        assert_eq!(gone.upstream(), None);
+    }
+
+    /// Without the remote's word: the configuration, if that branch exists,
+    /// then the usual names — and `dev` before all of them, being where work
+    /// starts. The configuration is not asked when the remote answers.
+    #[test]
+    fn the_start_point_is_read_off_the_references() {
+        let plain = |out: &str| Refs::parse(out, false);
+        let refs = plain("refs/heads/trunk\t*\t\t\nrefs/heads/master\t \t\t\n");
+        assert_eq!(
+            refs.start_point(|| Some("trunk".into())).as_deref(),
+            Some("trunk")
+        );
+        assert_eq!(
+            refs.start_point(|| Some("absent".into())).as_deref(),
+            Some("master")
+        );
+        let refs = plain("refs/heads/dev\t \t\t\nrefs/heads/main\t*\t\t\n");
+        assert_eq!(refs.start_point(|| None).as_deref(), Some("dev"));
+        let refs = plain("refs/remotes/origin/HEAD\t \t\trefs/remotes/origin/trunk\n");
+        assert_eq!(
+            refs.start_point(|| panic!("the remote has answered"))
+                .as_deref(),
+            Some("trunk")
+        );
+        // Unmeasured, nothing is a candidate and the start point stands.
+        assert!(refs.candidates.is_empty());
+        assert_eq!(refs.ahead_of("trunk"), None);
     }
 
     #[test]
@@ -724,7 +932,8 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "git {args:?}");
         }
-        let branches = list(&dir).unwrap();
+        let (branches, start) = list(&dir).unwrap();
+        assert_eq!(start.as_deref(), Some("main"));
         let mut names: Vec<_> = branches.iter().map(|b| b.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["main", "v1"]);

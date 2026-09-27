@@ -768,7 +768,7 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
         },
         Cmd::LoadBranches { main } => match branch::list(&main) {
-            Ok(branches) => vec![branches_evt(main, branches)],
+            Ok(listing) => vec![branches_evt(main, listing)],
             Err(e) => vec![fail(None, Action::Branch, e)],
         },
         Cmd::LoadTags { main } => match tags::list(&main) {
@@ -1632,8 +1632,12 @@ fn in_lanes<T: Send>(
     })
 }
 
-fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
-    let integration = branch::start_point(&main);
+/// The list and where new work starts, both read by `branch::list` off the
+/// same references.
+fn branches_evt(
+    main: PathBuf,
+    (branches, integration): (Vec<crate::git::Branch>, Option<String>),
+) -> Evt {
     Evt::Branches {
         main,
         branches,
