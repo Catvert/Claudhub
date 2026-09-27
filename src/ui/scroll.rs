@@ -123,6 +123,62 @@ fn wrap<H: ScrollbarHandle + Clone>(
         .scrollbar(handle, axis)
 }
 
+/// What a measure taken after layout records: a width, or a whole size.
+pub trait Measured {
+    /// Takes the laid-out size, and says whether it moved by more than half a
+    /// pixel — less is rounding, and asking a frame for it would never settle.
+    fn settle(&mut self, laid_out: gpui_kit::Size<gpui_kit::Pixels>) -> bool;
+}
+
+impl Measured for gpui_kit::Pixels {
+    fn settle(&mut self, laid_out: gpui_kit::Size<gpui_kit::Pixels>) -> bool {
+        let moved = (laid_out.width - *self).abs() > gpui_kit::px(0.5);
+        if moved {
+            *self = laid_out.width;
+        }
+        moved
+    }
+}
+
+impl Measured for gpui_kit::Size<gpui_kit::Pixels> {
+    fn settle(&mut self, laid_out: gpui_kit::Size<gpui_kit::Pixels>) -> bool {
+        let moved = (laid_out.width - self.width).abs() > gpui_kit::px(0.5)
+            || (laid_out.height - self.height).abs() > gpui_kit::px(0.5);
+        if moved {
+            *self = laid_out;
+        }
+        moved
+    }
+}
+
+/// An absolute layer that measures its parent **after** layout, and asks for
+/// one more frame when the measure has moved.
+///
+/// What a view derives from a size read **before** the frame is laid out —
+/// the diff's columns, the history's summary width, which way a split runs —
+/// paints the frame that follows a resize at the size the view no longer has,
+/// and nothing would repaint it: a window only redraws on an event, and the
+/// next one may be the background sweep, two seconds later. Recording the
+/// laid-out size and asking for another frame settles as soon as the resize
+/// stops. The parent has to be positioned (`relative`).
+pub fn measure_after_layout<V: 'static, M: Measured + 'static>(
+    entity: gpui_kit::Entity<V>,
+    slot: impl Fn(&mut V) -> &mut M + 'static,
+) -> impl IntoElement {
+    gpui_kit::canvas(
+        move |bounds: gpui_kit::Bounds<gpui_kit::Pixels>, window, cx| {
+            entity.update(cx, |view, _| {
+                if slot(view).settle(bounds.size) {
+                    window.request_animation_frame();
+                }
+            });
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
 /// What we can pull the handle gpui actually animates out of.
 ///
 /// `UniformListScrollHandle` is not a handle: it is a list state containing

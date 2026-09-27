@@ -1882,31 +1882,12 @@ impl ClaudhubApp {
                     .min_h_0()
                     // Everything below is derived from a width read **before**
                     // the frame is laid out, so the frame that follows a
-                    // resize — a panel zoomed, a handle dropped — is painted at
-                    // the size the view no longer has. Nothing would repaint it:
-                    // a window only redraws on an event, and the next one is the
-                    // background sweep, two seconds later. This measures the
-                    // frame *after* layout and asks for one more when the width
-                    // has moved, which settles as soon as it stops moving.
-                    .child(
-                        gpui_kit::canvas(
-                            {
-                                let entity = cx.entity();
-                                move |bounds: gpui_kit::Bounds<Pixels>, window, cx| {
-                                    entity.update(cx, |this, _| {
-                                        if (bounds.size.width - this.diff_laid_out).abs() > px(0.5)
-                                        {
-                                            this.diff_laid_out = bounds.size.width;
-                                            window.request_animation_frame();
-                                        }
-                                    });
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
+                    // resize — a panel zoomed, a handle dropped — would be
+                    // painted at the size the view no longer has.
+                    .child(crate::ui::scroll::measure_after_layout(
+                        cx.entity(),
+                        |this: &mut Self| &mut this.diff_laid_out,
+                    ))
                     .on_scroll_wheel(cx.listener(Self::on_diff_scroll))
                     .on_mouse_up(
                         gpui_kit::MouseButton::Left,
