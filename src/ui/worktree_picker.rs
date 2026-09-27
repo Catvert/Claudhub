@@ -15,39 +15,35 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
-    popover::{Popover, PopoverState},
-    v_flex, v_virtual_list, ActiveTheme, Sizable as _, StyledExt as _,
+    input::InputState,
+    popover::Popover,
+    v_flex, ActiveTheme, Sizable as _, StyledExt as _,
 };
 use gpui_kit::{
-    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, KeyDownEvent, ScrollStrategy,
-    SharedString, WeakEntity, Window,
+    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, SharedString, Window,
 };
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
+use crate::ui::picker::{Pick, PickerCore, Step};
 use crate::ui::worktrees::{self, Item, Row};
 
 /// How wide the surface is. Narrower than the branch picker's: what a row
 /// carries here is a folder name and a branch, not a commit subject.
 const WIDTH: gpui_kit::Pixels = px(360.);
-const LIST_HEIGHT: gpui_kit::Pixels = px(320.);
 
-enum Step {
-    List,
-    /// One worktree's actions. Its name comes along so the header can say which
-    /// worktree one is standing on without walking the list again.
-    Actions {
-        main: PathBuf,
-        worktree: PathBuf,
-        label: String,
-    },
+/// The worktree whose actions the second step shows. Its name comes along so
+/// the header can say which worktree one is standing on without walking the
+/// list again.
+pub(super) struct Opened {
+    main: PathBuf,
+    worktree: PathBuf,
+    label: String,
 }
 
 #[derive(Clone, Copy)]
@@ -87,16 +83,7 @@ impl Look {
 }
 
 pub(super) struct WorktreePicker {
-    app: WeakEntity<ClaudhubApp>,
-    query: Entity<InputState>,
-    step: Step,
-    scroll: gpui_kit::component::VirtualListScrollHandle,
-    cursor: usize,
-    /// The rows on screen, kept between frames — see `rows`.
-    rows: Rc<Vec<Row>>,
-    /// The list has to be laid out again. Set by the three things that change
-    /// it: the filter, a fold, and the application itself.
-    stale: bool,
+    core: PickerCore<Self>,
     /// The repositories one has closed.
     ///
     /// What is **folded** and not what is open, the polarity of the review tree:
@@ -104,144 +91,15 @@ pub(super) struct WorktreePicker {
     /// to remember is the one that has been shut. It does not outlive the
     /// window — a fold here is a reading posture, not a preference.
     folded: HashSet<PathBuf>,
-    /// The wheel's smoothing, this view's own — the branch picker's field, for
-    /// the same reason: a view of its own keeps its motion, where a panel's
-    /// lives on the application. The two pickers move alike or the title bar
-    /// has two behaviours in one row of buttons.
-    motion: crate::ui::motion::ScrollMotion,
-    popover: Option<Entity<PopoverState>>,
 }
 
 impl WorktreePicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<ClaudhubApp>) -> Entity<Self> {
         let owner = cx.entity();
-        let app = owner.downgrade();
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("worktree-filter")));
-        cx.new(|cx| {
-            cx.subscribe(
-                &query,
-                |this: &mut Self, _, _event: &gpui_kit::component::input::InputEvent, cx| {
-                    this.stale = true;
-                    cx.notify();
-                },
-            )
-            .detach();
-            // The list is a projection of the application's repositories, and
-            // they move under it — a worktree created, a summary read, an agent
-            // that starts working. Nothing else would tell the prepared list to
-            // let go.
-            cx.observe(&owner, |this: &mut Self, _, _cx| this.stale = true)
-                .detach();
-            Self {
-                app,
-                query,
-                step: Step::List,
-                scroll: gpui_kit::component::VirtualListScrollHandle::new(),
-                cursor: 0,
-                rows: Rc::new(Vec::new()),
-                stale: true,
-                folded: HashSet::new(),
-                motion: crate::ui::motion::ScrollMotion::new(crate::ui::motion::Axes::Vertical),
-                popover: None,
-            }
-        })
-    }
-
-    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.step = Step::List;
-        self.cursor = 0;
-        self.stale = true;
-        self.query
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        cx.notify();
-    }
-
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(popover) = self.popover.clone() {
-            popover.update(cx, |state, cx| state.dismiss(window, cx));
-        }
-    }
-
-    fn act(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>),
-    ) {
-        if let Some(app) = self.app.upgrade() {
-            app.update(cx, |this, cx| f(this, window, cx));
-        }
-        self.close(window, cx);
-    }
-
-    /// The rows on screen, headings included.
-    ///
-    /// **Kept between frames.** It was laid out again on every frame of the
-    /// popover — and it built every checkout's row, its summary, its agent and
-    /// its `wt` state read one by one, *before* the filter had a say. What is
-    /// listed is `worktrees::rows_for`, which is free of gpui and tested; what
-    /// is here is where the data comes from.
-    fn rows(&mut self, cx: &App) -> Rc<Vec<Row>> {
-        if self.stale {
-            self.rows = Rc::new(self.build_rows(cx));
-            self.stale = false;
-        }
-        self.rows.clone()
-    }
-
-    fn build_rows(&self, cx: &App) -> Vec<Row> {
-        let Some(app) = self.app.upgrade() else {
-            return Vec::new();
-        };
-        let app = app.read(cx);
-        // Read once for the whole list rather than once per row: the pins are a
-        // single vector in a global, and a row's closure would borrow it again
-        // for every checkout of every repository.
-        let pinned = &crate::ui::store::Store::global(cx).pinned;
-        let repos: Vec<worktrees::Repository> = app
-            .repos
-            .iter()
-            .map(|repo| worktrees::Repository {
-                main: repo.main.clone(),
-                name: repo.name.clone(),
-                checkouts: repo
-                    .worktrees
-                    .iter()
-                    .map(|w| worktrees::Checkout {
-                        path: w.path.clone(),
-                        label: w.label(),
-                        branch: w.branch.clone(),
-                        is_main: w.is_main,
-                    })
-                    .collect(),
-            })
-            .collect();
-        let gone: Vec<worktrees::Gone> = app
-            .repos
-            .missing()
-            .iter()
-            .map(|repo| worktrees::Gone {
-                path: repo.path.clone(),
-                name: repo
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| repo.path.display().to_string()),
-                message: repo.message.clone(),
-            })
-            .collect();
-        let query = self.query.read(cx).value();
-        worktrees::rows_for(&repos, &gone, &query, &self.folded, |repo, checkout| Item {
-            main: repo.main.clone(),
-            path: checkout.path.clone(),
-            label: checkout.label.clone(),
-            branch: checkout.branch.clone(),
-            is_main: checkout.is_main,
-            summary: app.summaries.get(&checkout.path).copied(),
-            up: app.wt_state(&checkout.path).and_then(|state| state.up),
-            detail: app.wt_state(&checkout.path).and_then(worktrees::detail),
-            pinned: pinned.contains(&checkout.path),
-            agent: app.agents.get(&checkout.path).cloned(),
+        cx.new(|cx| Self {
+            core: PickerCore::new(&owner, query, cx),
+            folded: HashSet::new(),
         })
     }
 
@@ -251,162 +109,79 @@ impl WorktreePicker {
         });
     }
 
-    /// Moves the keyboard cursor, stepping over the headings and the dead
-    /// repositories: neither is somewhere Enter could take one.
-    fn step_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let rows = self.rows(cx);
-        let Some(next) = crate::ui::picker::step_cursor(
-            rows.len(),
-            |ix| matches!(rows[ix], Row::Worktree(_)),
-            self.cursor,
-            delta,
-        ) else {
-            return;
-        };
-        self.cursor = next;
-        self.scroll.scroll_to_item(next, ScrollStrategy::Top);
-        cx.notify();
-    }
-
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.step, Step::List) {
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "down" => {
-                cx.stop_propagation();
-                self.step_cursor(1, cx);
-            }
-            "up" => {
-                cx.stop_propagation();
-                self.step_cursor(-1, cx);
-            }
-            "enter" => {
-                cx.stop_propagation();
-                let rows = self.rows(cx);
-                if let Some(Row::Worktree(item)) = rows.get(self.cursor).cloned() {
-                    self.select(item.path, window, cx);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
-        // The transition, one step per frame; it asks for the next itself while
-        // it is moving.
-        let base = crate::ui::scroll::Scrollable::base(&self.scroll);
-        self.motion.advance(&base, window);
         let rows = self.rows(cx);
-        let count = rows.len();
-        let cursor = self.cursor;
+        let cursor = self.core.cursor;
         let active = self
+            .core
             .app
             .upgrade()
             .and_then(|app| app.read(cx).active_path());
-        // A heading is not as tall as an entry, so the list is a
-        // `v_virtual_list` and not a `uniform_list` — the same swap the diff's
-        // wrapping and the merge view make, and for the same reason.
-        let sizes = Rc::new(
-            rows.iter()
-                .map(|row| match row {
-                    Row::Repo { .. } => gpui_kit::size(px(0.), look.head),
-                    _ => gpui_kit::size(px(0.), look.row),
-                })
-                .collect::<Vec<_>>(),
-        );
-        let entity = cx.entity();
-        let build = {
-            let rows = rows.clone();
-            move |ix: usize, cx: &mut App| match &rows[ix] {
-                Row::Repo {
-                    main,
-                    name,
-                    folded,
-                    count,
-                } => repo_heading(&entity, ix, main, name, *count, *folded, look),
-                Row::Worktree(item) => worktree_row(
-                    &entity,
-                    ix,
-                    item,
-                    active.as_deref() == Some(item.path.as_path()),
-                    ix == cursor,
-                    look,
-                    cx,
-                ),
-                Row::Missing {
-                    path,
-                    name,
-                    message,
-                } => missing_row(&entity, ix, path, name, message, look),
-            }
-        };
-        v_flex()
-            .w_full()
-            .min_h_0()
-            .child(
-                div().w_full().px_1().py_1().child(
-                    Input::new(&self.query)
-                        .xsmall()
-                        // What the field does is filter, and a bare box above a
-                        // list reads as somewhere to type a name.
-                        .prefix(icon("search").xsmall().text_color(look.muted)),
-                ),
-            )
-            .child(if count == 0 {
-                div()
-                    .w_full()
-                    .p_3()
-                    .text_sm()
-                    .text_color(look.muted)
-                    .child(tr!("worktree-none"))
-                    .into_any_element()
-            } else {
-                crate::ui::scroll::smooth_wheel(
-                    crate::ui::scroll::vertical(
-                        "worktree-list",
-                        &self.scroll,
-                        v_virtual_list(
-                            cx.entity(),
-                            "worktree-rows",
-                            sizes,
-                            move |_, range, _window, cx| {
-                                range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
-                            },
-                        )
-                        .size_full()
-                        .track_scroll(&self.scroll),
-                    ),
-                    base,
-                    |this| &mut this.motion,
-                    cx,
-                )
-                .h(LIST_HEIGHT)
-                .into_any_element()
+        let sizes = rows
+            .iter()
+            .map(|row| match row {
+                Row::Repo { .. } => gpui_kit::size(px(0.), look.head),
+                _ => gpui_kit::size(px(0.), look.row),
             })
+            .collect();
+        let entity = cx.entity();
+        let build = move |ix: usize, cx: &mut App| match &rows[ix] {
+            Row::Repo {
+                main,
+                name,
+                folded,
+                count,
+            } => repo_heading(&entity, ix, main, name, *count, *folded, look),
+            Row::Worktree(item) => worktree_row(
+                &entity,
+                ix,
+                item,
+                active.as_deref() == Some(item.path.as_path()),
+                ix == cursor,
+                look,
+                cx,
+            ),
+            Row::Missing {
+                path,
+                name,
+                message,
+            } => missing_row(&entity, ix, path, name, message, look),
+        };
+        let footer = h_flex()
+            .w_full()
+            .px_1()
+            .py_0p5()
+            .items_center()
+            .border_t_1()
+            .border_color(look.border)
             .child(
-                h_flex()
-                    .w_full()
-                    .px_1()
-                    .py_0p5()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(look.border)
-                    .child(
-                        Button::new("repo-open")
-                            .ghost()
-                            .small()
-                            .icon(icon("folder-plus"))
-                            .label(tr!("repo-open"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.act(window, cx, |app, window, cx| {
-                                    app.prompt_open_repository(window, cx)
-                                });
-                            })),
-                    ),
+                Button::new("repo-open")
+                    .ghost()
+                    .small()
+                    .icon(icon("folder-plus"))
+                    .label(tr!("repo-open"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.act(window, cx, |app, window, cx| {
+                            app.prompt_open_repository(window, cx)
+                        });
+                    })),
             )
-            .into_any_element()
+            .into_any_element();
+        crate::ui::picker::render_list(
+            self,
+            crate::ui::picker::ListFrame {
+                id: "worktree",
+                sizes,
+                empty: tr!("worktree-none"),
+                muted: look.muted,
+                docked: false,
+                footer,
+            },
+            build,
+            window,
+            cx,
+        )
     }
 
     fn render_actions(
@@ -417,7 +192,7 @@ impl WorktreePicker {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
-        let Some(app) = self.app.upgrade() else {
+        let Some(app) = self.core.app.upgrade() else {
             return div().into_any_element();
         };
         // Asked of the application here and not kept in the step: the project's
@@ -475,7 +250,7 @@ impl WorktreePicker {
                             .icon(icon("arrow-left"))
                             .tooltip(tr!("branch-back"))
                             .on_click(cx.listener(|this, _, _window, cx| {
-                                this.step = Step::List;
+                                this.core.step = Step::List;
                                 cx.notify();
                             })),
                     )
@@ -495,15 +270,118 @@ impl WorktreePicker {
     }
 }
 
+impl Pick for WorktreePicker {
+    type Row = Row;
+    type Actions = Opened;
+    /// The worker's answers — worktrees, summaries, `wt` states, agents all
+    /// arrive as events — then the pins, and the repositories opened, closed
+    /// or forgotten by a gesture here.
+    type Sig = (u64, Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>);
+
+    fn core(&self) -> &PickerCore<Self> {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut PickerCore<Self> {
+        &mut self.core
+    }
+
+    fn signature(app: &ClaudhubApp, cx: &App) -> Self::Sig {
+        (
+            app.events_seen,
+            crate::ui::store::Store::global(cx).pinned.clone(),
+            app.repos.iter().map(|repo| repo.main.clone()).collect(),
+            app.repos
+                .missing()
+                .iter()
+                .map(|repo| repo.path.clone())
+                .collect(),
+        )
+    }
+
+    /// The rows on screen, headings included — **kept between frames** (see
+    /// [`Pick::rows`]): it built every checkout's row, its summary, its agent
+    /// and its `wt` state read one by one, *before* the filter had a say.
+    /// What is listed is `worktrees::rows_for`, which is free of gpui and
+    /// tested; what is here is where the data comes from.
+    fn build_rows(&self, cx: &App) -> Vec<Row> {
+        let Some(app) = self.core.app.upgrade() else {
+            return Vec::new();
+        };
+        let app = app.read(cx);
+        // Read once for the whole list rather than once per row: the pins are a
+        // single vector in a global, and a row's closure would borrow it again
+        // for every checkout of every repository.
+        let pinned = &crate::ui::store::Store::global(cx).pinned;
+        let repos: Vec<worktrees::Repository> = app
+            .repos
+            .iter()
+            .map(|repo| worktrees::Repository {
+                main: repo.main.clone(),
+                name: repo.name.clone(),
+                checkouts: repo
+                    .worktrees
+                    .iter()
+                    .map(|w| worktrees::Checkout {
+                        path: w.path.clone(),
+                        label: w.label(),
+                        branch: w.branch.clone(),
+                        is_main: w.is_main,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let gone: Vec<worktrees::Gone> = app
+            .repos
+            .missing()
+            .iter()
+            .map(|repo| worktrees::Gone {
+                path: repo.path.clone(),
+                name: repo
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| repo.path.display().to_string()),
+                message: repo.message.clone(),
+            })
+            .collect();
+        let query = self.core.query.read(cx).value();
+        worktrees::rows_for(&repos, &gone, &query, &self.folded, |repo, checkout| Item {
+            main: repo.main.clone(),
+            path: checkout.path.clone(),
+            label: checkout.label.clone(),
+            branch: checkout.branch.clone(),
+            is_main: checkout.is_main,
+            summary: app.summaries.get(&checkout.path).copied(),
+            up: app.wt_state(&checkout.path).and_then(|state| state.up),
+            detail: app.wt_state(&checkout.path).and_then(worktrees::detail),
+            pinned: pinned.contains(&checkout.path),
+            agent: app.agents.get(&checkout.path).cloned(),
+        })
+    }
+
+    /// The headings and the dead repositories are stepped over: neither is
+    /// somewhere Enter could take one.
+    fn landable(row: &Row) -> bool {
+        matches!(row, Row::Worktree(_))
+    }
+
+    fn enter(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
+        if let Row::Worktree(item) = row {
+            self.select(item.path, window, cx);
+        }
+    }
+}
+
 impl Render for WorktreePicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match &self.step {
+        let body = match &self.core.step {
             Step::List => self.render_list(window, cx),
-            Step::Actions {
+            Step::Actions(Opened {
                 main,
                 worktree,
                 label,
-            } => {
+            }) => {
                 let (main, worktree, label) = (main.clone(), worktree.clone(), label.clone());
                 self.render_actions(&main, &worktree, &label, cx)
             }
@@ -551,7 +429,7 @@ fn repo_heading(
                 if !this.folded.remove(&main) {
                     this.folded.insert(main);
                 }
-                this.stale = true;
+                this.core.stale = true;
                 cx.notify();
             });
         })
@@ -793,7 +671,7 @@ fn worktree_row(
                             // here: pinning is not going somewhere, and one pins two or
                             // three in a row while looking at the same list.
                             for_pin.update(cx, |this, cx| {
-                                if let Some(app) = this.app.upgrade() {
+                                if let Some(app) = this.core.app.upgrade() {
                                     app.update(cx, |app, cx| app.toggle_pin(&target, cx));
                                 }
                                 cx.notify();
@@ -819,11 +697,11 @@ fn worktree_row(
                             cx.stop_propagation();
                             let opened = opened.clone();
                             for_menu.update(cx, |this, cx| {
-                                this.step = Step::Actions {
+                                this.core.step = Step::Actions(Opened {
                                     main: opened.main.clone(),
                                     worktree: opened.path.clone(),
                                     label: opened.label.clone(),
-                                };
+                                });
                                 cx.notify();
                             });
                         }),
@@ -917,7 +795,7 @@ impl ClaudhubApp {
             .map(|repo| repo.name.clone());
         let muted = cx.theme().muted_foreground;
         let picker = self.worktree_picker.clone();
-        let focus = picker.read(cx).query.read(cx).focus_handle(cx);
+        let focus = picker.read(cx).core.query.read(cx).focus_handle(cx);
         let for_open = picker.clone();
         Popover::new("worktree-picker")
             .track_focus(&focus)
@@ -954,7 +832,7 @@ impl ClaudhubApp {
             })
             .content(move |_state, _window, cx| {
                 let popover = cx.entity();
-                picker.update(cx, |this, _| this.popover = Some(popover));
+                picker.update(cx, |this, _| this.core.popover = Some(popover));
                 picker.clone()
             })
             .appearance(true)

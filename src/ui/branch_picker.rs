@@ -38,18 +38,16 @@
 //! `ClaudhubApp::render`, is what would.
 
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
-    popover::{Popover, PopoverState},
-    v_flex, v_virtual_list, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _,
+    input::InputState,
+    popover::Popover,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _,
 };
 use gpui_kit::{
-    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, KeyDownEvent, ScrollStrategy,
-    SharedString, WeakEntity, Window,
+    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, SharedString, Window,
 };
 
 use crate::git::{BranchKind, LogRange};
@@ -58,6 +56,7 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::branches::{rows_for, BranchRow, Row, Scope};
 use crate::ui::icons::icon;
+use crate::ui::picker::{Pick, PickerCore, Step};
 
 /// How wide the surface is.
 ///
@@ -66,9 +65,6 @@ use crate::ui::icons::icon;
 /// it, what it owes and what it leads by — leave nothing for the name itself.
 /// It is `base_select`'s width, and for the same reason.
 const WIDTH: gpui_kit::Pixels = px(420.);
-
-/// How tall the list grows before it scrolls.
-const LIST_HEIGHT: gpui_kit::Pixels = px(320.);
 
 /// Where the picker is painted.
 ///
@@ -82,19 +78,6 @@ pub(super) enum Mode {
     Popover,
     /// The tool window, which is a zone and not a surface.
     Docked,
-}
-
-/// Which of the two steps is on screen.
-enum Step {
-    /// The filtered list of branches.
-    List,
-    /// One branch's actions.
-    ///
-    /// The whole row is kept and not the name alone: what the actions offer
-    /// depends on where the branch is checked out and on whether it has an
-    /// upstream, and re-deriving that at every frame would mean walking the
-    /// branch list again.
-    Actions(BranchRow),
 }
 
 /// The colours a row needs, read once.
@@ -158,20 +141,12 @@ impl Look {
 }
 
 pub(super) struct BranchPicker {
-    app: WeakEntity<ClaudhubApp>,
-    query: Entity<InputState>,
+    /// The second step is one branch's actions, and the whole row is kept and
+    /// not the name alone: what the actions offer depends on where the branch
+    /// is checked out and on whether it has an upstream, and re-deriving that
+    /// at every frame would mean walking the branch list again.
+    core: PickerCore<Self>,
     mode: Mode,
-    step: Step,
-    scroll: gpui_kit::component::VirtualListScrollHandle,
-    /// Keyboard cursor into the **displayed** list, group headings included:
-    /// what the arrows move is a row on screen, and a cursor counted on anything
-    /// else drifts the moment a heading leaves with its group.
-    cursor: usize,
-    /// The rows on screen, kept between frames — see `rows`.
-    rows: Rc<Vec<Row>>,
-    /// The list has to be laid out again. Set by the three things that change
-    /// it: the filter, a fold, and the repository itself.
-    stale: bool,
     /// The groups one has closed.
     ///
     /// Two of them at most — the locals and the remotes — so a pair of flags and
@@ -179,18 +154,6 @@ pub(super) struct BranchPicker {
     /// `origin` carries a hundred branches nobody has checked out. It does not
     /// outlive the window: a fold here is a reading posture, not a preference.
     folded: [bool; 2],
-    /// The wheel's smoothing, this view's own.
-    ///
-    /// The panels keep theirs on the application, keyed by the bar's id,
-    /// because a panel is not an entity of its own; this is one, and one list
-    /// is one motion — there is nothing to key. Without it the popover was the
-    /// one list in the window whose wheel jumped, which reads as a different
-    /// application under the same title bar.
-    motion: crate::ui::motion::ScrollMotion,
-    /// The popover carrying us, so that a gesture can close it. Handed over by
-    /// the content closure — a popover's state lives in element state, and that
-    /// is the only place it is reachable from.
-    popover: Option<Entity<PopoverState>>,
 }
 
 impl BranchPicker {
@@ -200,143 +163,29 @@ impl BranchPicker {
         cx: &mut Context<ClaudhubApp>,
     ) -> Entity<Self> {
         let owner = cx.entity();
-        let app = owner.downgrade();
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter")));
-        cx.new(|cx| {
-            // Typing filters: the list is laid out again, once, and a frame is
-            // asked for.
-            cx.subscribe(
-                &query,
-                |this: &mut Self, _, _event: &gpui_kit::component::input::InputEvent, cx| {
-                    this.stale = true;
-                    cx.notify();
-                },
-            )
-            .detach();
-            // The list is a projection of the repository's branches, and they
-            // move under it — a fetch, a checkout, a branch created next door.
-            // Nothing else would tell the prepared list to let go.
-            cx.observe(&owner, |this: &mut Self, _, _cx| this.stale = true)
-                .detach();
-            Self {
-                app,
-                query,
-                mode,
-                step: Step::List,
-                scroll: gpui_kit::component::VirtualListScrollHandle::new(),
-                cursor: 0,
-                rows: Rc::new(Vec::new()),
-                stale: true,
-                folded: [false; 2],
-                motion: crate::ui::motion::ScrollMotion::new(crate::ui::motion::Axes::Vertical),
-                popover: None,
-            }
+        cx.new(|cx| Self {
+            core: PickerCore::new(&owner, query, cx),
+            mode,
+            folded: [false; 2],
         })
-    }
-
-    /// Puts the picker back where it opens: the whole list, nothing typed.
-    ///
-    /// A filter left over from last time is the one thing a picker must not
-    /// reopen with — it reads as a repository that has lost its branches.
-    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.step = Step::List;
-        self.cursor = 0;
-        self.stale = true;
-        self.query
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        cx.notify();
-    }
-
-    /// Ends the gesture the picker was standing in.
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.mode {
-            Mode::Popover => {
-                if let Some(popover) = self.popover.clone() {
-                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                }
-            }
-            // A zone has nothing to dismiss, and one that emptied itself after
-            // every action would be a tool window that closes when used. Back
-            // to the list it was opened from, which is where the next gesture
-            // starts.
-            Mode::Docked => {
-                self.step = Step::List;
-                cx.notify();
-            }
-        }
     }
 
     /// The filter's focus handle, which is what `Ctrl+F` aims at in the tool
     /// window: the panel has a field and it **is** the search, the rule the
     /// project search already follows.
     pub(super) fn filter(&self, cx: &App) -> gpui_kit::FocusHandle {
-        self.query.focus_handle(cx)
-    }
-
-    /// The rows on screen, headings included.
-    ///
-    /// **Kept between frames.** It was laid out again on every frame of the
-    /// popover — every branch lowercased for the filter, every row's name and
-    /// subject cloned — for a list that only moves when the filter, a fold or
-    /// the repository does. Those three are what set `stale`.
-    fn rows(&mut self, cx: &App) -> Rc<Vec<Row>> {
-        if self.stale {
-            self.rows = Rc::new(self.build_rows(cx));
-            self.stale = false;
-        }
-        self.rows.clone()
-    }
-
-    fn build_rows(&self, cx: &App) -> Vec<Row> {
-        let Some(app) = self.app.upgrade() else {
-            return Vec::new();
-        };
-        let app = app.read(cx);
-        let Some(worktree) = app.active_path() else {
-            return Vec::new();
-        };
-        let Some(repo) = app.repo_of(&worktree) else {
-            return Vec::new();
-        };
-        let query = self.query.read(cx).value();
-        // The scope rows only where the list drives a log — see `Row::Scope`.
-        let rows = rows_for(
-            &repo.branches,
-            &query,
-            Some(&worktree),
-            matches!(self.mode, Mode::Docked),
-        );
-        // **A filter ignores the folds**, the window's rule for every foldable
-        // list: a query that found something and shows nothing is read as a
-        // query that found nothing.
-        if query.trim().is_empty() {
-            return fold(rows, self.folded);
-        }
-        rows
+        self.core.query.focus_handle(cx)
     }
 
     /// Where the two halves of the wire go: a checkout is made in the worktree
     /// being looked at, everything else is a write on the repository's refs.
     fn targets(&self, cx: &App) -> Option<(PathBuf, PathBuf)> {
-        let app = self.app.upgrade()?;
+        let app = self.core.app.upgrade()?;
         let app = app.read(cx);
         let worktree = app.active_path()?;
         let main = app.main_of(&worktree)?;
         Some((worktree, main))
-    }
-
-    /// Runs `f` on the application, then closes: every action here is the end of
-    /// the gesture the picker was opened for.
-    fn act(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>),
-    ) {
-        if let Some(app) = self.app.upgrade() {
-            app.update(cx, |this, cx| f(this, window, cx));
-        }
-        self.close(window, cx);
     }
 
     /// What a click on a branch means — the third thing the mode decides.
@@ -379,7 +228,7 @@ impl BranchPicker {
 
     /// Points the log beside the list at something else.
     fn scope(&mut self, range: LogRange, cx: &mut Context<Self>) {
-        let Some(app) = self.app.upgrade() else {
+        let Some(app) = self.core.app.upgrade() else {
             return;
         };
         app.update(cx, |app, cx| app.set_history_range(range, cx));
@@ -392,7 +241,7 @@ impl BranchPicker {
         if !matches!(self.mode, Mode::Docked) {
             return None;
         }
-        let app = self.app.upgrade()?;
+        let app = self.core.app.upgrade()?;
         let app = app.read(cx);
         Some(app.active_review()?.history_range.clone())
     }
@@ -420,156 +269,52 @@ impl BranchPicker {
 
     // — Step one: the list ————————————————————————————————————————
 
-    /// Moves the keyboard cursor, stepping over the group headings.
-    ///
-    /// A heading is a row on screen and therefore counted, but it is not
-    /// somewhere one can land: an arrow that stops on "Locales" reads as stuck.
-    /// It wraps — what one is walking is a handful of names, and an arrow that
-    /// stops answering at the last of them reads as broken too.
-    fn step_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let rows = self.rows(cx);
-        let Some(next) = crate::ui::picker::step_cursor(
-            rows.len(),
-            // A heading is not somewhere one can land; a scope is.
-            |ix| !matches!(rows[ix], Row::Group { .. }),
-            self.cursor,
-            delta,
-        ) else {
-            return;
-        };
-        self.cursor = next;
-        self.scroll.scroll_to_item(next, ScrollStrategy::Top);
-        cx.notify();
-    }
-
-    /// The arrows and `Enter`, taken **before** the field sees them.
-    ///
-    /// In capture phase and on an ancestor of the input: a single-line
-    /// `InputState` binds Up and Down to the ends of its text, so left to bubble
-    /// they would never reach the list. Escape is deliberately untouched — it
-    /// belongs to the popover, which is what one expects it to close.
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.step, Step::List) {
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "down" => {
-                cx.stop_propagation();
-                self.step_cursor(1, cx);
-            }
-            "up" => {
-                cx.stop_propagation();
-                self.step_cursor(-1, cx);
-            }
-            "enter" => {
-                cx.stop_propagation();
-                let rows = self.rows(cx);
-                match rows.get(self.cursor).cloned() {
-                    Some(Row::Branch(row)) => self.activate(&row, window, cx),
-                    Some(Row::Scope(scope)) => self.scope(range_of(scope), cx),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
-        // The transition, one step per frame. It asks for the next frame itself
-        // for as long as it is moving.
-        let base = crate::ui::scroll::Scrollable::base(&self.scroll);
-        self.motion.advance(&base, window);
-        // A popover is as tall as what it holds, up to a ceiling; a zone is as
-        // tall as it was dragged, and the list is what takes what is left over
-        // once the field and the footer have had theirs.
-        let docked = matches!(self.mode, Mode::Docked);
         let rows = self.rows(cx);
-        let count = rows.len();
-        let cursor = self.cursor;
+        let cursor = self.core.cursor;
         let folded = self.folded;
-        // A heading is not as tall as an entry, so the list is a
-        // `v_virtual_list` and not a `uniform_list` — the same swap the diff's
-        // wrapping and the merge view make, and for the same reason.
-        let sizes = Rc::new(
-            rows.iter()
-                .map(|row| match row {
-                    Row::Group { .. } => gpui_kit::size(px(0.), look.head),
-                    Row::Scope(_) => gpui_kit::size(px(0.), look.scope),
-                    Row::Branch(_) => gpui_kit::size(px(0.), look.branch(self.mode)),
-                })
-                .collect::<Vec<_>>(),
-        );
+        let sizes = rows
+            .iter()
+            .map(|row| match row {
+                Row::Group { .. } => gpui_kit::size(px(0.), look.head),
+                Row::Scope(_) => gpui_kit::size(px(0.), look.scope),
+                Row::Branch(_) => gpui_kit::size(px(0.), look.branch(self.mode)),
+            })
+            .collect();
         let entity = cx.entity();
         // What the log is pointed at, read once: the closure below runs for
         // every visible row on every frame.
         let log = self.log_range(cx);
         let mode = self.mode;
-        let build = {
-            let rows = rows.clone();
-            move |ix: usize, cx: &mut App| match &rows[ix] {
-                Row::Group { kind, count } => {
-                    group_heading(&entity, ix, *kind, *count, folded[group_ix(*kind)], look)
-                }
-                Row::Scope(scope) => {
-                    let shown = log.as_ref() == Some(&range_of(*scope));
-                    scope_row(&entity, ix, *scope, shown, ix == cursor, look)
-                }
-                Row::Branch(row) => {
-                    let shown = matches!(&log, Some(LogRange::Ref { name }) if *name == row.name);
-                    branch_row(&entity, ix, row, ix == cursor, mode, shown, look, cx)
-                }
+        let build = move |ix: usize, cx: &mut App| match &rows[ix] {
+            Row::Group { kind, count } => {
+                group_heading(&entity, ix, *kind, *count, folded[group_ix(*kind)], look)
+            }
+            Row::Scope(scope) => {
+                let shown = log.as_ref() == Some(&range_of(*scope));
+                scope_row(&entity, ix, *scope, shown, ix == cursor, look)
+            }
+            Row::Branch(row) => {
+                let shown = matches!(&log, Some(LogRange::Ref { name }) if *name == row.name);
+                branch_row(&entity, ix, row, ix == cursor, mode, shown, look, cx)
             }
         };
-        v_flex()
-            .w_full()
-            .min_h_0()
-            .when(docked, |el| el.flex_1())
-            .child(
-                div().w_full().px_1().py_1().child(
-                    Input::new(&self.query)
-                        .xsmall()
-                        // What the field does is filter, and a bare box above a
-                        // list reads as somewhere to type a name. The glyph is
-                        // the one the panels' own `Ctrl+F` wears.
-                        .prefix(icon("search").xsmall().text_color(look.muted)),
-                ),
-            )
-            .child(if count == 0 {
-                div()
-                    .w_full()
-                    .p_3()
-                    .text_sm()
-                    .text_color(look.muted)
-                    .when(docked, |el| el.flex_1())
-                    .child(tr!("branch-none"))
-                    .into_any_element()
-            } else {
-                crate::ui::scroll::smooth_wheel(
-                    crate::ui::scroll::vertical(
-                        "branch-list",
-                        &self.scroll,
-                        v_virtual_list(
-                            cx.entity(),
-                            "branch-rows",
-                            sizes,
-                            move |_, range, _window, cx| {
-                                range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
-                            },
-                        )
-                        .size_full()
-                        .track_scroll(&self.scroll),
-                    ),
-                    base,
-                    |this| &mut this.motion,
-                    cx,
-                )
-                .when(docked, |el| el.flex_1().min_h_0())
-                .when(!docked, |el| el.h(LIST_HEIGHT))
-                .into_any_element()
-            })
-            .child(self.render_list_footer(look, cx))
-            .into_any_element()
+        let footer = self.render_list_footer(look, cx).into_any_element();
+        crate::ui::picker::render_list(
+            self,
+            crate::ui::picker::ListFrame {
+                id: "branch",
+                sizes,
+                empty: tr!("branch-none"),
+                muted: look.muted,
+                docked: matches!(mode, Mode::Docked),
+                footer,
+            },
+            build,
+            window,
+            cx,
+        )
     }
 
     /// What one asks of the list as a whole rather than of a branch in it.
@@ -933,7 +678,7 @@ impl BranchPicker {
                     .icon(icon("arrow-left"))
                     .tooltip(tr!("branch-back"))
                     .on_click(cx.listener(|this, _, _window, cx| {
-                        this.step = Step::List;
+                        this.core.step = Step::List;
                         cx.notify();
                     })),
             )
@@ -992,9 +737,89 @@ impl BranchPicker {
     }
 }
 
+impl Pick for BranchPicker {
+    type Row = Row;
+    type Actions = BranchRow;
+    /// The worker's answers — the branches arrive as an event — and the
+    /// checkout on show, which is a gesture here.
+    type Sig = (u64, Option<PathBuf>);
+
+    fn core(&self) -> &PickerCore<Self> {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut PickerCore<Self> {
+        &mut self.core
+    }
+
+    fn signature(app: &ClaudhubApp, _cx: &App) -> Self::Sig {
+        (app.events_seen, app.active_path())
+    }
+
+    fn build_rows(&self, cx: &App) -> Vec<Row> {
+        let Some(app) = self.core.app.upgrade() else {
+            return Vec::new();
+        };
+        let app = app.read(cx);
+        let Some(worktree) = app.active_path() else {
+            return Vec::new();
+        };
+        let Some(repo) = app.repo_of(&worktree) else {
+            return Vec::new();
+        };
+        let query = self.core.query.read(cx).value();
+        // The scope rows only where the list drives a log — see `Row::Scope`.
+        let rows = rows_for(
+            &repo.branches,
+            &query,
+            Some(&worktree),
+            matches!(self.mode, Mode::Docked),
+        );
+        // **A filter ignores the folds**, the window's rule for every foldable
+        // list: a query that found something and shows nothing is read as a
+        // query that found nothing.
+        if query.trim().is_empty() {
+            return fold(rows, self.folded);
+        }
+        rows
+    }
+
+    /// A heading is not somewhere one can land: an arrow that stops on
+    /// "Locales" reads as stuck. A scope is.
+    fn landable(row: &Row) -> bool {
+        !matches!(row, Row::Group { .. })
+    }
+
+    fn enter(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
+        match row {
+            Row::Branch(row) => self.activate(&row, window, cx),
+            Row::Scope(scope) => self.scope(range_of(scope), cx),
+            Row::Group { .. } => {}
+        }
+    }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Popover => {
+                if let Some(popover) = self.core.popover.clone() {
+                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                }
+            }
+            // A zone has nothing to dismiss, and one that emptied itself after
+            // every action would be a tool window that closes when used. Back
+            // to the list it was opened from, which is where the next gesture
+            // starts.
+            Mode::Docked => {
+                self.core.step = Step::List;
+                cx.notify();
+            }
+        }
+    }
+}
+
 impl Render for BranchPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match &self.step {
+        let body = match &self.core.step {
             Step::List => self.render_list(window, cx),
             Step::Actions(row) => {
                 let row = row.clone();
@@ -1127,7 +952,7 @@ fn group_heading(
         .on_click(move |_, _window, cx| {
             picker.update(cx, |this, cx| {
                 this.folded[group_ix(kind)] = !this.folded[group_ix(kind)];
-                this.stale = true;
+                this.core.stale = true;
                 cx.notify();
             });
         })
@@ -1389,7 +1214,7 @@ fn branch_row(
                             // its way to the menu.
                             cx.stop_propagation();
                             for_menu.update(cx, |this, cx| {
-                                this.step = Step::Actions(opened.clone());
+                                this.core.step = Step::Actions(opened.clone());
                                 cx.notify();
                             });
                         }),
@@ -1574,7 +1399,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> Popover {
         let picker = self.branch_picker.clone();
-        let focus = picker.read(cx).query.read(cx).focus_handle(cx);
+        let focus = picker.read(cx).core.query.read(cx).focus_handle(cx);
         let for_open = picker.clone();
         let app = cx.entity().downgrade();
         Popover::new(id)
@@ -1601,7 +1426,7 @@ impl ClaudhubApp {
             // `ClaudhubApp::render`, a child view's render does not.
             .content(move |_state, _window, cx| {
                 let popover = cx.entity();
-                picker.update(cx, |this, _| this.popover = Some(popover));
+                picker.update(cx, |this, _| this.core.popover = Some(popover));
                 picker.clone()
             })
             // The surface paints its own padding: a list's rows run edge to
