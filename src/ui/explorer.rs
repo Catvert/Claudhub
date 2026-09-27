@@ -3021,13 +3021,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(tr!("no-worktree"))
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
         self.ensure_project_files(cx);
         let ignored = Settings::global(cx).show_ignored_files;
@@ -3068,16 +3062,7 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .children(find)
-                .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .text_color(look.muted)
-                        .child(icon("folder"))
-                        .child(div().text_sm().child(tr!("files-empty"))),
-                )
+                .child(crate::ui::theme::empty("folder", tr!("files-empty"), cx))
                 .into_any_element();
         }
 

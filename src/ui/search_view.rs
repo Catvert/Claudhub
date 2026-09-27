@@ -1113,14 +1113,7 @@ impl ClaudhubApp {
         } else {
             tr!("find-no-match")
         };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .text_color(cx.theme().muted_foreground)
-            .child(icon("search"))
-            .child(div().text_sm().px_4().text_center().child(message))
+        crate::ui::theme::empty("search", message, cx)
     }
 
     /// The result list, painted for whoever is showing it.
@@ -1206,14 +1199,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(preview) = self.preview_of(pane) else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_color(cx.theme().muted_foreground)
-                .child(icon("file-code"))
-                .child(div().text_sm().child(tr!("search-preview-empty")))
+            return crate::ui::theme::empty("file-code", tr!("search-preview-empty"), cx)
                 .into_any_element();
         };
         let header = crate::ui::theme::panel_bar(cx)

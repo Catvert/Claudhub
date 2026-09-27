@@ -1086,28 +1086,20 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(icon("database"))
-                        .child(div().text_sm().px_4().child(tr!("db-empty")))
-                        .child(
-                            Button::new("db-add-first")
-                                .outline()
-                                .small()
-                                .icon(icon("plus"))
-                                .label(tr!("db-add-connection"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_settings_at(
-                                        crate::ui::settings_view::Page::Databases,
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        ),
+                    crate::ui::theme::empty("database", tr!("db-empty"), cx).child(
+                        Button::new("db-add-first")
+                            .outline()
+                            .small()
+                            .icon(icon("plus"))
+                            .label(tr!("db-add-connection"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings_at(
+                                    crate::ui::settings_view::Page::Databases,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
                 )
                 .into_any_element();
         }

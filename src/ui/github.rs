@@ -1444,16 +1444,7 @@ impl ClaudhubApp {
 
     /// The empty state, in the middle of the panel.
     fn render_github_note(&self, note: SharedString, cx: &Context<Self>) -> AnyElement {
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
-            .text_color(cx.theme().muted_foreground)
-            .child(icon("github"))
-            .child(div().text_sm().text_center().child(note))
-            .into_any_element()
+        crate::ui::theme::empty("github", note, cx).into_any_element()
     }
 
     /// The repository's open pull requests.

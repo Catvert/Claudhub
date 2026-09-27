@@ -134,16 +134,11 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .children(find)
-                .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .text_color(muted)
-                        .child(icon("git-merge"))
-                        .child(div().text_sm().child(tr!("conflict-none"))),
-                )
+                .child(crate::ui::theme::empty(
+                    "git-merge",
+                    tr!("conflict-none"),
+                    cx,
+                ))
                 .into_any_element();
         }
 

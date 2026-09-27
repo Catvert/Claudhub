@@ -885,14 +885,7 @@ impl ClaudhubApp {
         } else {
             tr!("find-no-match")
         };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .text_color(cx.theme().muted_foreground)
-            .child(icon("file"))
-            .child(div().text_sm().px_4().text_center().child(message))
+        crate::ui::theme::empty("file", message, cx)
     }
 }
 

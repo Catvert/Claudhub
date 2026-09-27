@@ -560,17 +560,7 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .children(find)
-                .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .p_4()
-                        .text_color(muted)
-                        .child(icon("triangle-alert"))
-                        .child(div().text_sm().text_center().child(note)),
-                )
+                .child(crate::ui::theme::empty("triangle-alert", note, cx))
                 .into_any_element();
         }
 

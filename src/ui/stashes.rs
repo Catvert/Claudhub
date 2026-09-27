@@ -382,13 +382,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(main) = self.active_main() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(div().text_sm().child(tr!("no-worktree")))
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
         self.ensure_stashes(main.clone(), cx);
         let query = self.query(Pane::Stashes, cx);

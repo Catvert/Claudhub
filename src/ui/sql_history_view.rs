@@ -718,13 +718,5 @@ fn empty(query: &str, cx: &App) -> gpui_kit::AnyElement {
     } else {
         tr!("find-no-match")
     };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("clock"))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
+    crate::ui::theme::empty("clock", message, cx).into_any_element()
 }

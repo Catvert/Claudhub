@@ -429,17 +429,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("no-worktree")),
-                )
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
 
         let find = self.render_find(Self::find_pane(&range), cx);

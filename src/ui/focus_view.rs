@@ -103,14 +103,7 @@ impl ClaudhubApp {
                 .size_full()
                 .child(self.column_node(&node, false, &at_work, window, cx))
                 .into_any_element(),
-            None if shown.is_empty() => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(tr!("overview-empty"))
-                .into_any_element(),
+            None if shown.is_empty() => crate::ui::theme::centered_note(tr!("overview-empty"), cx),
             None => {
                 // Their lists of changes, even if the pickers leave them out
                 // of what the home screen reads.
