@@ -1040,7 +1040,7 @@ fn render_commit(
         // **After the click and not before**: a context menu is not an
         // interactive element, so there is nothing left to hang a click on once
         // it wraps the row. The terminals' tabs learned this first.
-        .context_menu(commit_menu(commit, index, &menu_entity))
+        .context_menu(commit_menu(history, index, &menu_entity))
         .into_any_element()
 }
 
@@ -1051,21 +1051,28 @@ fn render_commit(
 /// gesture, and everything else here is one the row already knew how to do and
 /// had no way of being asked for.
 fn commit_menu(
-    commit: &crate::git::Commit,
+    history: &Rc<History>,
     index: usize,
     entity: &Entity<ClaudhubApp>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     use gpui_kit::component::menu::PopupMenuItem;
 
     let entity = entity.clone();
-    // The three strings, taken now: the closure outlives the row, and the
-    // history it came from is replaced whole on every reload.
-    let (id, short, summary) = (
-        commit.id.clone(),
-        commit.short.clone(),
-        commit.summary.clone(),
-    );
+    // The history and not the commit's strings: this is built for every
+    // visible row at every frame, and opened on one of them now and then. The
+    // `Rc` is the history as it stood — the closure outlives the row, and the
+    // application's is replaced whole on every reload — and the strings are
+    // taken from it when the menu opens.
+    let history = history.clone();
     move |menu, _window, _cx| {
+        let Some(commit) = history.commits.get(index) else {
+            return menu;
+        };
+        let (id, short, summary) = (
+            commit.id.clone(),
+            commit.short.clone(),
+            commit.summary.clone(),
+        );
         let copy = |text: String| {
             move |_: &gpui_kit::ClickEvent, _window: &mut Window, cx: &mut gpui_kit::App| {
                 cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
