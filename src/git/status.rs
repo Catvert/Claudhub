@@ -217,6 +217,18 @@ impl Status {
         })
     }
 
+    /// Every displayed path, submodules included, filed once: `file` walks the
+    /// list, so asked for each of a heading's thousand paths it was a million
+    /// comparisons on the interface thread. The same answers as `file` — the
+    /// first entry of a path wins, the parent's before a submodule's.
+    pub fn file_index(&self) -> HashMap<PathBuf, &FileStatus> {
+        let mut index = HashMap::new();
+        for (path, file) in self.files_recursive() {
+            index.entry(path).or_insert(file);
+        }
+        index
+    }
+
     /// Splits a displayed path into its repository and repository-local path.
     /// The gitlink itself belongs to its parent; only its children move inside.
     pub fn file_location(&self, path: &Path) -> (PathBuf, PathBuf) {
@@ -523,6 +535,32 @@ mod tests {
         assert_eq!(st.upstream.as_deref(), Some("origin/feature/x"));
         assert_eq!((st.ahead, st.behind), (2, 3));
         assert!(st.is_clean());
+    }
+
+    /// The index answers what `file` answers, submodules included, and the
+    /// gitlink row is the parent's.
+    #[test]
+    fn the_file_index_agrees_with_the_walk() {
+        let parent = parse(&rec(&[
+            "1 .M N... 100644 100644 100644 aaa aaa src/main.rs",
+            "1 .M SC.. 160000 160000 160000 bbb bbb vendor/lib",
+            "? notes.md",
+        ]));
+        let child = parse(&rec(&["1 M. N... 100644 100644 100644 ccc ddd lib.rs"]));
+        let status = Status {
+            submodules: vec![SubmoduleChanges {
+                path: "vendor/lib".into(),
+                status: child,
+            }],
+            ..parent
+        };
+        let index = status.file_index();
+        for path in ["src/main.rs", "vendor/lib", "notes.md", "vendor/lib/lib.rs"] {
+            let path = Path::new(path);
+            assert_eq!(index.get(path).copied(), status.file(path), "{path:?}");
+            assert!(index.contains_key(path), "{path:?}");
+        }
+        assert_eq!(index.len(), 4);
     }
 
     #[test]
