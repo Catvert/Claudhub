@@ -15,6 +15,17 @@ sans quitter l'application.
 - **Worktrees** — une barre latérale liste les dépôts ouverts et leurs
   worktrees. Création (`<dépôt>-wt/<nom>`, la convention de l'outil `wt`),
   suppression, bascule instantanée de l'un à l'autre.
+- **Accueil** — un écran pour tous les worktrees ouverts. La vue **Focus**
+  met un tableau par worktree choisi, côte à côte : son Accueil résume l'état
+  en cartes (branche, PR et CI, ce qui attend un commit, revue, tâches, note
+  principale) à côté de ses terminaux ; ses onglets Git, Tests, Notes et
+  Terminaux reprennent les panneaux de l'éditeur. La vue **Plan** dessine un
+  arbre par dépôt — checkouts, worktrees, notes, terminaux —, et le lien d'un
+  agent coule quand il travaille, respire quand il attend. Les notes, les
+  revues et les diagrammes sont des fichiers Markdown (`.claudhub/notes/`,
+  versionné, ou le coffre du worktree), qu'un agent peut écrire lui-même :
+  Claudhub lui donne une fiche de son environnement et une skill qui en
+  apprend le format.
 - **Terminaux multiplexés par worktree** — chaque worktree a son groupe
   d'onglets, lancés dans son répertoire. Émulation complète (alacritty), donc
   `vim`, `htop` et les interfaces plein écran fonctionnent. Sélection à la
@@ -22,7 +33,8 @@ sans quitter l'application.
   et collage — encadré par les séquences de « collage entre crochets » quand le
   programme les comprend, pour qu'un texte multiligne collé ne s'exécute pas
   tout seul. Un bouton lance directement l'agent de codage configuré dans un
-  onglet neuf.
+  onglet neuf. Les terminaux survivent à la fenêtre : un shell ou un agent
+  revient à sa place, Claude dans sa conversation.
 - **Revue** — deux domaines : les modifications en cours, et la branche entière
   depuis sa divergence d'avec une base **que l'on choisit** — la branche
   d'intégration est devinée au départ, le sélecteur (avec recherche) permet de
@@ -73,7 +85,7 @@ sans quitter l'application.
   branche existante.
 - **Agents** — Claudhub pose des hooks Claude Code dans les worktrees qu'il
   crée (`.claude/settings.local.json`, fusionnés avec les vôtres ; un réglage
-  les coupe) : chaque worktree et chaque colonne du multiplexeur disent alors
+  les coupe) : chaque worktree et chaque terminal de l'accueil disent alors
   si leur agent travaille, a fini ou attend une permission, et une bulle le
   signale une fois. Sans hooks, l'état se devine encore à la consommation du
   processus.
