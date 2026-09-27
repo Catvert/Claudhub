@@ -976,23 +976,15 @@ impl ClaudhubApp {
                 tr!("ci-rerun"),
             ),
         };
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            // Cloned into the closure and never read from it: `open_dialog`
-            // keeps a `Fn` called back from the root's own render.
-            let (entity, id) = (entity.clone(), run.id.clone());
-            dialog
-                .title(title.clone())
-                .child(div().text_sm().child(body.clone()))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::submit(label.clone()))
-                .on_ok(move |_, _window, cx| {
-                    let id = id.clone();
-                    entity.update(cx, |this, cx| this.run_gesture(gesture, id, cx));
-                    true
-                })
-        });
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            title,
+            move || div().text_sm().child(body.clone()).into_any_element(),
+            move || crate::ui::dialogs::submit(label.clone()),
+            move |this, _, cx| this.run_gesture(gesture, run.id.clone(), cx),
+            window,
+            cx,
+        );
     }
 
     /// Sends a confirmed cancel or re-run.
@@ -1444,16 +1436,7 @@ impl ClaudhubApp {
 
     /// The empty state, in the middle of the panel.
     fn render_github_note(&self, note: SharedString, cx: &Context<Self>) -> AnyElement {
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
-            .text_color(cx.theme().muted_foreground)
-            .child(icon("github"))
-            .child(div().text_sm().text_center().child(note))
-            .into_any_element()
+        crate::ui::theme::empty("github", note, cx).into_any_element()
     }
 
     /// The repository's open pull requests.
@@ -2234,14 +2217,7 @@ impl ClaudhubApp {
                 .selected(mode == target)
                 .on_click(cx.listener(move |this, _, _window, cx| this.set_github_mode(target, cx)))
         };
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("github").xsmall())
             .child(mode_button(
                 "github-mode-prs",

@@ -340,14 +340,7 @@ impl ClaudhubApp {
     fn render_sql_history_bar(&mut self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let reach = self.sql_history_reach;
         let entity = cx.entity();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("clock").xsmall())
             .child(
                 div()
@@ -725,13 +718,5 @@ fn empty(query: &str, cx: &App) -> gpui_kit::AnyElement {
     } else {
         tr!("find-no-match")
     };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("clock"))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
+    crate::ui::theme::empty("clock", message, cx).into_any_element()
 }

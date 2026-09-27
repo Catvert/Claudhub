@@ -11,7 +11,6 @@ use gpui_kit::component::{v_flex, ActiveTheme};
 use gpui_kit::{div, prelude::*, uniform_list, AnyElement, App, Context, SharedString, Window};
 
 use crate::ui::app::ClaudhubApp;
-use crate::ui::icons::icon;
 
 /// What is known of one list of a repository.
 pub struct Listed<T> {
@@ -125,15 +124,7 @@ fn empty_list(query: &str, pending: bool, empty: Empty, cx: &App) -> AnyElement 
     } else {
         crate::tr!("find-no-match")
     };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon(empty.icon))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
+    crate::ui::theme::empty(empty.icon, message, cx).into_any_element()
 }
 
 /// One panel's list, as [`ClaudhubApp::render_listed`] paints it.

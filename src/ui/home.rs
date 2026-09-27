@@ -605,21 +605,5 @@ fn link(
 
 /// The page with nothing to show: no repository is open yet.
 fn home_note(text: SharedString, cx: &App) -> AnyElement {
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .child(
-            icon("house")
-                .large()
-                .text_color(cx.theme().muted_foreground.opacity(0.4)),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(text),
-        )
-        .into_any_element()
+    crate::ui::theme::empty_document("house", text, cx)
 }

@@ -114,14 +114,8 @@ impl ClaudhubApp {
         let (muted, warning) = (cx.theme().muted_foreground, cx.theme().warning);
         let mono = cx.theme().mono_font_family.clone();
 
-        let bar = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        let bar = crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(icon("git-merge").xsmall())
             .child(
                 div()
@@ -140,16 +134,11 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .children(find)
-                .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .text_color(muted)
-                        .child(icon("git-merge"))
-                        .child(div().text_sm().child(tr!("conflict-none"))),
-                )
+                .child(crate::ui::theme::empty(
+                    "git-merge",
+                    tr!("conflict-none"),
+                    cx,
+                ))
                 .into_any_element();
         }
 

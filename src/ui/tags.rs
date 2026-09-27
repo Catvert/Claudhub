@@ -316,34 +316,30 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entity = cx.entity();
         let label = SharedString::from(name.clone());
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, name, label) = (entity.clone(), name.clone(), label.clone());
-            dialog
-                .title(if remote {
-                    tr!("tag-delete-remote-title")
-                } else {
-                    tr!("tag-delete-title")
-                })
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(if remote {
-                            tr!("tag-delete-remote-warning")
-                        } else {
-                            tr!("tag-delete-warning")
-                        })),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.delete_tag(name.clone(), remote, cx));
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            if remote {
+                tr!("tag-delete-remote-title")
+            } else {
+                tr!("tag-delete-title")
+            },
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(if remote {
+                        tr!("tag-delete-remote-warning")
+                    } else {
+                        tr!("tag-delete-warning")
+                    }))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| this.delete_tag(name.clone(), remote, cx),
+            window,
+            cx,
+        );
     }
 
     fn delete_tag(&mut self, name: String, remote: bool, cx: &mut Context<Self>) {
@@ -395,13 +391,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(main) = self.active_main() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(div().text_sm().child(tr!("no-worktree")))
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
         self.ensure_tags(main.clone(), cx);
         let query = self.query(Pane::Tags, cx);
@@ -475,14 +465,7 @@ impl ClaudhubApp {
             tr!("tags-count", { n: count })
         };
         let find = self.find_button(Pane::Tags, cx);
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("tag").xsmall())
             .child(
                 div()

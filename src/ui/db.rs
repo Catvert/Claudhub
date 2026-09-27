@@ -1086,28 +1086,20 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(icon("database"))
-                        .child(div().text_sm().px_4().child(tr!("db-empty")))
-                        .child(
-                            Button::new("db-add-first")
-                                .outline()
-                                .small()
-                                .icon(icon("plus"))
-                                .label(tr!("db-add-connection"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_settings_at(
-                                        crate::ui::settings_view::Page::Databases,
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        ),
+                    crate::ui::theme::empty("database", tr!("db-empty"), cx).child(
+                        Button::new("db-add-first")
+                            .outline()
+                            .small()
+                            .icon(icon("plus"))
+                            .label(tr!("db-add-connection"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings_at(
+                                    crate::ui::settings_view::Page::Databases,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
                 )
                 .into_any_element();
         }
@@ -1167,14 +1159,7 @@ impl ClaudhubApp {
     fn render_db_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let indexing = !self.db.indexing.is_empty();
         let count = self.db.connections.len();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("database").xsmall())
             .child(
                 div()

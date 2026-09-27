@@ -811,7 +811,7 @@ impl ClaudhubApp {
         let notes_scroll = self.scroll_of("notes");
         let find = self.render_find(crate::ui::find::Pane::Notes, cx);
         if self.active_review().is_none() {
-            return empty_notes(tr!("no-worktree"), cx).into_any_element();
+            return crate::ui::theme::empty("reply", tr!("no-worktree"), cx).into_any_element();
         }
         let bar = self.render_vault_bar(cx);
         let todo = self.render_todo_section(false, cx);
@@ -866,14 +866,8 @@ impl ClaudhubApp {
             .as_ref()
             .map(|dir| SharedString::from(dir.display().to_string()))
             .unwrap_or_else(|| tr!("note-no-vault"));
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(icon("book-open").xsmall())
             .child(
                 div()
@@ -1497,7 +1491,6 @@ fn split_span(
     bounds
 }
 
-/// The panel's empty state: an icon and a sentence, as everywhere else.
 /// A section's empty state, inside the panel.
 ///
 /// A grey line and not a full-height empty state: three sections share this
@@ -1509,15 +1502,4 @@ fn section_empty(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoE
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(message)
-}
-
-fn empty_notes(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoElement {
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("reply"))
-        .child(div().text_sm().child(message))
 }

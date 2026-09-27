@@ -560,17 +560,7 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .children(find)
-                .child(
-                    v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .p_4()
-                        .text_color(muted)
-                        .child(icon("triangle-alert"))
-                        .child(div().text_sm().text_center().child(note)),
-                )
+                .child(crate::ui::theme::empty("triangle-alert", note, cx))
                 .into_any_element();
         }
 
@@ -656,14 +646,7 @@ impl ClaudhubApp {
         let org = Settings::global(cx).sentry_org.trim().to_string();
         let input = self.sentry_project_input.clone();
         let loading = self.sentry.loading;
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("triangle-alert").xsmall())
             .when(!org.is_empty(), |el| {
                 el.child(

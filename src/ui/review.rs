@@ -429,17 +429,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("no-worktree")),
-                )
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
 
         let find = self.render_find(Self::find_pane(&range), cx);
@@ -937,15 +927,7 @@ impl ClaudhubApp {
     }
 
     fn bar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_1()
-            .gap_1()
-            .items_center()
-            .justify_end()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx).px_1().justify_end()
     }
 
     fn tree_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1301,39 +1283,35 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let label = path.display().to_string();
-        let entity = cx.entity();
         let (title, warning) = if untracked {
             (tr!("delete-title"), tr!("delete-warning"))
         } else {
             (tr!("discard-title"), tr!("discard-warning"))
         };
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (worktree, path, entity) = (worktree.clone(), path.clone(), entity.clone());
-            dialog
-                .title(title.clone())
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(warning.clone())),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        let paths = vec![path.clone()];
-                        let worktree = worktree.clone();
-                        this.git.send(if untracked {
-                            Cmd::Delete { worktree, paths }
-                        } else {
-                            Cmd::Discard { worktree, paths }
-                        });
-                        cx.notify();
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            title,
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(warning.clone()))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| {
+                let paths = vec![path.clone()];
+                let worktree = worktree.clone();
+                this.git.send(if untracked {
+                    Cmd::Delete { worktree, paths }
+                } else {
+                    Cmd::Discard { worktree, paths }
+                });
+                cx.notify();
+            },
+            window,
+            cx,
+        );
     }
 
     /// Asks for confirmation before rolling the whole worktree back to HEAD.
@@ -1344,26 +1322,25 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let entity = cx.entity();
-        let (title, warning) = (tr!("rollback-all-title"), tr!("rollback-all-warning"));
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (worktree, entity) = (worktree.clone(), entity.clone());
-            dialog
-                .title(title.clone())
-                .child(div().text_xs().child(warning.clone()))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        let cmd = Cmd::RollbackAll {
-                            worktree: worktree.clone(),
-                        };
-                        this.start(Some(worktree.clone()), Action::Discard, cmd, cx);
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("rollback-all-title"),
+            || {
+                div()
+                    .text_xs()
+                    .child(tr!("rollback-all-warning"))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| {
+                let cmd = Cmd::RollbackAll {
+                    worktree: worktree.clone(),
+                };
+                this.start(Some(worktree.clone()), Action::Discard, cmd, cx);
+            },
+            window,
+            cx,
+        );
     }
 
     /// Stages one hunk of the displayed diff.

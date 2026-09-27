@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::component::{Theme, ThemeRegistry};
-use gpui_kit::{prelude::*, px, App, Hsla, Pixels, Rgba, Window};
+use gpui_kit::{prelude::*, px, App, Hsla, Pixels, Rgba, SharedString, Window};
 
 use super::settings::{Settings, ThemeMode};
 
@@ -258,6 +258,77 @@ pub fn scroll_gutter() -> Pixels {
 /// The height of a header bar: tabs, panel titles.
 pub fn bar_height(cx: &App) -> Pixels {
     scaled(cx, 2.2, px(26.))
+}
+
+/// A panel's header bar, empty: the height, the padding, the rule under it.
+///
+/// Every panel completes it with its own children, and a bar that needs a
+/// wider gap or a narrower padding says so after — a later call wins.
+pub fn panel_bar(cx: &App) -> gpui_kit::Div {
+    gpui_kit::component::h_flex()
+        .h(bar_height(cx))
+        .w_full()
+        .px_2()
+        .gap_1()
+        .items_center()
+        .border_b_1()
+        .border_color(gpui_kit::component::ActiveTheme::theme(cx).border)
+}
+
+/// A panel's empty state: an icon and a sentence in its middle.
+///
+/// An empty panel with no visual cue reads as a broken one. Returned open,
+/// for the panel that offers a button under the sentence.
+pub fn empty(glyph: &str, message: impl Into<SharedString>, cx: &App) -> gpui_kit::Div {
+    gpui_kit::component::v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .text_color(gpui_kit::component::ActiveTheme::theme(cx).muted_foreground)
+        .child(super::icons::icon(glyph))
+        .child(
+            gpui_kit::div()
+                .text_sm()
+                .px_4()
+                .text_center()
+                .child(message.into()),
+        )
+}
+
+/// A centre document's empty state: the same, with a larger and fainter
+/// icon — it is the first thing a first launch shows.
+pub fn empty_document(glyph: &str, message: SharedString, cx: &App) -> gpui_kit::AnyElement {
+    use gpui_kit::component::Sizable as _;
+    let muted = gpui_kit::component::ActiveTheme::theme(cx).muted_foreground;
+    gpui_kit::component::v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .child(
+            super::icons::icon(glyph)
+                .large()
+                .text_color(muted.opacity(0.4)),
+        )
+        .child(gpui_kit::div().text_sm().text_color(muted).child(message))
+        .into_any_element()
+}
+
+/// A sentence alone in the middle of a view, without an icon.
+pub fn centered_note(message: SharedString, cx: &App) -> gpui_kit::AnyElement {
+    gpui_kit::component::v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .text_color(gpui_kit::component::ActiveTheme::theme(cx).muted_foreground)
+        .child(gpui_kit::div().text_sm().child(message))
+        .into_any_element()
+}
+
+/// What a panel that reads the watched worktree says when there is none.
+pub fn no_worktree(cx: &App) -> gpui_kit::AnyElement {
+    centered_note(crate::tr!("no-worktree"), cx)
 }
 
 /// The height of the main toolbar, which carries buttons.

@@ -17,7 +17,7 @@ use crate::git::{Branch, BranchKind};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
+use gpui_kit::component::ActiveTheme as _;
 
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,24 +326,22 @@ impl ClaudhubApp {
             remote,
             also_remote: false,
         });
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, draft) = (entity.clone(), draft.clone());
-            dialog
-                .title(tr!("branch-delete-title", { name: branch.clone() }))
-                .child(draft.clone())
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    // Read on click, where the borrow has been given back: the
-                    // closure above runs inside the application's own render.
-                    let draft = draft.read(cx);
-                    let (name, also) = (draft.branch.clone(), draft.also_remote);
-                    entity.update(cx, |this, cx| this.delete_branch(name, also, cx));
-                    true
-                })
-        });
+        let body = draft.clone();
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            tr!("branch-delete-title", { name: branch }),
+            move || body.clone().into_any_element(),
+            crate::ui::dialogs::confirm,
+            move |this, _, cx| {
+                // Read on click, where the borrow has been given back: the body
+                // is painted inside the application's own render.
+                let draft = draft.read(cx);
+                let (name, also) = (draft.branch.clone(), draft.also_remote);
+                this.delete_branch(name, also, cx);
+            },
+            window,
+            cx,
+        );
     }
 
     /// The two commands a confirmed deletion sends, in the order that costs
@@ -419,26 +417,25 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entity = cx.entity();
-        let cmd = std::rc::Rc::new(cmd);
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, cmd) = (entity.clone(), cmd.clone());
-            dialog
-                .title(title.clone())
-                .child(gpui_kit::div().text_sm().child(help.clone()))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(crate::ui::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        let Some(main) = this.active.clone().and_then(|w| this.main_of(&w)) else {
-                            return;
-                        };
-                        this.start(None, crate::runtime::Action::Branch, cmd(main), cx);
-                    });
-                    true
-                })
-        });
+        crate::ui::dialogs::ask(
+            cx.entity(),
+            title,
+            move || {
+                gpui_kit::div()
+                    .text_sm()
+                    .child(help.clone())
+                    .into_any_element()
+            },
+            crate::ui::dialogs::confirm,
+            move |this, _, cx| {
+                let Some(main) = this.active.clone().and_then(|w| this.main_of(&w)) else {
+                    return;
+                };
+                this.start(None, crate::runtime::Action::Branch, cmd(main), cx);
+            },
+            window,
+            cx,
+        );
     }
 
     /// Compares the current worktree against another branch.

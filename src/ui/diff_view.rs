@@ -1935,15 +1935,9 @@ impl ClaudhubApp {
         // its content: without `min_w_0` on the path — and without the two
         // groups refusing to shrink — a long path pushed the buttons on the
         // right out of the bar, where nothing showed them and nothing said so.
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
+        crate::ui::theme::panel_bar(cx)
             .gap_2()
-            .items_center()
             .overflow_hidden()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .flex_shrink_0()
@@ -3090,23 +3084,7 @@ fn number(value: SharedString, width: Pixels, colors: &DiffColors) -> gpui_kit::
 /// an empty panel with no visual cue reads as a broken panel, above all on first
 /// launch where it is the first thing one sees.
 fn centered_message(text: SharedString, cx: &mut gpui_kit::App) -> gpui_kit::AnyElement {
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .child(
-            icon("file-diff")
-                .large()
-                .text_color(cx.theme().muted_foreground.opacity(0.4)),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(text),
-        )
-        .into_any_element()
+    crate::ui::theme::empty_document("file-diff", text, cx)
 }
 
 pub(super) fn hint(text: SharedString, cx: &mut gpui_kit::App) -> impl IntoElement {

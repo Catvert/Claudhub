@@ -230,43 +230,37 @@ impl ClaudhubApp {
     /// The one gesture here with no way back: git keeps the commit in the object
     /// database for a while, and nothing on screen can point at it any more.
     fn confirm_drop_stash(&mut self, stash: &Stash, window: &mut Window, cx: &mut Context<Self>) {
-        let entity = cx.entity();
         let (name, hash) = (stash.name.clone(), stash.hash.clone());
         let label = SharedString::from(label_of(stash));
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, name, hash, label) =
-                (entity.clone(), name.clone(), hash.clone(), label.clone());
-            dialog
-                .title(tr!("stash-drop-title"))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(tr!("stash-drop-warning"))),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    let (name, hash) = (name.clone(), hash.clone());
-                    entity.update(cx, |this, cx| {
-                        let Some(worktree) = this.active.clone() else {
-                            return;
-                        };
-                        this.start(
-                            Some(worktree.clone()),
-                            Action::Stash,
-                            Cmd::StashDrop {
-                                worktree,
-                                name,
-                                hash,
-                            },
-                            cx,
-                        );
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("stash-drop-title"),
+            move || {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(div().text_xs().child(tr!("stash-drop-warning")))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            move |this, _, cx| {
+                let Some(worktree) = this.active.clone() else {
+                    return;
+                };
+                this.start(
+                    Some(worktree.clone()),
+                    Action::Stash,
+                    Cmd::StashDrop {
+                        worktree,
+                        name: name.clone(),
+                        hash: hash.clone(),
+                    },
+                    cx,
+                );
+            },
+            window,
+            cx,
+        );
     }
 
     /// Empties the stack, after asking. The count is in the question: "delete 7
@@ -279,30 +273,30 @@ impl ClaudhubApp {
         if count == 0 {
             return;
         }
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            dialog
-                .title(tr!("stash-clear-title", { n: count }))
-                .child(div().text_xs().child(tr!("stash-drop-warning")))
-                .overlay_closable(false)
-                .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        let Some(worktree) = this.active.clone() else {
-                            return;
-                        };
-                        this.start(
-                            Some(worktree.clone()),
-                            Action::Stash,
-                            Cmd::StashClear { worktree },
-                            cx,
-                        );
-                    });
-                    true
-                })
-        });
+        super::dialogs::ask(
+            cx.entity(),
+            tr!("stash-clear-title", { n: count }),
+            || {
+                div()
+                    .text_xs()
+                    .child(tr!("stash-drop-warning"))
+                    .into_any_element()
+            },
+            super::dialogs::confirm,
+            |this, _, cx| {
+                let Some(worktree) = this.active.clone() else {
+                    return;
+                };
+                this.start(
+                    Some(worktree.clone()),
+                    Action::Stash,
+                    Cmd::StashClear { worktree },
+                    cx,
+                );
+            },
+            window,
+            cx,
+        );
     }
 
     /// Creates a branch at the commit the stash was made on and restores it
@@ -382,13 +376,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(main) = self.active_main() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(div().text_sm().child(tr!("no-worktree")))
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
         self.ensure_stashes(main.clone(), cx);
         let query = self.query(Pane::Stashes, cx);
@@ -434,14 +422,7 @@ impl ClaudhubApp {
             .map(|state| state.items.len())
             .unwrap_or(0);
         let has_active = self.active.is_some();
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("archive").xsmall())
             .child(
                 div()

@@ -993,14 +993,7 @@ impl ClaudhubApp {
             .and_then(|run| run.cast.as_ref())
             .map(|cast| (cast.image.clone(), cast.width, cast.height));
         let Some((image, width, height)) = cast else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_color(cx.theme().muted_foreground)
-                .child(icon("monitor-play"))
-                .child(div().text_sm().px_4().child(tr!("cast-none")))
+            return crate::ui::theme::empty("monitor-play", tr!("cast-none"), cx)
                 .into_any_element();
         };
         div()
@@ -1643,13 +1636,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let Some(active) = self.active.clone() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(div().text_sm().child(tr!("no-worktree")))
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
         self.ensure_pest(&active, cx);
         let only_changed = self
@@ -1957,14 +1944,7 @@ impl ClaudhubApp {
                     )
                 })
         };
-        h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        crate::ui::theme::panel_bar(cx)
             .child(icon("circle-check").xsmall())
             .child(summary)
             .child(self.find_button(Pane::Tests, cx))
@@ -2417,15 +2397,7 @@ fn missing_pest(pending: bool, cx: &App) -> gpui_kit::AnyElement {
     } else {
         tr!("tests-missing")
     };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("circle-check"))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
+    crate::ui::theme::empty("circle-check", message, cx).into_any_element()
 }
 
 /// Nothing to show: a listing under way, a search or the failures filter
@@ -2469,15 +2441,7 @@ fn empty_pest(
     } else {
         tr!("find-no-match")
     };
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .text_color(cx.theme().muted_foreground)
-        .child(icon("circle-check"))
-        .child(div().text_sm().px_4().child(message))
-        .into_any_element()
+    crate::ui::theme::empty("circle-check", message, cx).into_any_element()
 }
 
 // — The run panel ————————————————————————————————————————
@@ -2489,24 +2453,10 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(active) = self.active.clone() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(div().text_sm().child(tr!("no-worktree")))
-                .into_any_element();
+            return crate::ui::theme::no_worktree(cx);
         };
         let Some(state) = self.pest_runs.get(&active) else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_color(cx.theme().muted_foreground)
-                .child(icon("play"))
-                .child(div().text_sm().px_4().child(tr!("tests-no-run")))
-                .into_any_element();
+            return crate::ui::theme::empty("play", tr!("tests-no-run"), cx).into_any_element();
         };
 
         let with_failures = state.run.clone().filter(|run| run.failed > 0);
@@ -2730,15 +2680,7 @@ impl ClaudhubApp {
         let Some(state) = self.pest_runs.get(worktree) else {
             return div().into_any_element();
         };
-        let bar = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .text_xs();
+        let bar = crate::ui::theme::panel_bar(cx).gap_2().text_xs();
         if state.running {
             // Every id of this campaign, and none other: another worktree's
             // campaign may queue on the same worker, and a stop is by id.

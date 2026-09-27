@@ -27,7 +27,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
-    v_flex, ActiveTheme, Sizable as _, Size, WindowExt as _,
+    v_flex, ActiveTheme, Sizable as _, Size,
 };
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, Context, Element, Focusable as _,
@@ -3045,7 +3045,6 @@ impl ClaudhubApp {
                                             cx,
                                         );
                                     });
-                                    window.defer(cx, |window, cx| window.focus_dialog(cx));
                                 });
                             },
                         )
