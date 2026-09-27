@@ -241,25 +241,14 @@ pub(crate) fn git_env<S: AsRef<OsStr>>(
     Ok(strip_trailing_newline(into_text(out.stdout)))
 }
 
-/// Waits for a process to finish, or interrupts it once `limit` passes.
+/// Waits for a process to finish, or interrupts it once `limit` passes, with
+/// something to write on its standard input if `input` says so.
 ///
 /// Separated from `exec` so it can be verified: testing it with `git` would
-/// need a git command that hangs reproducibly, and there is none.
-///
-/// `pub(crate)` and taking its ceiling as an argument because it is not only
-/// git's any more: the CI view's shell request waits for a process in exactly
-/// the same way, and for the same reason — a full pipe blocks the writer, and
-/// reading after the wait is the classic deadlock. What differs is only how
-/// long one is willing to wait, which is why the constant became a parameter.
-pub(crate) fn wait_with_timeout(
-    cmd: Command,
-    limit: Duration,
-    describe: impl Fn() -> String,
-) -> Result<std::process::Output> {
-    wait_feeding(cmd, None, limit, describe)
-}
-
-/// The same wait, with something to write on the process's standard input.
+/// need a git command that hangs reproducibly, and there is none. It is not
+/// only git's: `outside::Bounded` waits for every other program this way, for
+/// the same reason — a full pipe blocks the writer, and reading after the wait
+/// is the classic deadlock.
 ///
 /// The command must have asked for a piped `stdin` when there is an input to
 /// give. The write goes through a thread of its own for the reason the reads
@@ -527,7 +516,7 @@ pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
 
     // The lines travel through a channel rather than being read here: a read
     // blocked on a command that says nothing would have no ceiling, and the
-    // ceiling is the whole reason `wait_with_timeout` exists.
+    // ceiling is the whole reason `wait_feeding` exists.
     let (lines, incoming) = std::sync::mpsc::sync_channel::<String>(256);
     let reader = std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).split(b'\n') {
@@ -677,7 +666,7 @@ mod tests {
         // ceiling is an argument since the CI view's shell request wants
         // another one, and that is what removed the test-only override that
         // used to stand here.
-        let result = wait_with_timeout(cmd, Duration::from_millis(300), || "sleep 30".into());
+        let result = wait_feeding(cmd, None, Duration::from_millis(300), || "sleep 30".into());
         let elapsed = started.elapsed();
 
         let message = result.expect_err("the command should have been interrupted");
@@ -701,7 +690,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let out = wait_with_timeout(cmd, TIMEOUT, || "large output".into())
+        let out = wait_feeding(cmd, None, TIMEOUT, || "large output".into())
             .expect("the command must finish");
         assert_eq!(out.stdout.len(), 2_000_000);
     }
@@ -717,7 +706,7 @@ mod tests {
             .stderr(Stdio::piped());
 
         let started = Instant::now();
-        let out = wait_with_timeout(cmd, TIMEOUT, || "daemon".into()).expect("it exited");
+        let out = wait_feeding(cmd, None, TIMEOUT, || "daemon".into()).expect("it exited");
         let elapsed = started.elapsed();
 
         assert!(out.status.success());
