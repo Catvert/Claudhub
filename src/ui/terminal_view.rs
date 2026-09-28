@@ -52,6 +52,50 @@ const AGENT_WARMUP: std::time::Duration = std::time::Duration::from_millis(2000)
 /// The silence between the paste and the carriage return that confirms it.
 const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// How far apart the terminals nobody types in are repainted.
+const PAINT_PERIOD: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// The terminals waiting for the next shared repaint.
+///
+/// **One clock for all of them, not a notify per burst**: a Claude at work
+/// writes ten or fifteen times a second, and four of them out of phase asked
+/// for a frame at every refresh of the screen — each one a render of the
+/// whole root, which on the home screen is the whole home screen. Gathered
+/// here, their notifies land in one update, and gpui draws them in one
+/// frame: thirty a second at most, however many agents are writing. The
+/// terminal under the hand is not on it — typing answers at once.
+#[derive(Default)]
+struct PaintClock {
+    due: Vec<gpui_kit::WeakEntity<TerminalView>>,
+    armed: bool,
+}
+
+impl gpui_kit::Global for PaintClock {}
+
+fn paint_later(view: gpui_kit::WeakEntity<TerminalView>, cx: &mut App) {
+    let clock = cx.default_global::<PaintClock>();
+    if !clock.due.contains(&view) {
+        clock.due.push(view);
+    }
+    if std::mem::replace(&mut clock.armed, true) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(PAINT_PERIOD).await;
+        cx.update(|cx| {
+            let due = {
+                let clock = cx.default_global::<PaintClock>();
+                clock.armed = false;
+                std::mem::take(&mut clock.due)
+            };
+            for view in due {
+                let _ = view.update(cx, |_, cx| cx.notify());
+            }
+        });
+    })
+    .detach();
+}
+
 /// One terminal tab.
 pub struct TerminalView {
     terminal: Terminal,
@@ -139,6 +183,9 @@ pub struct TerminalView {
     runs_command: bool,
     /// Set while the home screen shows it — see `set_canvas`.
     canvas: Option<Canvas>,
+    /// What `label` answers, in an entity of its own that only a new title
+    /// notifies — see `OpenTerminal::shown`.
+    shown: Entity<SharedString>,
 }
 
 /// The pty's child has exited, and the tab was a shell — nothing to keep.
@@ -216,13 +263,20 @@ impl TerminalView {
                     batch.push(next);
                 }
                 let alive = this
-                    .update(cx, |view, cx| {
+                    .update_in(cx, |view, window, cx| {
                         for event in batch {
                             match event {
                                 TerminalEvent::Wakeup => {}
                                 TerminalEvent::Title(title) => {
                                     view.title = SharedString::from(title.clone());
                                     view.terminal.set_title(title);
+                                    let label = view.label();
+                                    view.shown.update(cx, |shown, cx| {
+                                        if *shown != label {
+                                            *shown = label;
+                                            cx.notify();
+                                        }
+                                    });
                                 }
                                 TerminalEvent::Bell => {}
                                 // The child is gone and the tab has nothing left to
@@ -251,7 +305,13 @@ impl TerminalView {
                             }
                         }
                         view.take_snapshot();
-                        cx.notify();
+                        // The one being typed in answers at once; the others
+                        // on the shared clock — see `PaintClock`.
+                        if view.focus.is_focused(window) {
+                            cx.notify();
+                        } else {
+                            paint_later(cx.entity().downgrade(), cx);
+                        }
                     })
                     .is_ok();
                 if !alive {
@@ -281,10 +341,11 @@ impl TerminalView {
             pending_size: None,
             resize_scheduled: false,
             resized_at: std::time::Instant::now(),
-            label,
             agent,
             runs_command,
             canvas: None,
+            shown: cx.new(|_| label.clone()),
+            label,
         }
     }
 
@@ -369,6 +430,11 @@ impl TerminalView {
     /// The pty's child: the agent itself, for an agent's tab on Linux.
     pub fn child(&self) -> Option<u32> {
         self.terminal.child()
+    }
+
+    /// `label`, as an entity only a new title notifies.
+    pub fn shown_label(&self) -> Entity<SharedString> {
+        self.shown.clone()
     }
 
     /// What a hand typed at the shell's prompt and is running now.
@@ -1905,9 +1971,42 @@ pub struct OpenTerminal {
     /// ended. A recipe that fails on its own keeps its tab, which is where
     /// its error is read; one stopped by hand has nothing left to say.
     pub stopping: bool,
+    /// What a render asks of the view, kept here so that it does not read
+    /// the view — **an entity read during a draw is one whose every notify
+    /// redraws the window**, and a terminal notifies at every burst of
+    /// output. Reading every terminal to lay the home screen out made each
+    /// Claude, shown or not, redraw the whole of it at the screen's rate.
+    ///
+    /// The child and the focus handle do not change for a view's life, the
+    /// end arrives by `TerminalEnded`, the canvas is only ever set from here
+    /// (`place`), and the label is an entity of its own, notified by a new
+    /// title alone.
+    pub child: Option<u32>,
+    pub focus: FocusHandle,
+    pub exited: bool,
+    canvas: Option<Canvas>,
+    shown: Entity<SharedString>,
 }
 
-impl OpenTerminal {}
+impl OpenTerminal {
+    /// The tab's name: the one given by hand, or what the program says.
+    pub fn label(&self, cx: &App) -> SharedString {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.shown.read(cx).clone())
+    }
+
+    /// Hands the view its place on the home screen, if that changed — the
+    /// only way it is handed one, which is what lets the copy here answer
+    /// without reading the view.
+    pub fn place(&mut self, canvas: Option<Canvas>, cx: &mut App) {
+        if self.canvas == canvas {
+            return;
+        }
+        self.canvas = canvas;
+        self.view.update(cx, |view, cx| view.set_canvas(canvas, cx));
+    }
+}
 
 /// A terminal as the home screen holds it: the plane's zoom, and the size of
 /// its grid in plane units.
@@ -2119,6 +2218,9 @@ impl ClaudhubApp {
             &view,
             window,
             |this, view, _: &TerminalEnded, window, cx| {
+                if let Some(terminal) = this.terminal_mut(view.entity_id().as_u64()) {
+                    terminal.exited = true;
+                }
                 let stopped = this
                     .terminal(view.entity_id().as_u64())
                     .is_some_and(|terminal| terminal.stopping);
@@ -2137,7 +2239,21 @@ impl ClaudhubApp {
             },
         )
         .detach();
+        let (child, focus, exited, shown) = {
+            let view = view.read(cx);
+            (
+                view.child(),
+                view.focus_handle(cx),
+                view.has_exited(),
+                view.shown_label(),
+            )
+        };
         self.terminals.push(OpenTerminal {
+            child,
+            focus,
+            exited,
+            canvas: None,
+            shown,
             worktree: worktree.clone(),
             view: view.clone(),
             name: None,
@@ -2277,10 +2393,7 @@ impl ClaudhubApp {
         let Some(terminal) = self.terminal(view.as_u64()) else {
             return SharedString::default();
         };
-        terminal
-            .name
-            .clone()
-            .unwrap_or_else(|| terminal.view.read(cx).label())
+        terminal.label(cx)
     }
 
     /// Renames a terminal, or gives it its program's name back.
@@ -2838,7 +2951,7 @@ impl ClaudhubApp {
                     // child, and it is not the one Claude names.
                     pid: match &terminal.typed {
                         Some((_, _, pid)) => Some(*pid),
-                        None => terminal.view.read(cx).child(),
+                        None => terminal.child,
                     },
                 }
             })

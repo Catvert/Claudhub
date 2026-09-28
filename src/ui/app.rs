@@ -1190,11 +1190,8 @@ pub struct ClaudhubApp {
     pub(super) focus_sidebar_scroll: gpui_kit::ScrollHandle,
     /// The one node a laid-out view shows, filling it — its « maximise ».
     pub(super) overview_zoomed: Option<crate::ui::overview::Node>,
-    /// An agent is at work, or waits, on the plane as of the last frame: its
-    /// links move, and want frames of their own — this far apart.
-    pub(super) overview_flow_frame: Option<std::time::Duration>,
-    /// The frames for them are being asked for.
-    pub(super) overview_flow_ticking: bool,
+    /// How often the window renders, for the journal — see `ui::frames`.
+    frame_rate: super::frames::FrameRate,
     /// The Claude processes as they last wrote themselves down, status
     /// included — see `agent::ClaudeProcess`.
     pub(super) claude_processes: Vec<crate::agent::ClaudeProcess>,
@@ -1694,8 +1691,7 @@ impl ClaudhubApp {
             focus_scroll: gpui_kit::ScrollHandle::new(),
             focus_sidebar_scroll: gpui_kit::ScrollHandle::new(),
             overview_zoomed: None,
-            overview_flow_frame: None,
-            overview_flow_ticking: false,
+            frame_rate: super::frames::FrameRate::new(std::time::Instant::now()),
             claude_processes: Vec::new(),
             outlines: HashMap::new(),
             zen_folded: Vec::new(),
@@ -2396,6 +2392,12 @@ impl ClaudhubApp {
         // The vault is not inside the worktree, and what changes there is not
         // read with `git status`: it is the folder itself that has to be re-read.
         if let Some(vault) = vault.clone() {
+            // Except the agents' sheet, which is ours and no note: rewritten
+            // every ten seconds while agents work, it had the whole vault
+            // read and parsed again each time, for nothing that shows.
+            if crate::wslpath::join(&vault, super::canvas_view::CONTEXT) == path {
+                return;
+            }
             if path.starts_with(&vault) {
                 self.git.send(Cmd::ReadNotes {
                     worktree: active,
@@ -4953,6 +4955,36 @@ impl Focusable for ClaudhubApp {
 
 impl Render for ClaudhubApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let start = std::time::Instant::now();
+        let element = self.render_window(window, cx);
+        let now = std::time::Instant::now();
+        if let Some(report) = self.frame_rate.record(now, now - start) {
+            let level = if report.busy() {
+                log::Level::Info
+            } else {
+                log::Level::Debug
+            };
+            log::log!(
+                level,
+                "window rendered {} times in {:.0} s ({:.1}/s) on the {}, root render {:.1} ms on average, {:.1} ms at worst",
+                report.frames,
+                report.span.as_secs_f32(),
+                report.per_second(),
+                if self.overview { "home screen" } else { "editor" },
+                report.average_ms(),
+                report.slowest.as_secs_f32() * 1000.,
+            );
+        }
+        element
+    }
+}
+
+impl ClaudhubApp {
+    fn render_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         // What was said between two frames, before anything is painted: see
         // `flush_notes`.
         self.flush_notes(window, cx);
@@ -5001,6 +5033,7 @@ impl Render for ClaudhubApp {
                         .child(self.render_status_bar(cx))
                 }
             })
+            .into_any_element()
     }
 }
 

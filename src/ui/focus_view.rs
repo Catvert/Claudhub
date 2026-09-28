@@ -38,9 +38,7 @@ use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel, ResizableState},
     v_flex, ActiveTheme, Selectable as _, Sizable as _,
 };
-use gpui_kit::{
-    canvas, div, point, prelude::*, px, AnyElement, App, Context, Pixels, SharedString, Window,
-};
+use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, Pixels, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -1856,12 +1854,7 @@ impl ClaudhubApp {
             Node::Terminal(id) => (
                 "square-terminal",
                 self.terminal(*id)
-                    .map(|terminal| {
-                        terminal
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| terminal.view.read(cx).label())
-                    })
+                    .map(|terminal| terminal.label(cx))
                     .unwrap_or_default(),
             ),
             Node::Note(path) => (
@@ -1958,10 +1951,9 @@ fn centered(text: SharedString, cx: &mut Context<ClaudhubApp>) -> AnyElement {
 
 /// A sidebar entry's signal when its agents work or wait: **its own left
 /// edge**, where the selection's bar is, and not a box drawn round it — a
-/// dashed frame over a selected band spoke two languages at once. Working,
-/// the edge glows in the tone of work and a bright run goes down it;
-/// waiting, it breathes in the tone of a question. `inset` keeps it off the
-/// ends of an entry with rounded corners.
+/// dashed frame over a selected band spoke two languages at once. The edge
+/// takes the tone of work, or of a question, and holds still. `inset` keeps
+/// it off the ends of an entry with rounded corners.
 fn outline_of(doing: Option<&Doing>, theme: &gpui_kit::component::Theme) -> Option<AnyElement> {
     edge_signal(doing, 0., theme)
 }
@@ -1973,44 +1965,16 @@ pub(super) fn edge_signal(
 ) -> Option<AnyElement> {
     let doing = doing.copied().filter(|doing| *doing != Doing::Rest)?;
     let tint = super::theme::doing_color(doing, theme)?;
-    let seconds = super::overview_view::flow_seconds();
     Some(
-        canvas(
-            move |_, _, _| {},
-            move |bounds, _, window, _| {
-                let (x, y) = (bounds.origin.x, bounds.origin.y);
-                let (w, h) = (bounds.size.width, bounds.size.height);
-                let bar = |top: f32, bottom: f32, color: gpui_kit::Hsla| {
-                    gpui_kit::fill(
-                        gpui_kit::Bounds::new(
-                            point(x, y + px(top)),
-                            gpui_kit::size(w, px(bottom - top)),
-                        ),
-                        color,
-                    )
-                    .corner_radii(w / 2.)
-                };
-                let height = f32::from(h);
-                match doing {
-                    Doing::Waiting => {
-                        let breath = overview::breath(seconds, super::overview_view::PULSE_PERIOD);
-                        window.paint_quad(bar(0., height, tint.opacity(0.35 + 0.65 * breath)));
-                    }
-                    _ => {
-                        window.paint_quad(bar(0., height, tint.opacity(0.3)));
-                        if let Some((top, bottom)) = focus::edge_run(height, seconds) {
-                            window.paint_quad(bar(top, bottom, tint));
-                        }
-                    }
-                }
-            },
-        )
-        .absolute()
-        .left_0()
-        .top(px(inset))
-        .bottom(px(inset))
-        .w(px(3.))
-        .into_any_element(),
+        div()
+            .absolute()
+            .left_0()
+            .top(px(inset))
+            .bottom(px(inset))
+            .w(px(3.))
+            .rounded_full()
+            .bg(tint)
+            .into_any_element(),
     )
 }
 

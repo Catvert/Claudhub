@@ -27,6 +27,7 @@ mod focus;
 mod focus_view;
 mod folds;
 mod follow;
+mod frames;
 mod github;
 mod highlight;
 mod history_view;

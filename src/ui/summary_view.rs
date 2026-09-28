@@ -1410,7 +1410,7 @@ impl ClaudhubApp {
         let configs: Vec<_> = self
             .run_configs(path)
             .into_iter()
-            .filter(|config| self.runs(path, config, cx))
+            .filter(|config| self.runs(path, config))
             .collect();
         if configs.is_empty() {
             return None;
@@ -1420,7 +1420,7 @@ impl ClaudhubApp {
             .into_iter()
             .enumerate()
             .map(|(index, config)| {
-                let running = self.runs(path, &config, cx);
+                let running = self.runs(path, &config);
                 let name = Self::config_name(&config);
                 let is_env = matches!(config, super::run::RunConfig::Env);
                 let (start_path, start_config) = (path.to_path_buf(), config.clone());

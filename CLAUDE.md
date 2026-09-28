@@ -189,6 +189,7 @@ src/
                      relevé attend encore sa réponse — pur
     shortcuts.rs / shortcuts_view.rs / vscode.rs  les touches et leur aide
     motion.rs / scroll.rs  le lissage de la molette, les barres de défilement
+    frames.rs        combien de rendus par seconde, pour le journal — pur
     theme.rs / icons.rs
 ```
 
@@ -473,11 +474,11 @@ parent centré sur ses enfants.
   (`focus_dialog`, différé) : sinon ses boutons dispatchent depuis le terminal
   où la croix a été pressée, et OK ne fait rien.
 - **Les liens** partent du côté qui fait face à l'enfant (`overview::attach`),
-  en coude ; celui d'un agent au travail coule, celui d'un agent qui attend
-  respire (`overview::at_work`, `tile_outline`). Ce qui décide est le **statut
-  que Claude écrit pour son pid**, puis le mot des hooks, puis la devinette par
-  le processeur. gpui n'a pas de décalage de tirets : `overview::dash_array`,
-  recalculé à chaque image tant qu'un lien bouge (`tick_flow`).
+  en coude ; celui d'un agent au travail est orange, celui d'un agent qui
+  attend rouge, comme le contour de son terminal (`overview::at_work`,
+  `tile_outline`). Ce qui décide est le **statut que Claude écrit pour son
+  pid**, puis le mot des hooks, puis la devinette par le processeur. **Rien
+  n'y est animé** : chaque image d'une animation re-rendait l'accueil entier.
 
 **Les nœuds de l'accueil sont des fichiers** (`crate::canvas`,
 `ui::canvas_view`) : un Markdown à en-tête plat par nœud, dans
@@ -797,6 +798,12 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   (`ui::notify`, `announce`) ; sans fenêtre, par `pending_notes`. Bornée deux
   fois : quatorze lignes, et un plafond au tiers de la fenêtre posé sur le
   **corps**.
+- **Une entité lue pendant un dessin redessine la fenêtre à chacun de ses
+  `notify`**, et tout ce qui n'est pas une vue en cache se re-rend avec elle.
+  Un rendu ne lit donc pas les vues de terminal (elles notifient à chaque
+  sortie) : il lit les copies d'`OpenTerminal` (`label`, `child`, `focus`,
+  `exited`, `place`). Sur l'accueil, peint tout entier par la racine, un
+  seul Claude caché le redessinait à la cadence de l'écran.
 - **Un handle de focus survit à l'élément qui le portait**, et la fenêtre
   devient sourde à toutes nos liaisons ; `app::reclaim_stranded_focus`, en tête
   de rendu, est le filet.

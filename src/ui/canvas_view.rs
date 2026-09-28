@@ -1073,11 +1073,7 @@ impl ClaudhubApp {
                         .iter()
                         .filter(|t| t.worktree == worktree.path)
                         .map(|t| {
-                            let label = t
-                                .name
-                                .clone()
-                                .unwrap_or_else(|| t.view.read(cx).label())
-                                .to_string();
+                            let label = t.label(cx).to_string();
                             let agent =
                                 matches!(t.relaunch, Some(super::store::Relaunch::Agent { .. }))
                                     || t.typed.is_some();

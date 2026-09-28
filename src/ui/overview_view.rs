@@ -42,19 +42,6 @@ use super::overview::{self, Checkout, Group, HomeMode, LinkKind, Node, Plan, Rec
 use super::terminal_view::{Canvas, Launch};
 use crate::tr;
 
-/// How often a flowing link moves: thirty frames a second is motion to the
-/// eye, and half what the display would ask — each one paints the screen.
-const FLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
-/// How often a waiting link pulses, when nothing flows: a breath is slow,
-/// and a question can wait for hours — at half the frames.
-const PULSE_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
-/// A waiting link's breath, in seconds.
-pub(super) const PULSE_PERIOD: f32 = 1.6;
-
-/// When the links started flowing, once: their phase is read off the clock,
-/// so a frame late is a step longer and not a slower march.
-static FLOW_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
 /// Below this zoom, cards are read and not handled.
 pub(super) const DETAIL: f32 = 0.55;
 /// The commits a card lists.
@@ -348,7 +335,7 @@ impl ClaudhubApp {
             self.overview_fitted = false;
         }
         let sidebar = self.render_focus_sidebar(&frame.shown, &frame.doings, cx);
-        let plane = self.render_overview_plane(&frame.doings, window, cx);
+        let plane = self.render_overview_plane(window, cx);
         h_flex()
             .relative()
             .flex_1()
@@ -366,14 +353,8 @@ impl ClaudhubApp {
     }
 
     /// The plane itself: every node of the worktrees on show, their links,
-    /// and the gestures that move them — `doings`, what the sidebar dresses,
-    /// asking for frames too.
-    fn render_overview_plane(
-        &mut self,
-        doings: &super::focus_view::Doings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// and the gestures that move them.
+    fn render_overview_plane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut plan = self.overview_plan();
         // A node came or went since the last frame: what was on screen stays
         // where it stood — see `overview::hold`.
@@ -403,7 +384,7 @@ impl ClaudhubApp {
         let focused = self
             .terminals
             .iter()
-            .find(|terminal| terminal.view.focus_handle(cx).contains_focused(window, cx))
+            .find(|terminal| terminal.focus.contains_focused(window, cx))
             .map(|terminal| terminal.view.entity_id());
         if focused.is_some() && focused != self.overview_seen && size.0 > 0. {
             if let Some(rect) = focused.and_then(|id| plan.tile(id.as_u64())) {
@@ -423,15 +404,13 @@ impl ClaudhubApp {
         }
         let view = self.overview_view;
         // Every terminal learns the zoom and its card's grid before it paints.
-        for terminal in &self.terminals {
+        for terminal in &mut self.terminals {
             let (w, h) = terminal.size;
             let canvas = Canvas {
                 zoom: view.zoom,
                 size: (w, h - overview::HEAD),
             };
-            terminal
-                .view
-                .update(cx, |view, cx| view.set_canvas(Some(canvas), cx));
+            terminal.place(Some(canvas), cx);
         }
 
         let rem = window.rem_size() * view.zoom;
@@ -454,22 +433,9 @@ impl ClaudhubApp {
         .absolute()
         .size_full();
 
-        // An agent at work flows along the link to it, one that waits
-        // pulses, and both need frames nobody else asks for. Under a
-        // maximised node the links are under the veil: nothing to move.
+        // An agent at work or waiting colours the link to it.
         let cards: Vec<PathBuf> = plan.cards.iter().map(|card| card.path.clone()).collect();
-        let at_work = self.overview_at_work(Some(&plan), &self.worktree_doings(&cards), cx);
-        let moving: Vec<overview::Doing> = if self.overview_maximized.is_none() {
-            at_work
-                .terminals
-                .values()
-                .chain(at_work.cards.values())
-                .copied()
-                .collect()
-        } else {
-            Vec::new()
-        };
-        self.ask_flow_frames(moving.into_iter().chain(doings.values().copied()), cx);
+        let at_work = self.overview_at_work(Some(&plan), &self.worktree_doings(&cards));
         let links = self.render_links(&plan, view, &at_work, cx);
         // A node of the plane that is not a terminal: its box where the plan
         // puts it, under the plane's `rem`, and its corner to size it by.
@@ -695,16 +661,12 @@ impl ClaudhubApp {
     }
 
     /// What the focus view needs before it paints: who is at work among
-    /// the worktrees `shown`, the frames that makes them move, and the
-    /// terminals told to measure their own box, as in the dock.
+    /// the worktrees `shown`, and the terminals told to measure their own
+    /// box, as in the dock.
     ///
     /// **What the plane's links said, the boxes say**: with no links, an
     /// agent at work or waiting dresses its terminal's outline, and — with
     /// no agent terminal on show — its card's.
-    ///
-    /// **Only what is on screen asks for frames**: the boards shown, and
-    /// the sidebar's outlines — `listed`, what each worktree it shows says.
-    /// A worktree folded away in it moves nothing.
     pub(super) fn prepare_laid_out(
         &mut self,
         shown: &[PathBuf],
@@ -712,7 +674,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> overview::AtWork {
         // Every live worktree's, which `listed` is: see `HomeFrame`.
-        let mut at_work = self.overview_at_work(None, listed, cx);
+        let mut at_work = self.overview_at_work(None, listed);
         let on_screen: std::collections::HashSet<u64> = self
             .terminals
             .iter()
@@ -721,18 +683,8 @@ impl ClaudhubApp {
             .collect();
         at_work.terminals.retain(|id, _| on_screen.contains(id));
         at_work.cards.retain(|path, _| shown.contains(path));
-        let moving: Vec<overview::Doing> = at_work
-            .terminals
-            .values()
-            .chain(at_work.cards.values())
-            .chain(listed.values())
-            .copied()
-            .collect();
-        self.ask_flow_frames(moving.into_iter(), cx);
-        for terminal in &self.terminals {
-            terminal
-                .view
-                .update(cx, |view, cx| view.set_canvas(None, cx));
+        for terminal in &mut self.terminals {
+            terminal.place(None, cx);
         }
         at_work
     }
@@ -1203,10 +1155,8 @@ impl ClaudhubApp {
         super::store::Store::update_global(cx, |store| store.session.home_mode = mode);
         // The terminals measure their own box when laid out, and are told
         // their card's grid again on the plane's next frame.
-        for terminal in &self.terminals {
-            terminal
-                .view
-                .update(cx, |view, cx| view.set_canvas(None, cx));
+        for terminal in &mut self.terminals {
+            terminal.place(None, cx);
         }
         self.reframe(cx);
     }
@@ -1258,7 +1208,6 @@ impl ClaudhubApp {
         &self,
         plan: Option<&Plan>,
         worktrees: &super::focus_view::Doings,
-        cx: &App,
     ) -> overview::AtWork {
         use overview::Doing;
         let status = |pid: Option<u32>, session: Option<&str>| {
@@ -1287,7 +1236,7 @@ impl ClaudhubApp {
                     .typed
                     .as_ref()
                     .map(|(_, _, pid)| *pid)
-                    .or_else(|| terminal.view.read(cx).child());
+                    .or(terminal.child);
                 let session = terminal.session.as_deref();
                 let claude = status(pid, session);
                 overview::AgentTile {
@@ -1316,66 +1265,13 @@ impl ClaudhubApp {
         overview::at_work(&tiles, &worktrees)
     }
 
-    /// The frames what moves on screen needs: thirty a second while
-    /// something flows, fifteen while it only breathes, none at rest.
-    fn ask_flow_frames(
-        &mut self,
-        moving: impl Iterator<Item = overview::Doing>,
-        cx: &mut Context<Self>,
-    ) {
-        let loudest = moving.fold(None, |frame, doing| match doing {
-            overview::Doing::Working => Some(FLOW_FRAME),
-            overview::Doing::Waiting => frame.or(Some(PULSE_FRAME)),
-            overview::Doing::Rest => frame,
-        });
-        self.overview_flow_frame = loudest;
-        if loudest.is_some() {
-            self.tick_flow(cx);
-        }
-    }
-
-    /// Asks for the frames a link moves by, for as long as one moves and the
-    /// screen is up — the last frame that saw none ends it. The spacing is
-    /// read again at every one: a pulse wants fewer than a flow.
-    fn tick_flow(&mut self, cx: &mut Context<Self>) {
-        if self.overview_flow_ticking {
-            return;
-        }
-        self.overview_flow_ticking = true;
-        cx.spawn(async move |this, cx| {
-            let mut frame = FLOW_FRAME;
-            loop {
-                cx.background_executor().timer(frame).await;
-                let next = this
-                    .update(cx, |this, cx| {
-                        let next = this.overview_flow_frame.filter(|_| this.overview);
-                        if next.is_some() {
-                            cx.notify();
-                        } else {
-                            this.overview_flow_ticking = false;
-                        }
-                        next
-                    })
-                    .ok()
-                    .flatten();
-                match next {
-                    Some(next) => frame = next,
-                    None => break,
-                }
-            }
-        })
-        .detach();
-    }
-
     /// The lines between the nodes, under them.
     ///
-    /// **A link to an agent at work flows**: dashes march from the card to
-    /// the terminal and a comet runs down the line, in the colour the badge
-    /// gives work, over a glow. **One to an agent that waits pulses**, in the
-    /// colour the badge gives a question: the line breathes, and a beacon
-    /// pings where it meets the terminal — nothing travels, nothing is under
-    /// way. The phase is read off a clock and not counted in frames, the
-    /// frames being ours to skip.
+    /// **A link to an agent at work is in the colour the badge gives work,
+    /// one to an agent that waits in the colour of a question** — and
+    /// still. They used to flow and breathe: every frame of it re-rendered
+    /// the whole home screen, thirty a second for as long as an agent
+    /// worked, and a colour says the same.
     fn render_links(
         &self,
         plan: &Plan,
@@ -1404,13 +1300,8 @@ impl ClaudhubApp {
         let lit = cx.theme().ring;
         let work = cx.theme().warning;
         let asks = cx.theme().danger;
-        let spark = gpui_kit::Hsla {
-            l: (work.l + 0.25).min(0.95),
-            ..work
-        };
         let width = px((1.5 * view.zoom).clamp(1., 2.5));
         let zoom = view.zoom;
-        let seconds = flow_seconds();
         canvas(
             move |_, _, _| {},
             move |bounds, _, window, _| {
@@ -1431,51 +1322,14 @@ impl ClaudhubApp {
                     // half way, into the child square to its own — and the
                     // two corners rounded, never wider than half a leg.
                     let points = overview::elbow(link.from, link.from_side, link.to);
-                    if !flows {
-                        if let Some(path) = trace(&points, zoom, width, None, &at) {
-                            window.paint_path(path, if on { lit } else { quiet });
-                        }
-                        continue;
-                    }
-                    if doing == overview::Doing::Waiting {
-                        let breath = overview::breath(seconds, PULSE_PERIOD);
-                        if let Some(path) = trace(&points, zoom, width * 4., None, &at) {
-                            window.paint_path(path, asks.opacity(0.06 + 0.16 * breath));
-                        }
-                        if let Some(path) = trace(&points, zoom, width, None, &at) {
-                            window.paint_path(path, asks.opacity(0.5 + 0.5 * breath));
-                        }
-                        // The beacon: a dot on the terminal's edge, and a ring
-                        // leaving it and fading, once a breath.
-                        let end = at(points[3]);
-                        let dot = (3. * zoom).clamp(2.5, 4.5);
-                        let ping = (seconds / PULSE_PERIOD).fract();
-                        let ring = dot + ping * (10. * zoom).clamp(6., 14.);
-                        window.paint_quad(disc(end, ring, asks.opacity(0.45 * (1. - ping))));
-                        window.paint_quad(disc(end, dot, asks));
-                        continue;
-                    }
-                    let length = overview::length(&points);
-                    // A glow under the line, the line itself dimmed, then
-                    // what moves along it.
-                    if let Some(path) = trace(&points, zoom, width * 4., None, &at) {
-                        window.paint_path(path, work.opacity(0.14));
-                    }
-                    if let Some(path) = trace(&points, zoom, width, None, &at) {
-                        window.paint_path(path, work.opacity(0.35));
-                    }
-                    let (dash, gap) = ((7. * zoom).max(4.), (9. * zoom).max(5.));
-                    let marching = overview::marching(length, seconds * 30. * zoom, dash, gap);
-                    let dashes = overview::dash_array(&marching);
-                    if let Some(path) = trace(&points, zoom, width, Some(&dashes), &at) {
-                        window.paint_path(path, work);
-                    }
-                    let tail = (36. * zoom).max(16.);
-                    if let Some(stretch) = overview::comet(length, seconds * 160. * zoom, tail) {
-                        let dashes = overview::dash_array(&[stretch]);
-                        if let Some(path) = trace(&points, zoom, width * 2., Some(&dashes), &at) {
-                            window.paint_path(path, spark);
-                        }
+                    let color = match doing {
+                        overview::Doing::Working => work,
+                        overview::Doing::Waiting => asks,
+                        overview::Doing::Rest if on => lit,
+                        overview::Doing::Rest => quiet,
+                    };
+                    if let Some(path) = trace(&points, zoom, width, &at) {
+                        window.paint_path(path, color);
                     }
                 }
             },
@@ -1483,17 +1337,6 @@ impl ClaudhubApp {
         .absolute()
         .size_full()
     }
-}
-
-/// Where the moving links are in their motion: seconds since they first
-/// moved, read off the clock.
-pub(super) fn flow_seconds() -> f32 {
-    FLOW_EPOCH
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs_f64()
-        // A jump every ten minutes, where hours of f32 would stutter.
-        .rem_euclid(600.) as f32
 }
 
 /// What Claude writes for its pid, as a link shows it.
@@ -1515,11 +1358,9 @@ pub(super) fn heard(activity: &crate::agent::Activity) -> overview::Doing {
 }
 
 /// A terminal's outline, over it: the theme's line at rest — the ring when
-/// it has the focus — and **the link's own dress when its agent works or
-/// waits**, so that the link and the box it leads to read as one signal:
-/// dashes going round over a glow, or a breathing line. The link's comet
-/// stays on the link: going round a box, a white line chasing itself read
-/// as noise rather than work.
+/// it has the focus — and **the link's own colour when its agent works or
+/// waits**, a line wider and still, so that the link and the box it leads
+/// to read as one signal.
 pub(super) fn tile_outline(
     doing: overview::Doing,
     focused: bool,
@@ -1534,120 +1375,23 @@ pub(super) fn tile_outline(
 pub(super) fn outline_rounded(
     doing: overview::Doing,
     focused: bool,
-    zoom: f32,
+    _zoom: f32,
     radius: Pixels,
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
-    let rounded = radius;
-    let radius = f32::from(radius);
-    if doing == overview::Doing::Rest {
-        return div()
-            .absolute()
-            .inset_0()
-            .rounded(rounded)
-            .border_1()
-            .border_color(if focused { theme.ring } else { theme.border })
-            .into_any_element();
-    }
-    let tint = super::theme::doing_color(doing, theme).unwrap_or(theme.border);
-    let width = (1.5 * zoom).clamp(1., 2.5);
-    let seconds = flow_seconds();
-    canvas(
-        move |_, _, _| {},
-        move |bounds, _, window, _| {
-            // Inside the box by half a line, so that nothing of the stroke
-            // falls outside what the node covers.
-            let inset = width / 2.;
-            let (x, y) = (
-                f32::from(bounds.origin.x) + inset,
-                f32::from(bounds.origin.y) + inset,
-            );
-            let (w, h) = (
-                f32::from(bounds.size.width) - width,
-                f32::from(bounds.size.height) - width,
-            );
-            if w <= 0. || h <= 0. {
-                return;
-            }
-            let r = radius.min(w / 2.).min(h / 2.);
-            let length = overview::outline_length(w, h, r);
-            let stroke =
-                |line: f32, dashes: Option<&[f32]>| outline(x, y, w, h, r, px(line), dashes);
-            match doing {
-                overview::Doing::Waiting => {
-                    let breath = overview::breath(seconds, PULSE_PERIOD);
-                    if let Some(path) = stroke(width * 4., None) {
-                        window.paint_path(path, tint.opacity(0.06 + 0.16 * breath));
-                    }
-                    if let Some(path) = stroke(width, None) {
-                        window.paint_path(path, tint.opacity(0.5 + 0.5 * breath));
-                    }
-                }
-                _ => {
-                    if let Some(path) = stroke(width * 4., None) {
-                        window.paint_path(path, tint.opacity(0.14));
-                    }
-                    if let Some(path) = stroke(width, None) {
-                        window.paint_path(path, tint.opacity(0.35));
-                    }
-                    let (dash, gap) = ((7. * zoom).max(4.), (9. * zoom).max(5.));
-                    let marching =
-                        overview::marching_round(length, seconds * 30. * zoom, dash, gap);
-                    if let Some(path) = stroke(width, Some(&overview::dash_array(&marching))) {
-                        window.paint_path(path, tint);
-                    }
-                }
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
-    .into_any_element()
-}
-
-/// A rounded rectangle's outline as a stroke, clockwise from the end of the
-/// top-left corner — all of it, or the stretches a dash array lights. The
-/// corners are quarter circles, as `overview::outline_length` measures them.
-fn outline(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    r: f32,
-    width: Pixels,
-    dashes: Option<&[f32]>,
-) -> Option<gpui_kit::Path<Pixels>> {
-    let mut path = PathBuilder::stroke(width);
-    if let Some(dashes) = dashes {
-        if dashes.is_empty() {
-            return None;
-        }
-        let dashes: Vec<Pixels> = dashes.iter().map(|&d| px(d)).collect();
-        path = path.dash_array(&dashes);
-    }
-    let at = |px_: f32, py: f32| point(px(px_), px(py));
-    // A quarter circle as a cubic: the control points this far along the
-    // tangents.
-    let k = 0.552_284_8 * r;
-    let (right, bottom) = (x + w, y + h);
-    path.move_to(at(x + r, y));
-    path.line_to(at(right - r, y));
-    path.cubic_bezier_to(at(right, y + r), at(right - r + k, y), at(right, y + r - k));
-    path.line_to(at(right, bottom - r));
-    path.cubic_bezier_to(
-        at(right - r, bottom),
-        at(right, bottom - r + k),
-        at(right - r + k, bottom),
-    );
-    path.line_to(at(x + r, bottom));
-    path.cubic_bezier_to(
-        at(x, bottom - r),
-        at(x + r - k, bottom),
-        at(x, bottom - r + k),
-    );
-    path.line_to(at(x, y + r));
-    path.cubic_bezier_to(at(x + r, y), at(x, y + r - k), at(x + r - k, y));
-    path.build().ok()
+    let (color, wide) = match super::theme::doing_color(doing, theme) {
+        Some(tint) => (tint, true),
+        None if focused => (theme.ring, false),
+        None => (theme.border, false),
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(radius)
+        .when(wide, |el| el.border_2())
+        .when(!wide, |el| el.border_1())
+        .border_color(color)
+        .into_any_element()
 }
 
 /// The line between two projects: a thin rule that fades in and out at its
@@ -1704,37 +1448,14 @@ fn height_grip(node: Node, cx: &Context<ClaudhubApp>) -> gpui_kit::Stateful<gpui
         })
 }
 
-/// A filled circle of `radius` around `centre`.
-fn disc(
-    centre: gpui_kit::Point<Pixels>,
-    radius: f32,
-    color: gpui_kit::Hsla,
-) -> gpui_kit::PaintQuad {
-    let side = px(radius * 2.);
-    gpui_kit::fill(
-        gpui_kit::Bounds::centered_at(centre, gpui_kit::size(side, side)),
-        color,
-    )
-    .corner_radii(px(radius))
-}
-
-/// A link's elbow as a stroke, its two corners rounded — all of it, or the
-/// stretches a dash array lights; `None` when there is nothing to paint.
+/// A link's elbow as a stroke, its two corners rounded.
 fn trace(
     points: &[(f32, f32); 4],
     zoom: f32,
     width: Pixels,
-    dashes: Option<&[f32]>,
     at: &impl Fn((f32, f32)) -> gpui_kit::Point<Pixels>,
 ) -> Option<gpui_kit::Path<Pixels>> {
     let mut path = PathBuilder::stroke(width);
-    if let Some(dashes) = dashes {
-        if dashes.is_empty() {
-            return None;
-        }
-        let dashes: Vec<Pixels> = dashes.iter().map(|&d| px(d)).collect();
-        path = path.dash_array(&dashes);
-    }
     let radius = (10. * zoom).max(3.);
     let length = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
     path.move_to(at(points[0]));
@@ -2459,11 +2180,8 @@ impl ClaudhubApp {
         let theme = cx.theme().clone();
         let view = terminal.view.clone();
         let id = view.entity_id();
-        let focused = view.focus_handle(cx).contains_focused(window, cx);
-        let label = terminal
-            .name
-            .clone()
-            .unwrap_or_else(|| view.read(cx).label());
+        let focused = terminal.focus.contains_focused(window, cx);
+        let label = terminal.label(cx);
         let detail = zoom >= DETAIL;
         let folded = self
             .overview_hand
@@ -2611,7 +2329,7 @@ impl ClaudhubApp {
         let focused = self
             .terminals
             .iter()
-            .any(|terminal| terminal.view.focus_handle(cx).contains_focused(window, cx));
+            .any(|terminal| terminal.focus.contains_focused(window, cx));
         if !focused {
             let landing = self
                 .active
@@ -2632,10 +2350,8 @@ impl ClaudhubApp {
         self.overview = false;
         super::store::Store::update_global(cx, |store| store.session.home = false);
         self.overview_drag = None;
-        for terminal in &self.terminals {
-            terminal
-                .view
-                .update(cx, |view, cx| view.set_canvas(None, cx));
+        for terminal in &mut self.terminals {
+            terminal.place(None, cx);
         }
         cx.notify();
     }

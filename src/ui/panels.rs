@@ -1998,7 +1998,19 @@ impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // No `pane_root`: the terminals have no search of their own, `Ctrl+F`
         // there belonging to the program that runs.
-        pane_frame(self.view.clone(), cx).into_any_element()
+        //
+        // **Cached**, as on the home screen: the panel re-renders at every
+        // notify of the application it observes, and a plain child would
+        // rebuild the whole grid's elements each time — what changes a
+        // terminal notifies the terminal, and a settings change refreshes
+        // the window, cache and all.
+        pane_frame(
+            self.view
+                .clone()
+                .cached(gpui_kit::StyleRefinement::default().size_full()),
+            cx,
+        )
+        .into_any_element()
     }
 }
 

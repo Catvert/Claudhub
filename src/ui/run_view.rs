@@ -54,7 +54,7 @@ impl ClaudhubApp {
     }
 
     /// Whether a configuration runs now.
-    pub(super) fn runs(&self, worktree: &Path, config: &RunConfig, cx: &Context<Self>) -> bool {
+    pub(super) fn runs(&self, worktree: &Path, config: &RunConfig) -> bool {
         match config {
             RunConfig::Env => self
                 .wt_state(worktree)
@@ -62,7 +62,7 @@ impl ClaudhubApp {
                 .unwrap_or(false),
             RunConfig::Recipe(name) => self
                 .recipe_tabs(worktree, name)
-                .any(|terminal| !terminal.view.read(cx).has_exited()),
+                .any(|terminal| !terminal.exited),
         }
     }
 
@@ -164,10 +164,10 @@ impl ClaudhubApp {
             .and_then(|snapshot| snapshot.default.clone());
         let shown = run::shown(self.run_choice.get(worktree), &configs, default.as_deref())?;
         let theme = cx.theme().clone();
-        let running = self.runs(worktree, &shown, cx);
+        let running = self.runs(worktree, &shown);
         let others = configs
             .iter()
-            .filter(|config| **config != shown && self.runs(worktree, config, cx))
+            .filter(|config| **config != shown && self.runs(worktree, config))
             .count();
         // `wt up` or `down` under way: neither of the two states, and the
         // only thing to say for the half-minute it takes.
@@ -188,7 +188,7 @@ impl ClaudhubApp {
         let menu_worktree = worktree.to_path_buf();
         let menu_items: Vec<(RunConfig, bool)> = configs
             .iter()
-            .map(|config| (config.clone(), self.runs(worktree, config, cx)))
+            .map(|config| (config.clone(), self.runs(worktree, config)))
             .collect();
         let chosen = shown.clone();
         let selector = Button::new("run-config")
