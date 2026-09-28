@@ -1057,13 +1057,10 @@ impl ClaudhubApp {
     /// and the buttons too — the same dialog is a form, then a console.
     fn open_creation_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The title is settled when the dialog opens — the gesture it belongs
-        // to does not change while it is up — because the frame closure below
-        // runs **inside `ClaudhubApp`'s own render**: the root re-emits
-        // `Root`'s layers at the end of its `render`, and reading the
-        // application from there is the double-lease panic. Everything that
-        // must follow the dialog's state — the body, and the buttons that go
-        // from "confirm" to "hide" to "close" — is a child entity, whose
-        // `render` runs once the parent has given the borrow back.
+        // to does not change while it is up. Everything that must follow the
+        // dialog's state — the body, and the buttons that go from "confirm" to
+        // "hide" to "close" — is a child entity, which reads the application
+        // from its own `render` (see "Conventions gpui").
         let title = self.creation_title();
         let app = cx.entity().downgrade();
         let view = cx.new(|_| CreationView { app });

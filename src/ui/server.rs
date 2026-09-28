@@ -85,8 +85,8 @@ impl ClaudhubApp {
     /// Starts the server up, once the window is built.
     ///
     /// Called from a task and not from the constructor: opening a dialog needs
-    /// a window already mounted, and `Root`'s layers are only installed on the
-    /// first render.
+    /// the window's `Root`, which hosts the dialogs, and Kit builds it around
+    /// this view only once the constructor has returned.
     pub(super) fn start_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // An explicit command line wins over everything: it is the test lever,
         // and the escape hatch when startup gets it wrong.

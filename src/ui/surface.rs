@@ -564,9 +564,9 @@ impl ClaudhubApp {
     ///
     /// **In the root's render and not in each field's own**, and that is the
     /// dialogs' doing: two of the four are painted from a closure `open_dialog`
-    /// calls back, in the middle of a borrow of the application, where reading
-    /// it is a panic (see "Conventions gpui"). One place for the four is also
-    /// one rule rather than two.
+    /// calls back, which until GPUI Kit 0.7 ran in the middle of a borrow of
+    /// the application (see "Conventions gpui"). One place for the four is
+    /// also one rule rather than two.
     ///
     /// A frame where nothing moved costs a comparison: both syncs remember what
     /// they last painted for, and repaint nothing when the answer is the same.

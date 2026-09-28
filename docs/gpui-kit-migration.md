@@ -1,9 +1,9 @@
-# GPUI Kit 0.6.0 migration
+# GPUI Kit migration
 
-Claudhub uses the published `gpui-kit` 0.6.0 facade. GPUI and its platform
-crates come from the matching published `gpui-pre` 0.3.x family (0.3.3 in
-`Cargo.lock`), replacing the Zed Git dependencies. Only `gpui-base` and
-`gpui-component` are overridden by the Claudhub fork.
+Claudhub uses the published `gpui-kit` 0.7.0 facade. GPUI and its platform
+crates come from the matching published `gpui-pre` family, which Kit pins
+exactly (`=0.3.7`). Only `gpui-base` and `gpui-component` are overridden by
+the Claudhub fork.
 
 The UI remains optional: `--no-default-features` builds the headless server
 without GPUI. The application keeps its embedded fonts and icons; Kit's
@@ -11,20 +11,51 @@ optional asset re-export is disabled (the component layer still depends on
 `gpui-kit-assets` internally). `tree-sitter-languages` preserves the
 existing language coverage. Claudhub still registers its PHP queries for
 Blade HTML/SQL injections and class constants, plus Nix, Dockerfile and Just.
-The application already used separate Input, Textarea and Editor APIs before
-this migration. Its Rust edition can remain 2021 while Kit uses edition 2024.
+Its Rust edition can remain 2021 while Kit uses edition 2024.
+
+## What 0.7.0 changed in Claudhub
+
+Read against the release notes of 0.6.1 to 0.7.0
+([v0.7.0](https://github.com/longbridge/gpui-kit/releases/tag/v0.7.0)):
+
+- **Window startup** goes through `gpui_kit::open_window`, which wraps the view
+  in Base's `Root` (`src/ui/mod.rs`).
+- **Kit hosts the dialog, sheet and notification layers itself**, as siblings
+  of the application view. The root view no longer re-emits them. It had a
+  consequence nothing reports: a dialog stopped being a descendant of
+  `ClaudhubApp`'s element, so the action handlers on that element — the
+  palette's `QuickUp`/`QuickOpen`, the review sheet's diff keys — no longer
+  heard what a dialog dispatched. They moved to `app::Frame`, a `RootPlugin`
+  whose `decorate` wraps the whole `Root`; the key context and the focus
+  handle stay on the view (see the comment on `ClaudhubApp::frame`).
+- **A dialog's `Fn` is no longer called from inside the root view's render**,
+  so reading the application there is no longer the double-lease panic. The
+  child entities built for that reason stay: they also carry state across
+  frames.
+- **`Theme::update`** replaces the manual token recomputation and
+  `Theme::sync_base` in `theme::apply`.
+- **`DockArea::select_panel`** (0.6.2) replaces the "move a panel onto its own
+  index" workaround in `panels.rs`.
+- **The tiles canvas is gone** (0.6.2): the `PaneRef::Tiles` arms went with it.
 
 ## Why the fork is still needed
 
-Compared against the exact upstream [v0.6.0 tag](https://github.com/longbridge/gpui-kit/releases/tag/v0.6.0)
-(`94a313a72a2513aee2780240cd322d552b2395f0`). The old Cargo.toml comment about
-one tab-style patch was stale: the locked fork revision
-`0f754153e14ca1aecfe27fd9eecf1276b540b5f2` had **34 commits**, including
-follow-up fixes, above upstream `0e2fb7ac`. All 34 rebased without conflicts
-onto v0.6.0; their combined diff still changes 29 files. The release still lacks the extension points listed below, so this upgrade
-retains the existing series.
+The fork's 34 commits were rebased from v0.6.0 onto the exact upstream v0.7.0
+tag (`0c830f4d257e69fdd17200650533ab4ca9a40cc0`). Upstream now covers part
+of three of them, which were reduced rather than dropped:
 
-Several absent APIs are directly required by Claudhub:
+- *Refuse a panel that is not the area's own*: upstream refuses it too (#3197);
+  the commit keeps only its regression test.
+- *A resize handle on the seam*: upstream sized the grab band correctly and
+  moved a dock's handle inside the dock (#3200). What remains is
+  `ResizeHandle::reach`, which carries the band across the gutter a skin puts
+  between the docks and the centre.
+- *Leave Tab to the focused view*: Tab navigation moved from `gpui-component`'s
+  `Root` to `gpui-base`'s; the guard followed it, and reads the focus trap
+  that dialogs and sheets now both register.
+
+The selection-kept-on-blur and block-caret patches were adapted to upstream's
+multi-cursor rendering (0.6.1).
 
 | Retained extension | Claudhub caller / behavior |
 | --- | --- |
@@ -34,56 +65,56 @@ Several absent APIs are directly required by Claudhub:
 | `set_cursor_hidden`, `set_caret_block` and painted decoration backgrounds | `src/ui/surface.rs`: Vim block cursor and normal-mode caret behavior |
 | `fold_candidates`, `set_folded` | `src/ui/surface.rs`: programmatic folding outside the gutter |
 | `scroll_size`, `wrapped_row_count` | `src/ui/surface.rs`: scrolling limits and content-driven editor height |
-| `WindowExt::focus_dialog` | `src/ui/settings_view.rs`: restore keyboard focus after changing settings pages |
+| `WindowExt::focus_dialog` | `src/ui/dialogs.rs`, `src/ui/settings_view.rs`: put the keyboard back on a dialog |
 | `Settings::on_select` | `src/ui/settings_view.rs`: remember the selected settings page |
+| `ResizeHandle::reach` | the dock skin: grab the divider in the gutter beside a dock |
 
 The fork also preserves behavior without a new call site: dock card geometry
-and spacing, resize targets on panel seams, split sizes surviving layout
-reconciliation, rejection of cross-area drops, moving the last side panel,
-hiding emptied dock regions, visible selection while a menu has focus,
-truncated menu labels, scrollbar hit testing through overlays, smart-case
-search, and Tab/Shift+Tab reaching the terminal outside modal surfaces.
-Gutter-mark hooks remain part of the existing patch series as well.
+and spacing, resize targets across panel gutters, split sizes surviving layout
+reconciliation, moving the last side panel, hiding emptied dock regions,
+visible selection while a menu has focus, truncated menu labels, scrollbar
+hit testing through overlays, smart-case search, and Tab/Shift+Tab reaching
+the terminal outside modal surfaces. Gutter-mark hooks remain part of the
+series as well.
 
-Removing the fork today would both break compilation and lose these
-interactions. Upstreaming these changes is still the route to removing it;
-changing the version number alone cannot replace them.
+Upstream 0.7.0 adds editor range decorations
+(`RangeDecorationCollection`, `RangeDecorationStyle::Fill`) that may make the
+fork's "painted decoration backgrounds" patch unnecessary; moving
+`surface.rs` onto them is left for a change of its own.
 
 ## Reproducible dependency source
 
-The fork is now [Catvert/gpui-kit](https://github.com/Catvert/gpui-kit). Its
-default branch, `master`, contains the rebased series, merged at
-`78aee01972ca9b845794d536e3691d718bc89e3d`. The original `claudhub` branch
-is preserved. Cargo patches pin the series tip
-`475a83b50844c2a209f76e73d72b20c6fe023c9d` for both layers; there
-are no local path dependencies. The unchanged `gpui-component-macros` and
-`gpui-kit-assets` packages follow the fork through its workspace dependencies.
-Kit itself and GPUI remain registry packages.
+The fork is [Catvert/gpui-kit](https://github.com/Catvert/gpui-kit). The
+series for 0.7.0 is on branch `claudhub-v0.7.0`; Cargo patches pin its tip
+`59b5176bc9d431741f5f3cb9a58d4588978e6094` for both layers, with no local
+path dependency. The 0.6.0 series stays on `claudhub-v0.6.0` and the fork's
+`master`. The unchanged `gpui-component-macros` and `gpui-kit-assets`
+packages follow the fork through its workspace dependencies. Kit itself and
+GPUI remain registry packages.
 
 For the next upgrade, rebase the fork's commits onto the new release tag,
 check which public hooks and behavior fixes upstream now provides, and remove
-superseded patches. Update both patch revisions together, regenerate
-`Cargo.lock`, and refresh `nix/package.nix`'s `cargoHash`.
+or reduce superseded patches. Update both patch revisions together,
+regenerate `Cargo.lock`, and refresh `nix/package.nix`'s `cargoHash` — with a
+fake hash first: see `just check-vendor`.
 
-Linux validation on 2026-09-06: all-targets check, Clippy with warnings denied,
-871 tests with UI enabled, 279 tests without default features, the headless
-server check and formatting passed. Cargo also fetched and checked the exact
-published fork revision after the temporary local overrides were removed.
-The Nix vendor build passed with the refreshed `cargoHash`.
+Linux validation on 2026-09-28: the fork's `gpui-base` (1240) and
+`gpui-component` (570) library tests; for Claudhub, `just ci` (formatting,
+Clippy with warnings denied, 1164 tests with UI enabled, the headless server
+check), 457 tests without default features, and the Nix vendor build with the
+refreshed `cargoHash`.
 
 Validation commands:
 
 ```sh
-just check
-just clippy
-just test
+just ci
 nix-shell --quiet --run 'cargo test --no-default-features'
-just check-server
-just fmt-check
 just check-vendor
 ```
 
 A Linux compile and test run does not validate Windows/macOS or interactive
-rendering. The useful manual checks are dock dragging/resizing, terminal
-Tab/Shift+Tab and the trailing + button, Vim carets/folds, and settings-page
-focus restoration.
+rendering. The useful manual checks are keyboard shortcuts inside dialogs
+(the palette's arrows and Enter, the review sheet), dock dragging/resizing
+(including dragging the bottom dock below its minimum, which now closes it),
+terminal Tab/Shift+Tab and the trailing + button, Vim carets/folds, and
+settings-page focus restoration.

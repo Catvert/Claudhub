@@ -134,7 +134,8 @@ src/
     keys.rs / mouse.rs  frappe, clic et molette → octets
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
-    app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
+    app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome ;
+                `Frame`, ce qui écoute autour du `Root` de Kit
     topbar.rs   la barre de titre de l'éditeur : menu, sélecteurs, glissement
     dock_layout.rs  l'aire unique : sa disposition, ses sièges, ses gestes
     panels.rs   les panneaux du dock, leur macro et leur registre
@@ -523,9 +524,11 @@ l'accueil relit les projets affichés toutes les deux secondes ; la main n'y
   voisines) : une liste virtualisée réserve exactement ce qu'on lui annonce.
 - **La gouttière est un cran de luminosité sous la carte** (`theme::gutter_of`),
   du côté où il y a de la place.
-- **`Theme::tokens` est dérivé de `Theme::colors` une seule fois** : toute
-  couleur écrite dans `theme::apply` doit être suivie du recalcul.
-  `gpui-base` tient **sa propre copie** du thème (`Theme::sync_base`).
+- **Toute retouche du thème passe par `Theme::update`** : `Theme::tokens`
+  n'est dérivé des couleurs qu'au chargement d'une palette, et `gpui-base`
+  tient **sa propre copie** du thème ; une couleur écrite par `global_mut`
+  n'arrive ni à l'une ni à l'autre. Ce qui s'écrit dans la copie de base vient
+  **après** (`update` la rebâtit).
 - **Les thèmes sont générés** (`tools/gen_themes.py`) : une clé absente reprend
   la valeur par défaut, qui est *claire*. Ils sont réécrits dans
   `<config>/themes/` à chaque démarrage — pour en modifier un, le copier sous
@@ -766,12 +769,18 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
 - `let theme = cx.theme().clone();` dès qu'une fermeture aura besoin de
   `&mut cx`.
 - `Theme::change` réinitialise les couleurs : toute palette s'applique
-  **après**, puis `cx.refresh_windows()`.
-- La vue racine ré-émet les couches de `Root` à la fin de son `render`.
-- **Lire l'entité racine depuis une fermeture de rendu est une panique** :
-  `open_dialog` rappelle son `Fn` à chaque frame depuis le rendu de la racine,
-  un popover tourne dans `ClaudhubApp::render`. Ce qui doit relire
-  l'application est une **entité enfant**. Depuis un clic, tout est libre.
+  **après**, par `Theme::update`.
+- **Les dialogues, feuilles et bulles sont peints par le `Root` de Kit, à côté
+  de la vue et non dedans** : un gestionnaire d'action qu'un dialogue doit
+  entendre (la palette, la feuille de validation) va dans
+  `ClaudhubApp::frame`, posé autour du `Root` par le plugin `app::Frame` —
+  sur la div de la vue, il est sourd, sans erreur. Le `key_context` et le
+  focus de la fenêtre, eux, **restent** sur la vue.
+- **Lire l'entité racine depuis une fermeture de rendu est une panique** : un
+  popover tourne dans `ClaudhubApp::render`. Le `Fn` d'`open_dialog`, rappelé
+  à chaque frame, ne tourne plus dedans depuis Kit 0.7, mais ce qui relit
+  l'application y reste une **entité enfant**, qui garde aussi son état d'une
+  frame à l'autre. Depuis un clic, tout est libre.
 - **Un `Dialog` ne peint pas ses boutons** : `ui::dialogs::confirm` rend le
   pied, dont les boutons **dispatchent les mêmes actions que les touches**.
 - **Le champ d'un dialogue prend le focus de façon différée**

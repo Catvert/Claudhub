@@ -62,7 +62,9 @@ async fn read_tables(db: &mut SqliteConnection, database: &str) -> Result<Vec<Ta
          WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
         super::link::quote(super::Engine::Sqlite, database)
     );
-    let rows = sqlx::query(&sql).fetch_all(db).await?;
+    // The schema's name is an identifier, which SQLite cannot bind: it goes in
+    // quoted by `link::quote`, which doubles any quote inside it.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(db).await?;
     rows.into_iter()
         .map(|row| {
             let kind: String = row.try_get("type")?;

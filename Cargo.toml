@@ -43,7 +43,7 @@ ui = [
 # Les patches Claudhub sont limités à gpui-base et gpui-component (voir
 # docs/gpui-kit-migration.md) ; le framework utilise les paquets gpui-pre publiés.
 # Les icônes et polices viennent de nos propres assets embarqués.
-gpui-kit = { version = "0.6.0", optional = true, default-features = false, features = [
+gpui-kit = { version = "0.7.0", optional = true, default-features = false, features = [
     "component",
     "tree-sitter-languages",
 ] }
@@ -97,7 +97,7 @@ alacritty_terminal = { version = "0.26", optional = true }
 # Rafraîchit l'état d'un worktree quand les fichiers changent sous lui, plutôt
 # que de lancer `git status` sur un minuteur.
 notify = "8"
-notify-debouncer-full = "0.5"
+notify-debouncer-full = "0.7"
 
 # `wt`, le gestionnaire de worktrees, en bibliothèque : c'est son `wt.toml`
 # qui sert de système d'extension à Claudhub — tâches, questions, statuts,
@@ -115,14 +115,17 @@ wt = { git = "https://github.com/Catvert/wt.git", branch = "main", default-featu
 # ajouterait. Il est asynchrone de bout en bout — d'où tokio ci-dessous — et
 # c'est ce qui donne un vrai délai de requête : `timeout` laisse tomber le
 # futur, là où un pilote bloquant doit être convaincu de s'arrêter tout seul.
-# `runtime-tokio-rustls` reprend le rustls que `ureq` amène déjà, plutôt
-# qu'OpenSSL. `default-features = false` écarte les macros de vérification à
-# la compilation : nos requêtes sont écrites à l'exécution, il n'y a pas de
-# schéma connu d'avance.
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio-rustls",
+# `tls-rustls` reprend le rustls que `ureq` amène déjà (ring, racines webpki),
+# plutôt qu'OpenSSL. `default-features = false` écarte les macros de
+# vérification à la compilation : nos requêtes sont écrites à l'exécution, il
+# n'y a pas de schéma connu d'avance. `mysql-rsa` et non `mysql` : depuis 0.9
+# le chiffrement RSA est optionnel, et sans lui un MySQL 8 sans TLS refuse
+# l'authentification `caching_sha2_password`, celle qu'il propose par défaut.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
     "sqlite",
-    "mysql",
+    "mysql-rsa",
     "chrono",
     "json",
 ] }
@@ -170,7 +173,6 @@ base64 = "0.22"
 # fois plus en texte. Postcard n'a aucun bouton de configuration à désaccorder
 # entre les deux bouts, là où bincode 2 en a plusieurs.
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-toml = "0.9"
 # Le JUnit d'un run Pest. Déjà dans l'arbre par une dépendance de gpui : la
 # version épinglée est celle du lock, et n'ajoute rien au vendorage.
 roxmltree = "0.21"
@@ -209,7 +211,7 @@ winresource = { version = "0.1.31", default-features = false }
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
-# Patches applicatifs portés sur le tag upstream v0.6.0.
+# Patches applicatifs portés sur le tag upstream v0.7.0.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }
-gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }
+gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "59b5176bc9d431741f5f3cb9a58d4588978e6094" }
+gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "59b5176bc9d431741f5f3cb9a58d4588978e6094" }

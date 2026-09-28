@@ -50,9 +50,10 @@ const CARD_LIST_HEIGHT: gpui_kit::Pixels = px(200.);
 /// What a maximized sheet leaves of the window round it.
 const SHEET_MARGIN: gpui_kit::Pixels = px(16.);
 
-/// A sheet in its dialog: a child entity, for the reason of the settings
-/// form — `open_dialog` keeps a `Fn` called back from the root's render,
-/// where reading the application panics, and a child's render runs after.
+/// A sheet in its dialog: a child entity, like the settings form — the `Fn`
+/// `open_dialog` keeps is called back at every frame, and a child entity is
+/// what reads the application from there, with state of its own that
+/// outlives each call (see "Conventions gpui").
 ///
 /// **It draws its own head** — its title and the buttons of a window: the
 /// dialog's title could say none of the rest,

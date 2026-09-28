@@ -26,7 +26,7 @@ use crate::tr;
 /// on `app` when it is answered.
 ///
 /// `body` and `footer` are built again at every frame: `open_dialog` keeps a
-/// `Fn` it calls back from the root's render. **The focus goes into the
+/// `Fn` Kit's window layer calls back. **The focus goes into the
 /// dialog one turn later**, always: the buttons dispatch `Confirm` and
 /// `Cancel` from the focus, and opened from a terminal, a node's cross or a
 /// menu, the focus was still there — OK did nothing. Deferred, the dialog

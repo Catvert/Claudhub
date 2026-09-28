@@ -261,9 +261,6 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                     walk(child, area, anchor, at_root, open, cx, out);
                 }
             }
-            // A tile is its own window inside the region; nothing here docks
-            // into one, and a rail has nothing to say about it.
-            PaneRef::Tiles { .. } => {}
         }
     }
 
@@ -426,7 +423,6 @@ fn seat_id(area: &DockArea, panel: &str, cx: &App) -> Option<gpui_kit::component
             PaneRef::Split { children, .. } => children
                 .iter()
                 .find_map(|child| walk(child, area, panel, cx)),
-            PaneRef::Tiles { .. } => None,
         }
     }
 
@@ -472,7 +468,6 @@ pub fn shift(
                     .position(|held| *held == id)
                     .map(|ix| (node.id(), ix, panels.len())),
                 PaneRef::Split { children, .. } => children.iter().find_map(|c| group_of(c, id)),
-                PaneRef::Tiles { .. } => None,
             }
         }
         let found = [
@@ -515,7 +510,6 @@ fn first_group(
     match node.kind() {
         PaneRef::Tabs { .. } => Some(node.id()),
         PaneRef::Split { children, .. } => children.iter().find_map(first_group),
-        PaneRef::Tiles { .. } => None,
     }
 }
 

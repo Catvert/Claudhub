@@ -97,7 +97,8 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     let dark = registry.themes().get(settings.dark_theme.as_str()).cloned();
 
     // `Theme::change` creates the global if it is missing: it has to be called
-    // before either slot can be written.
+    // before either slot can be written. The slots are not colours, so writing
+    // them needs none of what `Theme::update` reconciles.
     Theme::change(mode, None, cx);
     let theme = Theme::global_mut(cx);
     if let Some(light) = light {
@@ -107,11 +108,36 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         theme.dark_theme = dark;
     }
 
-    // `Theme::change` resets the colours: any palette tweak has to come after,
-    // or it is wiped silently.
+    // `Theme::change` reloads the mode's palette, which resets the colours:
+    // any palette tweak has to come after, or it is wiped silently.
     Theme::change(mode, window, cx);
 
-    let theme = Theme::global_mut(cx);
+    // **Every edit goes through `Theme::update`**, which is what keeps the
+    // theme's three copies in step: `Theme::tokens`, derived from the colours
+    // only when a palette is loaded — recent components, the dock's tab bar
+    // among them, read the tokens and not the colours —, and the Base layer's
+    // own projection, which resize handles and scrollbars paint from. A colour
+    // written through `global_mut` shows up in neither, silently.
+    Theme::update(cx, |theme| style(settings, theme));
+
+    // The Base projection is rebuilt from scratch by `update`, so the handle
+    // tweak comes after it. The window refresh `update` asked for has not been
+    // drawn yet: it paints this too.
+    //
+    // The handle at rest paints nothing: the cards are already separated by the
+    // gutter, and a grey line on top would stitch back what we have just
+    // unstitched. It stays grabbable — the grab zone is wider than the line —
+    // and shows during the drag, where it is information.
+    //
+    // `Some` and not `None`: the field became an option upstream, and `None`
+    // falls back to the border colour rather than meaning "no line" — the very
+    // grey this exists to remove.
+    gpui_kit::base::Theme::global_mut(cx).resizable.handle = Some(gpui_kit::transparent_black());
+}
+
+/// What Claudhub changes in a loaded palette: fonts, scrollbars, radii and the
+/// roles of the tab colours. Run inside `Theme::update`.
+fn style(settings: &Settings, theme: &mut Theme) {
     theme.font_family = settings.ui_font().to_string().into();
     theme.mono_font_family = settings.mono_font().to_string().into();
     theme.font_size = px(settings.font_size);
@@ -171,31 +197,6 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     theme.tab_active_foreground = theme.foreground;
     theme.tab_foreground = theme.muted_foreground;
     theme.tab = gutter;
-
-    // **The tokens are recomputed afterwards.** `Theme::tokens` is derived from
-    // the colours, but only once, when the palette is applied: recent
-    // components — the dock's tab bar among them — read `tokens` and not
-    // `colors`, and a colour changed here without this call shows up nowhere.
-    // That is this version's silent failure.
-    theme.tokens = gpui_kit::component::ThemeTokens::from(&theme.colors);
-
-    // The base layer keeps **its own copy** of the theme — resize handles and
-    // scrollbars paint without going through gpui-component. Without this
-    // projection, none of the above reaches it; and since it rebuilds the copy
-    // from scratch, the handle tweak comes after.
-    Theme::sync_base(cx);
-    let base = gpui_kit::base::Theme::global_mut(cx);
-    // The handle at rest paints nothing: the cards are already separated by the
-    // gutter, and a grey line on top would stitch back what we have just
-    // unstitched. It stays grabbable — the grab zone is wider than the line —
-    // and shows during the drag, where it is information.
-    //
-    // `Some` and not `None`: the field became an option upstream, and `None`
-    // falls back to the border colour rather than meaning "no line" — the very
-    // grey this exists to remove.
-    base.resizable.handle = Some(gpui_kit::transparent_black());
-
-    cx.refresh_windows();
 }
 
 /// The gutter's colour, a step of lightness away from the card's.

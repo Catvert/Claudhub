@@ -742,7 +742,11 @@ where
     // `raw_sql` accepts several statements — that is what one pastes from a
     // migration file — and `fetch_many` streams what each produces: a count of
     // affected rows for a write, rows for a read.
-    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
+    //
+    // **Asserted safe because it is the hand's own SQL**: running what was
+    // typed in the console is the console's whole purpose, against a base the
+    // hand has the credentials of. Nothing of anyone else's is spliced in.
+    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_many(db);
     let mut out = Rows {
         offset,
         ..Default::default()
@@ -793,7 +797,8 @@ where
 {
     use futures::TryStreamExt as _;
     use sqlx::{Column as _, Row as _};
-    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
+    // The console's own query again — see `run_page`.
+    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_many(db);
     let mut written = 0;
     let mut reader = Some(reader);
     let mut cells: Option<D> = None;

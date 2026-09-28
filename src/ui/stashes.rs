@@ -45,8 +45,9 @@ pub type StashesState = Listed<Stash>;
 /// The stash being made, while the dialog is open.
 ///
 /// An entity of its own and not a field of `ClaudhubApp`, like `TagDraft`: the
-/// closure `open_dialog` keeps is called back from the root view's render, in
-/// the middle of a borrow of the application.
+/// closure `open_dialog` keeps is called back at every frame, and before GPUI
+/// Kit 0.7 that was from inside the root view's render, in the middle of a
+/// borrow of the application (see "Conventions gpui").
 pub struct StashDraft {
     pub message: Entity<InputState>,
     /// Take the files git does not know yet.

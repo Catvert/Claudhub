@@ -148,10 +148,9 @@ pub(super) struct QuickState {
 /// The palette's content, as an entity of its own.
 ///
 /// **An entity and not a closure**, the arrangement `settings_view::
-/// SettingsForm` exists for: `open_dialog` keeps a `Fn` called back from the
-/// root view's render, and reading the root entity from there is the panic
-/// gpui refuses. A child's `render` happens after the parent's closure has
-/// returned.
+/// SettingsForm` exists for: `open_dialog` keeps a `Fn` called back at every
+/// frame, and a child entity is what reads the application from there — see
+/// "Conventions gpui".
 pub(super) struct QuickPalette {
     app: gpui_kit::WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
@@ -295,7 +294,7 @@ impl ClaudhubApp {
             return;
         }
         window.close_dialog(cx);
-        // Called by hand, and it has to be: `Root::close_dialog` pops the
+        // Called by hand, and it has to be: `close_dialog` pops the
         // dialog off its stack without running the callbacks the `Dialog`
         // itself carries, so nothing else would lower the flag or hand the
         // keyboard on from here. The other ways out reach `quick_closed`
@@ -324,10 +323,9 @@ impl ClaudhubApp {
     /// The test is the field itself, and it is asked **after** the dialog has
     /// gone: whatever `close_dialog` had to hand back, it has handed back by
     /// then, so a caret still sitting on the palette's field is a caret with
-    /// nowhere to go. `contains` is no help — a dialog is painted inside this
-    /// very view (`Root::render_dialog_layer`, at the end of its render), so
-    /// the dying field counts as one of its descendants right up to the frame
-    /// that stops drawing it.
+    /// nowhere to go. Asking the window's handle whether it `contains` the
+    /// focus says nothing here: Kit paints the dialogs beside this view, not
+    /// inside it, so that answer is "no" for a live palette as for a dead one.
     pub(super) fn quick_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quick.open = false;
         let stranded = gpui_kit::Focusable::focus_handle(&self.quick_input, cx).is_focused(window)
@@ -730,7 +728,7 @@ impl ClaudhubApp {
             // the dialog's own frame — the title row, the border, the padding
             // around this box — where a press is just as much a press outside
             // the palette. Both ways out end in `quick_closed`, which is what
-            // matters: `Root::close_dialog` runs none of the `Dialog`'s own
+            // matters: `close_dialog` runs none of the `Dialog`'s own
             // callbacks, so this route has to say it for itself.
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_quick(window, cx)))
             .size_full()

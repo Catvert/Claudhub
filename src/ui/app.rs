@@ -16,7 +16,7 @@ use gpui_kit::component::{
     input::{EditorState, InputEvent, InputState},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
-    v_flex, ActiveTheme, Root, Sizable, WindowExt,
+    v_flex, ActiveTheme, Sizable, WindowExt,
 };
 use gpui_kit::{
     div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Render, SharedString, Window,
@@ -911,8 +911,7 @@ pub struct ClaudhubApp {
     /// The palette's content, built once and outliving its dialog.
     ///
     /// **An entity and not a closure**: `open_dialog` keeps a `Fn` called back
-    /// from the root's render, where reading the root entity is a panic. The
-    /// settings form's arrangement, for its reason.
+    /// at every frame. The settings form's arrangement, for its reason.
     pub(super) quick_palette: Entity<crate::ui::quick_view::QuickPalette>,
     pub(super) search_scroll: gpui_kit::UniformListScrollHandle,
     pub(super) search_preview_scroll: gpui_kit::UniformListScrollHandle,
@@ -1058,8 +1057,8 @@ pub struct ClaudhubApp {
     /// The settings form, built once and outliving its dialog.
     ///
     /// **An entity and not a closure**: `open_dialog` keeps a `Fn` called back
-    /// from the root's render, where reading the root entity is a panic. See
-    /// `settings_view::SettingsForm`.
+    /// at every frame. See `settings_view::SettingsForm` and "Conventions
+    /// gpui".
     pub(super) settings_form: Entity<crate::ui::settings_view::SettingsForm>,
     /// The edges the zen fold put away, to be given back on the way out.
     ///
@@ -1758,7 +1757,7 @@ impl ClaudhubApp {
 
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs
-        // `Root`'s layers, which are only installed on the first render.
+        // the window's `Root`, which Kit builds around this view afterwards.
         cx.spawn_in(window, async move |this, cx| {
             this.update_in(cx, |app, window, cx| app.start_backend(window, cx))
                 .ok();
@@ -3579,9 +3578,8 @@ impl ClaudhubApp {
 
     /// One balloon, top right.
     ///
-    /// `Root` already re-emits the notification layer at the end of the root
-    /// view's render — see "Conventions gpui" — so nothing else is needed to
-    /// make it appear. A message with no title of its own carries none: the
+    /// Kit's `Root` hosts the notification layer by itself, so nothing else is
+    /// needed to make it appear. A message with no title of its own carries none: the
     /// balloon then reads as the sentence it is, which is what a copy or a
     /// refusal has to say.
     fn balloon(
@@ -4724,10 +4722,10 @@ impl ClaudhubApp {
 
     /// Turns what was said between two frames into balloons.
     ///
-    /// Called at the top of the root's render: `Root` is not leased then — its
-    /// own render returned before ours was asked for, which is the rule the
-    /// dock's panels live by — so pushing into it is safe here and nowhere
-    /// inside a closure the root itself calls back.
+    /// Called at the top of the root's render: neither Kit's `Root` nor the
+    /// window state holding the notifications is leased then — the one's
+    /// render returned before ours was asked for, the other's comes after —
+    /// so pushing into it is safe here.
     fn flush_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for (text, level) in std::mem::take(&mut self.pending_notes) {
             self.balloon(None, text, level, window, cx);
@@ -4971,139 +4969,6 @@ impl Render for ClaudhubApp {
             // along the way.
             .key_context(super::shortcuts::context(Settings::global(cx).vim_mode))
             .track_focus(&self.focus)
-            // **On the root, and it has to be.** A modifier change is a
-            // keyboard event: it walks the path from whatever holds the focus
-            // up to here, so a listener on the diff itself would be silent
-            // whenever the hand is in a terminal or in the tree — which is
-            // exactly when one reaches for `Ctrl` and the mouse. Nothing is
-            // repainted unless the flag turns over: `Shift` on every capital
-            // letter would otherwise cost a frame each.
-            .on_modifiers_changed(cx.listener(
-                |this, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
-                    // `Shift Shift`, which lives here for the very reason the
-                    // line below does: a bare modifier is not a key gpui can
-                    // bind, and a modifier change is the only trace it leaves.
-                    // See `quick::DoubleTap`.
-                    this.quick_tapped(event, window, cx);
-                    let armed = event.modifiers.secondary();
-                    if this.follow_armed != armed {
-                        this.follow_armed = armed;
-                        // Let go of it and nothing is followable any more: the
-                        // underline goes with the hand cursor.
-                        this.follow_hover = None;
-                        // The result grid is told rather than asked: its cells
-                        // are painted by a delegate, which has no place to read
-                        // the application once per frame.
-                        this.arm_db_follow(armed, cx);
-                        cx.notify();
-                    }
-                },
-            ))
-            // **In the capture phase, and it must be.** What these two do is
-            // break a `Shift Shift` in progress — the letter between the two
-            // capitals of `AB`, the click between two idle presses — and the
-            // keystroke they are watching for is usually consumed long before
-            // it could bubble back up here: a terminal takes every key it is
-            // given. Capture walks from the root down, so nothing can hide a
-            // keystroke from this. Neither consumes.
-            .capture_key_down(cx.listener(|this, _: &gpui_kit::KeyDownEvent, _, _| {
-                this.quick.tap.interrupt();
-            }))
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
-                this.quick.tap.interrupt();
-            }))
-            .on_action(cx.listener(super::shortcuts::refresh))
-            .on_action(cx.listener(super::shortcuts::show_line_history))
-            .on_action(cx.listener(super::shortcuts::new_terminal))
-            .on_action(cx.listener(super::shortcuts::close_terminal))
-            .on_action(cx.listener(super::shortcuts::toggle_terminal))
-            .on_action(cx.listener(super::shortcuts::next_terminal))
-            .on_action(cx.listener(super::shortcuts::next_tab))
-            .on_action(cx.listener(super::shortcuts::previous_tab))
-            .on_action(cx.listener(super::shortcuts::commit))
-            .on_action(cx.listener(super::shortcuts::open_settings))
-            .on_action(cx.listener(super::shortcuts::zoom_in))
-            .on_action(cx.listener(super::shortcuts::zoom_out))
-            .on_action(cx.listener(super::shortcuts::zoom_reset))
-            .on_action(cx.listener(super::shortcuts::copy_diff))
-            .on_action(cx.listener(super::shortcuts::copy_diff_patch))
-            .on_action(cx.listener(super::shortcuts::select_whole_diff))
-            .on_action(cx.listener(super::shortcuts::previous_line))
-            .on_action(cx.listener(super::shortcuts::next_line))
-            .on_action(cx.listener(super::shortcuts::extend_up))
-            .on_action(cx.listener(super::shortcuts::extend_down))
-            .on_action(cx.listener(super::shortcuts::previous_hunk))
-            .on_action(cx.listener(super::shortcuts::next_hunk))
-            .on_action(cx.listener(super::shortcuts::previous_file))
-            .on_action(cx.listener(super::shortcuts::next_file))
-            .on_action(cx.listener(super::shortcuts::toggle_diff_split))
-            .on_action(cx.listener(super::shortcuts::toggle_whole_file))
-            .on_action(cx.listener(super::shortcuts::annotate_selection))
-            .on_action(cx.listener(super::shortcuts::ask_agent))
-            .on_action(cx.listener(super::shortcuts::send_notes))
-            .on_action(cx.listener(super::shortcuts::save_file))
-            .on_action(cx.listener(super::shortcuts::find))
-            .on_action(cx.listener(super::shortcuts::find_file))
-            .on_action(cx.listener(super::shortcuts::close_find))
-            .on_action(cx.listener(super::shortcuts::find_next))
-            .on_action(cx.listener(super::shortcuts::find_previous))
-            .on_action(cx.listener(super::shortcuts::search_project))
-            .on_action(cx.listener(super::shortcuts::search_up))
-            .on_action(cx.listener(super::shortcuts::search_down))
-            .on_action(cx.listener(super::shortcuts::search_open))
-            .on_action(cx.listener(super::shortcuts::quick_up))
-            .on_action(cx.listener(super::shortcuts::quick_down))
-            .on_action(cx.listener(super::shortcuts::quick_open))
-            .on_action(cx.listener(super::shortcuts::quick_expand))
-            .on_action(cx.listener(super::shortcuts::explorer_up))
-            .on_action(cx.listener(super::shortcuts::explorer_down))
-            .on_action(cx.listener(super::shortcuts::explorer_left))
-            .on_action(cx.listener(super::shortcuts::explorer_right))
-            .on_action(cx.listener(super::shortcuts::explorer_open))
-            .on_action(cx.listener(super::shortcuts::goto_definition))
-            .on_action(cx.listener(super::shortcuts::jump_back))
-            .on_action(cx.listener(super::shortcuts::jump_forward))
-            .on_action(cx.listener(super::shortcuts::explorer_home))
-            .on_action(cx.listener(super::shortcuts::explorer_end))
-            .on_action(cx.listener(super::shortcuts::db_up))
-            .on_action(cx.listener(super::shortcuts::db_down))
-            .on_action(cx.listener(super::shortcuts::db_left))
-            .on_action(cx.listener(super::shortcuts::db_right))
-            .on_action(cx.listener(super::shortcuts::db_open))
-            .on_action(cx.listener(super::shortcuts::run_db_query))
-            .on_action(cx.listener(super::shortcuts::toggle_tool))
-            .on_action(cx.listener(super::shortcuts::new_db_console))
-            .on_action(cx.listener(super::shortcuts::copy_db_result))
-            .on_action(cx.listener(super::shortcuts::select_whole_result))
-            .on_action(cx.listener(super::shortcuts::export_db_csv))
-            .on_action(cx.listener(super::shortcuts::show_shortcuts))
-            .on_action(cx.listener(super::shortcuts::toggle_sidebar))
-            .on_action(cx.listener(super::shortcuts::toggle_zen))
-            .on_action(cx.listener(super::shortcuts::previous_terminal))
-            .on_action(cx.listener(super::shortcuts::select_worktree))
-            .on_action(cx.listener(super::shortcuts::fetch))
-            .on_action(cx.listener(super::shortcuts::pull))
-            .on_action(cx.listener(super::shortcuts::push))
-            .on_action(cx.listener(super::shortcuts::toggle_stage))
-            .on_action(cx.listener(super::shortcuts::toggle_review_tree))
-            .on_action(cx.listener(super::shortcuts::diff_start))
-            .on_action(cx.listener(super::shortcuts::diff_end))
-            .on_action(cx.listener(super::shortcuts::diff_page_up))
-            .on_action(cx.listener(super::shortcuts::diff_page_down))
-            .on_action(cx.listener(super::shortcuts::close_editor))
-            // The thumb buttons, which no keymap carries: gpui gives them as
-            // `Navigate`, X11 from buttons 8 and 9 and Wayland from `BTN_SIDE`
-            // and `BTN_EXTRA`. On the root and in the bubble phase, which is
-            // enough — nothing below listens for them, the terminal included,
-            // where only the left button is handed to the program.
-            .on_mouse_down(
-                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Back),
-                cx.listener(|this, _, window, cx| this.jump_back(window, cx)),
-            )
-            .on_mouse_down(
-                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Forward),
-                cx.listener(|this, _, window, cx| this.jump_forward(window, cx)),
-            )
             .size_full()
             // The gutter and not the background: what shows between two panels —
             // the resize handles, a collapsed zone — is the plane the cards sit
@@ -5136,14 +5001,204 @@ impl Render for ClaudhubApp {
                         .child(self.render_status_bar(cx))
                 }
             })
-            // gpui-component's layers have to be re-emitted by the root view,
-            // otherwise dialogs and notifications appear nowhere.
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+/// The window's outermost element, wrapped around Kit's `Root`: see
+/// `ClaudhubApp::frame`. It paints nothing of its own.
+pub(super) struct Frame;
+
+impl Frame {
+    /// Registered before the window opens: Kit captures the plugins when it
+    /// builds a window's `Root`.
+    pub(super) fn register(cx: &mut App) {
+        gpui_kit::base::Root::register_plugin::<Self>(cx, |_, _| Self);
+    }
+}
+
+impl Render for Frame {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
+impl gpui_kit::base::RootPlugin for Frame {
+    fn decorate(
+        &self,
+        surface: gpui_kit::AnyElement,
+        root: &gpui_kit::base::Root,
+        window: &mut Window,
+        _: &mut App,
+    ) -> impl IntoElement {
+        match root.view().clone().downcast::<ClaudhubApp>() {
+            Ok(app) => ClaudhubApp::frame(&app, window)
+                .child(surface)
+                .into_any_element(),
+            Err(_) => surface,
+        }
     }
 }
 
 impl ClaudhubApp {
+    /// What the whole window listens with, around this view **and** the
+    /// dialogs, sheets and notifications Kit's `Root` paints beside it.
+    ///
+    /// Until GPUI Kit 0.7 the root view re-emitted `Root`'s layers at the end
+    /// of its own render, so a dialog was a descendant of this view, and every
+    /// action it dispatched bubbled through the handlers below — the palette's
+    /// `QuickUp`, `QuickOpen`, the review sheet's diff keys. Kit now hosts the
+    /// layers itself, as siblings of the view, and a handler left on the
+    /// view's own element would be silently out of their reach. They move out
+    /// to the one element above both, through `Frame`.
+    ///
+    /// **The key context and the focus handle stay on the view.** Kit's `Root`
+    /// binds Tab and Copy under a context of its own, and a `Claudhub` context
+    /// above it would make those outrank ours; and the window's own focus
+    /// handle has to carry the `Claudhub` context, or focusing it puts nothing
+    /// on the stack. Every binding under `Claudhub` is `!Dialog`, so none of
+    /// them was ever meant to reach into a dialog.
+    fn frame(app: &Entity<Self>, window: &mut Window) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div()
+            .id("claudhub-frame")
+            .size_full()
+            // **On the frame, and it has to be.** A modifier change is a
+            // keyboard event: it walks the path from whatever holds the focus
+            // up to here, so a listener on the diff itself would be silent
+            // whenever the hand is in a terminal or in the tree — which is
+            // exactly when one reaches for `Ctrl` and the mouse. Nothing is
+            // repainted unless the flag turns over: `Shift` on every capital
+            // letter would otherwise cost a frame each.
+            .on_modifiers_changed(window.listener_for(
+                app,
+                |this, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
+                    // `Shift Shift`, which lives here for the very reason the
+                    // line below does: a bare modifier is not a key gpui can
+                    // bind, and a modifier change is the only trace it leaves.
+                    // See `quick::DoubleTap`.
+                    this.quick_tapped(event, window, cx);
+                    let armed = event.modifiers.secondary();
+                    if this.follow_armed != armed {
+                        this.follow_armed = armed;
+                        // Let go of it and nothing is followable any more: the
+                        // underline goes with the hand cursor.
+                        this.follow_hover = None;
+                        // The result grid is told rather than asked: its cells
+                        // are painted by a delegate, which has no place to read
+                        // the application once per frame.
+                        this.arm_db_follow(armed, cx);
+                        cx.notify();
+                    }
+                },
+            ))
+            // **In the capture phase, and it must be.** What these two do is
+            // break a `Shift Shift` in progress — the letter between the two
+            // capitals of `AB`, the click between two idle presses — and the
+            // keystroke they are watching for is usually consumed long before
+            // it could bubble back up here: a terminal takes every key it is
+            // given. Capture walks from the root down, so nothing can hide a
+            // keystroke from this. Neither consumes.
+            .capture_key_down(
+                window.listener_for(app, |this, _: &gpui_kit::KeyDownEvent, _, _| {
+                    this.quick.tap.interrupt();
+                }),
+            )
+            .capture_any_mouse_down(window.listener_for(app, |this, _, _, _| {
+                this.quick.tap.interrupt();
+            }))
+            .on_action(window.listener_for(app, super::shortcuts::refresh))
+            .on_action(window.listener_for(app, super::shortcuts::show_line_history))
+            .on_action(window.listener_for(app, super::shortcuts::new_terminal))
+            .on_action(window.listener_for(app, super::shortcuts::close_terminal))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_terminal))
+            .on_action(window.listener_for(app, super::shortcuts::next_terminal))
+            .on_action(window.listener_for(app, super::shortcuts::next_tab))
+            .on_action(window.listener_for(app, super::shortcuts::previous_tab))
+            .on_action(window.listener_for(app, super::shortcuts::commit))
+            .on_action(window.listener_for(app, super::shortcuts::open_settings))
+            .on_action(window.listener_for(app, super::shortcuts::zoom_in))
+            .on_action(window.listener_for(app, super::shortcuts::zoom_out))
+            .on_action(window.listener_for(app, super::shortcuts::zoom_reset))
+            .on_action(window.listener_for(app, super::shortcuts::copy_diff))
+            .on_action(window.listener_for(app, super::shortcuts::copy_diff_patch))
+            .on_action(window.listener_for(app, super::shortcuts::select_whole_diff))
+            .on_action(window.listener_for(app, super::shortcuts::previous_line))
+            .on_action(window.listener_for(app, super::shortcuts::next_line))
+            .on_action(window.listener_for(app, super::shortcuts::extend_up))
+            .on_action(window.listener_for(app, super::shortcuts::extend_down))
+            .on_action(window.listener_for(app, super::shortcuts::previous_hunk))
+            .on_action(window.listener_for(app, super::shortcuts::next_hunk))
+            .on_action(window.listener_for(app, super::shortcuts::previous_file))
+            .on_action(window.listener_for(app, super::shortcuts::next_file))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_diff_split))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_whole_file))
+            .on_action(window.listener_for(app, super::shortcuts::annotate_selection))
+            .on_action(window.listener_for(app, super::shortcuts::ask_agent))
+            .on_action(window.listener_for(app, super::shortcuts::send_notes))
+            .on_action(window.listener_for(app, super::shortcuts::save_file))
+            .on_action(window.listener_for(app, super::shortcuts::find))
+            .on_action(window.listener_for(app, super::shortcuts::find_file))
+            .on_action(window.listener_for(app, super::shortcuts::close_find))
+            .on_action(window.listener_for(app, super::shortcuts::find_next))
+            .on_action(window.listener_for(app, super::shortcuts::find_previous))
+            .on_action(window.listener_for(app, super::shortcuts::search_project))
+            .on_action(window.listener_for(app, super::shortcuts::search_up))
+            .on_action(window.listener_for(app, super::shortcuts::search_down))
+            .on_action(window.listener_for(app, super::shortcuts::search_open))
+            .on_action(window.listener_for(app, super::shortcuts::quick_up))
+            .on_action(window.listener_for(app, super::shortcuts::quick_down))
+            .on_action(window.listener_for(app, super::shortcuts::quick_open))
+            .on_action(window.listener_for(app, super::shortcuts::quick_expand))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_up))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_down))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_left))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_right))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_open))
+            .on_action(window.listener_for(app, super::shortcuts::goto_definition))
+            .on_action(window.listener_for(app, super::shortcuts::jump_back))
+            .on_action(window.listener_for(app, super::shortcuts::jump_forward))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_home))
+            .on_action(window.listener_for(app, super::shortcuts::explorer_end))
+            .on_action(window.listener_for(app, super::shortcuts::db_up))
+            .on_action(window.listener_for(app, super::shortcuts::db_down))
+            .on_action(window.listener_for(app, super::shortcuts::db_left))
+            .on_action(window.listener_for(app, super::shortcuts::db_right))
+            .on_action(window.listener_for(app, super::shortcuts::db_open))
+            .on_action(window.listener_for(app, super::shortcuts::run_db_query))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_tool))
+            .on_action(window.listener_for(app, super::shortcuts::new_db_console))
+            .on_action(window.listener_for(app, super::shortcuts::copy_db_result))
+            .on_action(window.listener_for(app, super::shortcuts::select_whole_result))
+            .on_action(window.listener_for(app, super::shortcuts::export_db_csv))
+            .on_action(window.listener_for(app, super::shortcuts::show_shortcuts))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_sidebar))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_zen))
+            .on_action(window.listener_for(app, super::shortcuts::previous_terminal))
+            .on_action(window.listener_for(app, super::shortcuts::select_worktree))
+            .on_action(window.listener_for(app, super::shortcuts::fetch))
+            .on_action(window.listener_for(app, super::shortcuts::pull))
+            .on_action(window.listener_for(app, super::shortcuts::push))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_stage))
+            .on_action(window.listener_for(app, super::shortcuts::toggle_review_tree))
+            .on_action(window.listener_for(app, super::shortcuts::diff_start))
+            .on_action(window.listener_for(app, super::shortcuts::diff_end))
+            .on_action(window.listener_for(app, super::shortcuts::diff_page_up))
+            .on_action(window.listener_for(app, super::shortcuts::diff_page_down))
+            .on_action(window.listener_for(app, super::shortcuts::close_editor))
+            // The thumb buttons, which no keymap carries: gpui gives them as
+            // `Navigate`, X11 from buttons 8 and 9 and Wayland from `BTN_SIDE`
+            // and `BTN_EXTRA`. On the root and in the bubble phase, which is
+            // enough — nothing below listens for them, the terminal included,
+            // where only the left button is handed to the program.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Back),
+                window.listener_for(app, |this, _, window, cx| this.jump_back(window, cx)),
+            )
+            .on_mouse_down(
+                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Forward),
+                window.listener_for(app, |this, _, window, cx| this.jump_forward(window, cx)),
+            )
+    }
+
     /// Opens a dialog with a single input line.
     ///
     /// The `InputState` is created here and captured by the closure: an entity

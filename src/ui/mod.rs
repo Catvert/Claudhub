@@ -89,7 +89,6 @@ mod worktree_ops;
 mod worktree_picker;
 mod worktrees;
 
-use gpui_kit::component::Root;
 use gpui_kit::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use rust_embed::RustEmbed;
 
@@ -175,6 +174,7 @@ pub fn run(
     // Kit opens the matching native GPUI platform and initializes its layers.
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
+        app::Frame::register(cx);
         highlight::register_languages();
         install_fonts(cx);
         // The settings become global before anything else: the form writes
@@ -211,7 +211,9 @@ pub fn run(
         };
         cx.activate(true);
 
-        let opened = cx.open_window(
+        // Kit wraps the view in its `Root`, which hosts the dialogs, sheets
+        // and notifications by itself.
+        let opened = gpui_kit::open_window(
             // `TitleBar::window_options` rather than `Default`: it also
             // sets `app_owns_titlebar_drag`, without which the platform
             // and our bar fight over the double-click and the drag. It is
@@ -222,10 +224,8 @@ pub fn run(
                 app_id: Some("claudhub".into()),
                 ..gpui_kit::component::TitleBar::window_options()
             },
-            |window, cx| {
-                let main = cx.new(|cx| app::ClaudhubApp::new(folder, handoffs, window, cx));
-                cx.new(|cx| Root::new(main, window, cx))
-            },
+            cx,
+            |window, cx| cx.new(|cx| app::ClaudhubApp::new(folder, handoffs, window, cx)),
         );
         if let Err(e) = opened {
             log::error!("opening the window: {e:#}");

@@ -83,7 +83,8 @@ pub async fn databases(connection: &Connection) -> Result<Vec<Database>> {
                 default_collation_name AS collation \
          FROM information_schema.schemata WHERE {clause} ORDER BY schema_name"
     );
-    let mut request = sqlx::query(&sql);
+    // Every value is bound: what is formatted in is placeholders only.
+    let mut request = sqlx::query(sqlx::AssertSqlSafe(sql));
     for value in &values {
         request = request.bind(value);
     }
@@ -164,7 +165,8 @@ pub async fn columns(connection: &Connection, database: &str, table: &str) -> Re
          FROM information_schema.columns WHERE table_schema = ? AND table_name = ? \
          ORDER BY ordinal_position"
     );
-    sqlx::query(&sql)
+    // A constant formatted in, the names bound.
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(database)
         .bind(table)
         .fetch_all(&mut db)
@@ -203,11 +205,12 @@ pub async fn all_columns(
     })
     .collect::<Result<_>>()?;
 
-    let rows = sqlx::query(&format!(
+    // A constant formatted in, the name bound.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT table_name AS table_name, column_name AS name, {COLUMN_FIELDS} \
          FROM information_schema.columns WHERE table_schema = ? \
          ORDER BY table_name, ordinal_position"
-    ))
+    )))
     .bind(database)
     .fetch_all(&mut db)
     .await?;

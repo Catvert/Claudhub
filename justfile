@@ -36,6 +36,11 @@ ci: fmt-check clippy test check-server
 # bouge** — le vendor en emporte une copie. Rien ne le signale, et c'est ce qui
 # a laissé la 0.2.1 sortir avec un hash périmé.
 #
+# **Elle peut aussi passer à tort** : une dérivation à sortie fixe n'est pas
+# rebâtie quand le store tient déjà un chemin sous ce hash — celui du vendor
+# d'avant. Après un changement de `Cargo.lock`, mettre un faux `cargoHash`
+# (`sha256-AAAA…=`) : l'échec donne le vrai.
+#
 # Ne compile rien : seul le vendor est bâti, quelques minutes contre la
 # demi-heure d'un `nix build` entier. Hors de `ci`, qui doit tourner là où il
 # n'y a pas de nix.

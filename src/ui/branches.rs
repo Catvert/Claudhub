@@ -151,8 +151,9 @@ fn detail(branch: &Branch) -> String {
 /// The deletion being confirmed, while the dialog is open.
 ///
 /// An entity of its own and not a field of `ClaudhubApp`, like `StashDraft`: the
-/// closure `open_dialog` keeps is called back from the root view's render, in
-/// the middle of a borrow of the application, where reading it is a panic.
+/// closure `open_dialog` keeps is called back at every frame, and before GPUI
+/// Kit 0.7 that was from inside the root view's render, where reading the
+/// application was a panic (see "Conventions gpui").
 pub struct BranchDeletion {
     branch: String,
     /// There is something on `origin` to delete — otherwise no box at all.

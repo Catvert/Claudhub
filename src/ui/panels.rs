@@ -515,13 +515,12 @@ pub(super) fn dock_panel_at(
 
     /// The first tab group's displayed panel — the group `add_panel_view`
     /// lands in, found by the same walk it uses.
-    fn displayed(node: &PaneNode) -> Option<(NodeId, usize, PanelId)> {
+    fn displayed(node: &PaneNode) -> Option<(NodeId, PanelId)> {
         match node.kind() {
-            PaneRef::Tabs { panels, active_ix } => panels
-                .get(active_ix)
-                .map(|panel| (node.id(), active_ix, *panel)),
+            PaneRef::Tabs { panels, active_ix } => {
+                panels.get(active_ix).map(|panel| (node.id(), *panel))
+            }
             PaneRef::Split { children, .. } => children.iter().find_map(displayed),
-            PaneRef::Tiles { .. } => None,
         }
     }
 
@@ -534,22 +533,13 @@ pub(super) fn dock_panel_at(
         return;
     };
     dock.move_panel(id, target, window, cx);
-    let Some((node, ix, panel)) = noted else {
+    let Some((node, panel)) = noted else {
         return;
     };
     if matches!(target, InsertTarget::Tabs { node: joined, .. } if joined == node) {
         return;
     }
-    dock.move_panel(
-        panel,
-        InsertTarget::Tabs {
-            node,
-            ix: Some(ix),
-            activate: true,
-        },
-        window,
-        cx,
-    );
+    dock.select_panel(panel, window, cx);
 }
 
 /// Brings the tab a panel of this name sits in forward, in one screen's dock.
@@ -564,11 +554,6 @@ pub(super) fn dock_panel_at(
 /// the dock holds a handle on the diff's tab. `DockArea::panel` gives the view
 /// back from the id the tree carries, and `panel_name` is on it.
 ///
-/// **A move on to itself, and not a `select_tab`**: the group entity behind a
-/// node is private to the dock, and `move_panel` back into its own node at its
-/// own index with `activate` is the same reinstatement `dock_panel_at` makes to
-/// give a disturbed group its tab back.
-///
 /// Every region and not the centre alone: a panel can have been dragged into a
 /// side dock, and a gesture that then did nothing would read as broken.
 pub(super) fn select_panel_named(
@@ -577,26 +562,23 @@ pub(super) fn select_panel_named(
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    use gpui_kit::component::dock::{
-        DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId,
-    };
+    use gpui_kit::component::dock::{DockPlacement, PaneNode, PaneRef, PanelId};
 
-    /// The node holding a panel of this name, and where it sits in it.
+    /// The panel of this name, in this subtree.
     fn seat(
         node: &PaneNode,
         dock: &gpui_kit::component::dock::DockArea,
         name: &str,
         cx: &App,
-    ) -> Option<(NodeId, usize, PanelId)> {
+    ) -> Option<PanelId> {
         match node.kind() {
-            PaneRef::Tabs { panels, .. } => panels.iter().enumerate().find_map(|(ix, panel)| {
-                let found = dock.panel(*panel)?;
-                (found.panel_name(cx) == name).then_some((node.id(), ix, *panel))
+            PaneRef::Tabs { panels, .. } => panels.iter().copied().find(|panel| {
+                dock.panel(*panel)
+                    .is_some_and(|found| found.panel_name(cx) == name)
             }),
             PaneRef::Split { children, .. } => children
                 .iter()
                 .find_map(|child| seat(child, dock, name, cx)),
-            PaneRef::Tiles { .. } => None,
         }
     }
 
@@ -611,21 +593,10 @@ pub(super) fn select_panel_named(
         .into_iter()
         .find_map(|placement| seat(area.layout(placement)?.root(), area, name, cx))
     };
-    let Some((node, ix, panel)) = found else {
+    let Some(panel) = found else {
         return false;
     };
-    dock.update(cx, |dock, cx| {
-        dock.move_panel(
-            panel,
-            InsertTarget::Tabs {
-                node,
-                ix: Some(ix),
-                activate: true,
-            },
-            window,
-            cx,
-        );
-    });
+    dock.update(cx, |dock, cx| dock.select_panel(panel, window, cx));
     true
 }
 
@@ -641,32 +612,23 @@ pub(super) fn select_panel_named(
 /// bars, and cycling the left one while the right one is being read would be a
 /// gesture aimed at the wrong half. A dock knows nothing of focus, so it is
 /// asked of the panels themselves.
-///
-/// The move is `select_panel_named`'s: a panel moved back into its own node at
-/// its **own** index, which reinstates it and activates it — the group's entity
-/// is private to the dock, and there is no `select_tab`.
 pub(super) fn cycle_center_tab(
     dock: &Entity<gpui_kit::component::dock::DockArea>,
     forward: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    use gpui_kit::component::dock::{
-        DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId,
-    };
+    use gpui_kit::component::dock::{DockPlacement, PaneNode, PaneRef, PanelId};
 
     /// Every tab group of a tree, in the order they are laid out.
-    fn groups(node: &PaneNode, out: &mut Vec<(NodeId, Vec<PanelId>, usize)>) {
+    fn groups(node: &PaneNode, out: &mut Vec<(Vec<PanelId>, usize)>) {
         match node.kind() {
-            PaneRef::Tabs { panels, active_ix } => {
-                out.push((node.id(), panels.to_vec(), active_ix))
-            }
+            PaneRef::Tabs { panels, active_ix } => out.push((panels.to_vec(), active_ix)),
             PaneRef::Split { children, .. } => {
                 for child in children {
                     groups(child, out);
                 }
             }
-            PaneRef::Tiles { .. } => {}
         }
     }
 
@@ -678,41 +640,28 @@ pub(super) fn cycle_center_tab(
         }
         // A group of one has no next tab, and a gesture that lands on the panel
         // it started from reads as one that did nothing.
-        found.retain(|(_, panels, _)| panels.len() > 1);
-        let focused = found.iter().position(|(_, panels, active_ix)| {
+        found.retain(|(panels, _)| panels.len() > 1);
+        let focused = found.iter().position(|(panels, active_ix)| {
             panels
                 .get(*active_ix)
                 .and_then(|panel| area.panel(*panel))
                 .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx))
         });
-        found
-            .get(focused.unwrap_or(0))
-            .map(|(node, panels, active_ix)| {
-                let count = panels.len();
-                let next = match forward {
-                    true => (active_ix + 1) % count,
-                    // `+ count - 1` and not `- 1`: these are unsigned, and the
-                    // first tab is precisely where one presses Shift+Tab.
-                    false => (active_ix + count - 1) % count,
-                };
-                (*node, panels[next], next)
-            })
+        found.get(focused.unwrap_or(0)).map(|(panels, active_ix)| {
+            let count = panels.len();
+            let next = match forward {
+                true => (active_ix + 1) % count,
+                // `+ count - 1` and not `- 1`: these are unsigned, and the
+                // first tab is precisely where one presses Shift+Tab.
+                false => (active_ix + count - 1) % count,
+            };
+            panels[next]
+        })
     };
-    let Some((node, panel, ix)) = step else {
+    let Some(panel) = step else {
         return false;
     };
-    dock.update(cx, |dock, cx| {
-        dock.move_panel(
-            panel,
-            InsertTarget::Tabs {
-                node,
-                ix: Some(ix),
-                activate: true,
-            },
-            window,
-            cx,
-        );
-    });
+    dock.update(cx, |dock, cx| dock.select_panel(panel, window, cx));
     true
 }
 
