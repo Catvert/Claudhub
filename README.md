@@ -21,7 +21,7 @@ sans quitter l'application.
   principale) à côté de ses terminaux ; ses onglets Git, Tests, Notes et
   Terminaux reprennent les panneaux de l'éditeur. La vue **Plan** dessine un
   arbre par dépôt — checkouts, worktrees, notes, terminaux —, et le lien d'un
-  agent coule quand il travaille, respire quand il attend. Les notes, les
+  agent est orange quand il travaille, rouge quand il attend. Les notes, les
   revues et les diagrammes sont des fichiers Markdown (`.claudhub/notes/`,
   versionné, ou le coffre du worktree), qu'un agent peut écrire lui-même :
   Claudhub lui donne une fiche de son environnement et une skill qui en
