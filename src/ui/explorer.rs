@@ -1551,6 +1551,11 @@ impl ClaudhubApp {
         // Reopening the file already open is not a jump: it would put the same
         // place on the trail twice and make one step back do nothing visible.
         let from = Some(self.here(cx)).filter(|from| from.path() != Some(path.as_path()));
+        // **A file opened is a file one wants to read**, and the home screen
+        // covers the editor: from a board's git or tests tab, the tab arrived
+        // behind it, and the gesture looked like it had done nothing. After
+        // `here`, which reads where one stood.
+        self.leave_overview(cx);
         let read = self
             .git
             .send(self.read_file_cmd(worktree.clone(), path.clone()));

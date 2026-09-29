@@ -591,7 +591,6 @@ impl ClaudhubApp {
                     return;
                 };
                 self.close_quick(window, cx);
-                self.leave_overview(cx);
                 self.open_in_editor(path, cx);
             }
             Mode::Text => {
