@@ -1302,6 +1302,11 @@ pub fn new_terminal(
     let Some(worktree) = this.active_path() else {
         return;
     };
+    // On the home, the terminal goes where the home shows its terminals.
+    if this.overview {
+        this.open_home_terminal(&worktree, window, cx);
+        return;
+    }
     // No `show_terminal_panel` here: it opens one when there is none, and this
     // gesture opens its own — the first press left two. `open_terminal` shows
     // the panel itself.

@@ -593,15 +593,38 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// Opens a shell from the home and shows it there, under its sub-tab,
-    /// the keys in it.
-    fn open_home_terminal(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens a shell from the home and shows it there, the keys in it: under
+    /// its sub-tab — the board brought back to its home unless it shows its
+    /// terminals already —, or on the plane, brought into view. The `+` of
+    /// the sub-tabs and `Ctrl+Maj+T`: a terminal opened behind another tab
+    /// was one to go looking for.
+    pub(super) fn open_home_terminal(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.terminals.len();
         self.open_terminal(worktree, super::terminal_view::Launch::shell(), window, cx);
-        if let Some(view) = self.terminals.last().map(|terminal| terminal.view.clone()) {
-            self.home_terminal
-                .insert(worktree.to_path_buf(), view.entity_id().as_u64());
-            super::dialogs::focus_field(&view, window, cx);
+        // A pty that would not open says so itself, and `last` would be an
+        // older terminal.
+        if self.terminals.len() == before {
+            return;
         }
+        let Some(view) = self.terminals.last().map(|terminal| terminal.view.clone()) else {
+            return;
+        };
+        let id = view.entity_id().as_u64();
+        self.home_terminal.insert(worktree.to_path_buf(), id);
+        match self.home_mode {
+            overview::HomeMode::Focus => {
+                if !matches!(self.board_view(worktree, cx), View::Home | View::Terminals) {
+                    self.show_board_view(worktree, View::Home, cx);
+                }
+            }
+            overview::HomeMode::Canvas => self.overview_reveal = Some(Node::Terminal(id)),
+        }
+        super::dialogs::focus_field(&view, window, cx);
         cx.notify();
     }
 
