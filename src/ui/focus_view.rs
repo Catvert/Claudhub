@@ -1762,13 +1762,20 @@ impl ClaudhubApp {
                         .child(tr!("focus-terminals-none")),
                 )
                 .child(
-                    Button::new("focus-terminals-open")
-                        .small()
-                        .icon(icon("square-terminal"))
-                        .label(tr!("terminal-new"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_focus_terminal(&worktree, window, cx);
-                        })),
+                    h_flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            Button::new("focus-terminals-open")
+                                .small()
+                                .icon(icon("square-terminal"))
+                                .label(tr!("terminal-new"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_focus_terminal(&worktree, window, cx);
+                                })),
+                        )
+                        .children(self.home_chat_offers(path, cx)),
                 )
                 .into_any_element();
         }

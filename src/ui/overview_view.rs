@@ -3013,10 +3013,6 @@ pub(super) fn add_items(
     menu: gpui_kit::component::menu::PopupMenu,
     cx: &App,
 ) -> gpui_kit::component::menu::PopupMenu {
-    let profiles = super::settings::Settings::global(cx)
-        .terminal
-        .agents
-        .clone();
     let worktree = hang_path(hang);
     let menu = if shell {
         let (app, worktree) = (app.clone(), worktree.clone());
@@ -3030,21 +3026,23 @@ pub(super) fn add_items(
     } else {
         menu
     };
+    // The agents are spoken to in a chat — see `ui::chat_view`. Their
+    // terminal profiles are not offered: a pty that only runs `claude` is
+    // what the chat replaced, and the profiles stay for what writes a note
+    // or a diagram.
     let chat_agents = super::settings::Settings::global(cx).terminal.chat_agents();
-    let agents = !profiles.is_empty() || !chat_agents.is_empty();
-    let menu = profiles.into_iter().fold(menu, |menu, profile| {
-        let (app, worktree) = (app.clone(), worktree.clone());
-        let label = SharedString::from(profile.label().to_string());
+    // None declared: the way to where one is. Absent, the menu said nothing
+    // of why there was no chat.
+    let menu = if chat_agents.is_empty() {
+        let app = app.clone();
         menu.item(
-            PopupMenuItem::new(label)
-                .icon(icon("bot"))
-                .on_click(move |_, window, cx| {
-                    open_on(&app, &worktree, Launch::agent(&profile), window, cx);
-                }),
+            PopupMenuItem::new(tr!("chat-configure"))
+                .icon(icon("message-square-plus"))
+                .on_click(move |_, window, cx| super::panels::open_chat_settings(&app, window, cx)),
         )
-    });
-    // The chats beside the agents' terminals: the same agents, spoken to in
-    // a chat tab rather than a pty — see `ui::chat_view`.
+    } else {
+        menu
+    };
     let menu = chat_agents.into_iter().fold(menu, |menu, agent| {
         let (app, worktree) = (app.clone(), worktree.clone());
         let label = tr!("chat-with", { agent: agent.label() });
@@ -3074,13 +3072,8 @@ pub(super) fn add_items(
                 });
             })
     };
-    // No rule above the notes when nothing stands there.
-    let menu = if shell || agents {
-        menu.separator()
-    } else {
-        menu
-    };
-    menu.item(item(tr!("overview-add-note"), "sticky-note", None))
+    menu.separator()
+        .item(item(tr!("overview-add-note"), "sticky-note", None))
         .item(item(
             tr!("overview-add-note-prompt"),
             "sparkles",

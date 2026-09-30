@@ -205,13 +205,50 @@ impl Scrollable for gpui_kit::component::VirtualListScrollHandle {
     }
 }
 
+/// What a wheel taken in the capture phase moves: an offset, how far it may
+/// go, and the way to write it.
+///
+/// A `ScrollHandle`, or a `gpui::list`'s state — the chat's transcript, whose
+/// rows have heights of their own and whose offset is the one its scrollbar
+/// reads and writes: writing it that way resumes following the tail when the
+/// motion lands at the end, as dragging the bar there does.
+pub trait WheelTarget: Clone + 'static {
+    fn offset(&self) -> gpui_kit::Point<gpui_kit::Pixels>;
+    fn max_offset(&self) -> gpui_kit::Point<gpui_kit::Pixels>;
+    fn set_offset(&self, offset: gpui_kit::Point<gpui_kit::Pixels>);
+}
+
+impl WheelTarget for gpui_kit::ScrollHandle {
+    fn offset(&self) -> gpui_kit::Point<gpui_kit::Pixels> {
+        gpui_kit::ScrollHandle::offset(self)
+    }
+    fn max_offset(&self) -> gpui_kit::Point<gpui_kit::Pixels> {
+        gpui_kit::ScrollHandle::max_offset(self)
+    }
+    fn set_offset(&self, offset: gpui_kit::Point<gpui_kit::Pixels>) {
+        gpui_kit::ScrollHandle::set_offset(self, offset)
+    }
+}
+
+impl WheelTarget for gpui_kit::ListState {
+    fn offset(&self) -> gpui_kit::Point<gpui_kit::Pixels> {
+        self.scroll_px_offset_for_scrollbar()
+    }
+    fn max_offset(&self) -> gpui_kit::Point<gpui_kit::Pixels> {
+        self.max_offset_for_scrollbar()
+    }
+    fn set_offset(&self, offset: gpui_kit::Point<gpui_kit::Pixels>) {
+        self.set_offset_from_scrollbar(offset)
+    }
+}
+
 /// Is this notch ours to smooth?
 ///
 /// Only a wheel — a trackpad sends `ScrollDelta::Pixels`, which is the finger
 /// itself — only the vertical axis, and only while the view has somewhere to
 /// go: at the edge the event has to bubble, exactly as the mask lets it.
 fn takes_over(
-    handle: &gpui_kit::ScrollHandle,
+    target: &impl WheelTarget,
     event: &gpui_kit::ScrollWheelEvent,
     window: &Window,
 ) -> bool {
@@ -222,9 +259,54 @@ fn takes_over(
     if delta.y == gpui_kit::px(0.) || delta.x.abs() > delta.y.abs() {
         return false;
     }
-    let max = handle.max_offset().y.max(gpui_kit::px(0.));
-    let at = handle.offset().y.clamp(-max, gpui_kit::px(0.));
+    let max = target.max_offset().y.max(gpui_kit::px(0.));
+    let at = target.offset().y.clamp(-max, gpui_kit::px(0.));
     (at + delta.y).clamp(-max, gpui_kit::px(0.)) != at
+}
+
+/// The layer that takes a wheel notch **before** a `ScrollableMask` does,
+/// and eases it instead — see `ClaudhubApp::smoothed` for why the mask
+/// leaves no other way in.
+///
+/// Placed as the **first** child of a positioned container, ahead of what
+/// scrolls: capture runs in paint order. `motion` finds the smoothing on the
+/// view, which advances it from its own `render`.
+pub fn wheel_capture<V: 'static>(
+    target: impl WheelTarget,
+    entity: gpui_kit::Entity<V>,
+    motion: impl Fn(&mut V) -> &mut ScrollMotion + Clone + 'static,
+) -> impl IntoElement {
+    // A hitbox and not the bare bounds: a window listener sees no hierarchy,
+    // so a rectangle alone cannot tell that something is painted over this
+    // panel. A popover's `occlude()` cuts the hit test short before a hitbox
+    // inserted here, which is what stops a panel from taking the wheel of a
+    // list hanging above it.
+    gpui_kit::canvas(
+        |bounds, window, _cx| window.insert_hitbox(bounds, gpui_kit::HitboxBehavior::Normal),
+        move |_, hitbox: gpui_kit::Hitbox, window, _cx| {
+            window.on_mouse_event(
+                move |event: &gpui_kit::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui_kit::DispatchPhase::Capture
+                        || !hitbox.should_handle_scroll(window)
+                        || !takes_over(&target, event, window)
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let motion = motion.clone();
+                    let target = target.clone();
+                    entity.update(cx, |view, cx| {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        let next = motion(view).push(target.offset(), delta, target.max_offset());
+                        target.set_offset(next);
+                        cx.notify();
+                    });
+                },
+            );
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 impl ClaudhubApp {
@@ -285,52 +367,18 @@ impl ClaudhubApp {
         let id: SharedString = id.into();
         let base = handle.base();
         self.motion(id.clone(), axes).advance(&base, window);
-        let entity = cx.entity();
+        let key = id.clone();
         div()
-            .id(gpui_kit::ElementId::Name(id.clone()))
+            .id(gpui_kit::ElementId::Name(id))
             .relative()
             .size_full()
             .min_h_0()
             .min_w_0()
-            .child(
-                // A hitbox and not the bare bounds: a window listener sees no
-                // hierarchy, so a rectangle alone cannot tell that something is
-                // painted over this panel. A popover's `occlude()` cuts the hit
-                // test short before a hitbox inserted here, which is what stops
-                // a panel from taking the wheel of a list hanging above it.
-                gpui_kit::canvas(
-                    |bounds, window, _cx| {
-                        window.insert_hitbox(bounds, gpui_kit::HitboxBehavior::Normal)
-                    },
-                    move |_, hitbox: gpui_kit::Hitbox, window, _cx| {
-                        window.on_mouse_event({
-                            let id = id.clone();
-                            let base = base.clone();
-                            move |event: &gpui_kit::ScrollWheelEvent, phase, window, cx| {
-                                if phase != gpui_kit::DispatchPhase::Capture
-                                    || !hitbox.should_handle_scroll(window)
-                                    || !takes_over(&base, event, window)
-                                {
-                                    return;
-                                }
-                                cx.stop_propagation();
-                                entity.update(cx, |this, cx| {
-                                    let delta = event.delta.pixel_delta(window.line_height());
-                                    let next = this.motion(id.clone(), axes).push(
-                                        base.offset(),
-                                        delta,
-                                        base.max_offset(),
-                                    );
-                                    base.set_offset(next);
-                                    cx.notify();
-                                });
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .child(wheel_capture(
+                base,
+                cx.entity(),
+                move |this: &mut ClaudhubApp| this.motion(key.clone(), axes),
+            ))
             .child(content)
     }
 

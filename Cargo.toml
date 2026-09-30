@@ -213,5 +213,5 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] 
 
 # Patches applicatifs portés sur le tag upstream v0.7.0.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "59b5176bc9d431741f5f3cb9a58d4588978e6094" }
-gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "59b5176bc9d431741f5f3cb9a58d4588978e6094" }
+gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "f2a59fa62124e092c712e57437067b16b4a75b8f" }
+gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "f2a59fa62124e092c712e57437067b16b4a75b8f" }

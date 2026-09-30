@@ -217,7 +217,9 @@ pub struct ToolCall {
     /// [`Terminal`].
     pub terminal: Option<Terminal>,
     pub permission: Option<Permission>,
-    pub expanded: bool,
+    /// Unfolded or folded by hand — or by a permission it asks —; `None`
+    /// leaves it to [`ToolCall::is_expanded`]'s default.
+    pub expanded: Option<bool>,
 }
 
 /// A command's output, as the agent reports it on its tool call.
@@ -256,6 +258,18 @@ impl Exit {
 const OUTPUT_KEPT: usize = 256 * 1024;
 
 impl ToolCall {
+    /// Whether the card shows its body: what the hand chose, else **open
+    /// on an edit and folded on the rest**. A diff is what one reviews of a
+    /// turn, and it is short; a command's output is long and read on
+    /// demand — its header already says the line it ran and how it ended.
+    pub fn is_expanded(&self) -> bool {
+        self.expanded.unwrap_or_else(|| {
+            self.content
+                .iter()
+                .any(|content| matches!(content, ToolContent::Diff { .. }))
+        })
+    }
+
     /// The command line the call ran, from what it was called with: a string,
     /// or an argv — `bash -lc <script>` read as its script.
     pub fn command(&self) -> Option<String> {
@@ -403,6 +417,9 @@ pub enum Entry {
     User {
         text: String,
         images: usize,
+        /// Read only for a message another session sent in
+        /// ([`agent_message`]), which is shown folded.
+        expanded: bool,
     },
     /// The agent's reply, Markdown, and the message it belongs to — two replies
     /// in a row are two messages only when the agent says so.
@@ -733,6 +750,7 @@ impl Chat {
         self.entries.push(Entry::User {
             text: text.to_string(),
             images: images.len(),
+            expanded: false,
         });
         let mut prompt = Vec::new();
         if !text.is_empty() {
@@ -918,8 +936,10 @@ impl Chat {
     /// Folds or unfolds a thought, a tool call, a compaction or a subagent.
     pub fn toggle(&mut self, ix: usize) {
         match self.entries.get_mut(ix) {
-            Some(Entry::Thought { expanded, .. }) => *expanded = !*expanded,
-            Some(Entry::Tool(tool)) => tool.expanded = !tool.expanded,
+            Some(Entry::Thought { expanded, .. } | Entry::User { expanded, .. }) => {
+                *expanded = !*expanded
+            }
+            Some(Entry::Tool(tool)) => tool.expanded = Some(!tool.is_expanded()),
             Some(Entry::Compaction(compaction)) => compaction.expanded = !compaction.expanded,
             Some(Entry::Subagent(session)) => {
                 let session = session.clone();
@@ -929,6 +949,23 @@ impl Chat {
             }
             _ => {}
         }
+    }
+
+    /// What the user sent, in order, as the timeline lists it — not what
+    /// another session sent in ([`agent_message`]).
+    pub fn prompts(&self) -> Vec<Prompt<'_>> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(entry, item)| match item {
+                Entry::User { text, images, .. } if agent_message(text).is_none() => Some(Prompt {
+                    entry,
+                    summary: text.lines().map(str::trim).find(|line| !line.is_empty()),
+                    images: *images,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A subagent, by its session id.
@@ -1219,7 +1256,7 @@ impl Chat {
                     request: id,
                     options,
                 });
-                tool.expanded = true;
+                tool.expanded = Some(true);
                 Vec::new()
             }
             None => vec![response(
@@ -1555,13 +1592,14 @@ fn fold(entries: &mut Vec<Entry>, update: &Value) -> bool {
                 block_text(block)
             };
             match entries.last_mut() {
-                Some(Entry::User { text, images }) => {
+                Some(Entry::User { text, images, .. }) => {
                     text.push_str(&chunk);
                     *images += usize::from(image);
                 }
                 _ => entries.push(Entry::User {
                     text: chunk,
                     images: usize::from(image),
+                    expanded: false,
                 }),
             }
         }
@@ -1625,7 +1663,7 @@ fn upsert_tool(entries: &mut Vec<Entry>, update: &Value) {
         raw_input: update["rawInput"].clone(),
         terminal: None,
         permission: None,
-        expanded: false,
+        expanded: None,
         id,
     }));
     if let Some(Entry::Tool(tool)) = entries.last_mut() {
@@ -2029,6 +2067,78 @@ fn choices(schema: &Value) -> Option<Vec<FieldChoice>> {
     (!choices.is_empty()).then_some(choices)
 }
 
+/// A prompt of the conversation: where it is, and what it reads as.
+#[derive(Debug, PartialEq)]
+pub struct Prompt<'a> {
+    /// Its index in [`Chat::entries`].
+    pub entry: usize,
+    /// Its first line with something on it; `None` for images alone.
+    pub summary: Option<&'a str>,
+    pub images: usize,
+}
+
+/// The prompt being read, by its position among the prompts.
+///
+/// `tops` says where each one starts against the view's top: above it
+/// (negative), in it, or `None` below it. The one read is the last to have
+/// crossed `reading` — a line a third down, not the edge: the last prompt
+/// sat in plain view under an older one still lit — and at the end of the
+/// transcript, the last one whatever its place.
+pub fn prompt_at(tops: &[Option<f32>], reading: f32, at_end: bool) -> Option<usize> {
+    if at_end {
+        return tops.len().checked_sub(1);
+    }
+    tops.iter()
+        .rposition(|top| top.is_some_and(|top| top <= reading))
+}
+
+/// A message another Claude session sent into this one, as Claude Code
+/// writes it into the conversation: `<agent-message from="…">`, after a line
+/// that says so. A subagent's final report comes that way — a flush-left
+/// preamble, then the report indented two spaces.
+#[derive(Debug, PartialEq)]
+pub struct AgentMessage<'a> {
+    /// The sending session's agent id.
+    pub from: &'a str,
+    /// A subagent handing its work back.
+    pub handback: bool,
+    /// What it says: a report without its preamble and its indent.
+    pub text: String,
+}
+
+/// Reads a user message as [`AgentMessage`]; `None` for one typed by hand.
+/// Tolerates a message still streaming in, its closing tag not there yet.
+pub fn agent_message(text: &str) -> Option<AgentMessage<'_>> {
+    const OPEN: &str = "<agent-message from=\"";
+    let start = text.find(OPEN)?;
+    // The tag opens the message: one line at most before it.
+    if text[..start].trim().contains('\n') {
+        return None;
+    }
+    let rest = &text[start + OPEN.len()..];
+    let from = &rest[..rest.find('"')?];
+    let rest = &rest[from.len()..];
+    let body = &rest[rest.find('>')? + 1..];
+    let body = body.split("</agent-message>").next().unwrap_or(body);
+    let handback = body.trim_start().starts_with("[Subagent hand-back]");
+    let report = handback.then(|| {
+        body.lines()
+            .skip_while(|line| !line.starts_with("  "))
+            .map(|line| line.strip_prefix("  ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    let text = match report {
+        Some(report) if !report.trim().is_empty() => report.trim().to_string(),
+        _ => body.trim().to_string(),
+    };
+    Some(AgentMessage {
+        from,
+        handback,
+        text,
+    })
+}
+
 /// The slash commands the composer offers for what is typed: a `/` and a
 /// word with no space yet — the command's arguments are the agent's
 /// business. Matched on any part of the name, case ignored, in the agent's
@@ -2243,6 +2353,98 @@ mod tests {
     }
 
     #[test]
+    fn the_timeline_lists_what_the_user_sent_and_knows_where_one_reads() {
+        let user = |text: &str, images| Entry::User {
+            text: text.into(),
+            images,
+            expanded: false,
+        };
+        let mut chat = Chat::new("/w".to_string());
+        chat.entries = vec![
+            user("\n  fix the tests\nplease", 0),
+            Entry::Agent {
+                text: "done".into(),
+                id: None,
+            },
+            user("<agent-message from=\"a\">\nreport", 0),
+            user("", 2),
+        ];
+        let prompts = chat.prompts();
+        assert_eq!(
+            prompts,
+            vec![
+                Prompt {
+                    entry: 0,
+                    summary: Some("fix the tests"),
+                    images: 0
+                },
+                Prompt {
+                    entry: 3,
+                    summary: None,
+                    images: 2
+                },
+            ]
+        );
+        // The first above the view, the second a quarter down, reading a
+        // third down: the second is read.
+        assert_eq!(prompt_at(&[Some(-300.), Some(150.)], 200., false), Some(1));
+        // Still below the reading line, or below the view: the first.
+        assert_eq!(prompt_at(&[Some(-300.), Some(450.)], 200., false), Some(0));
+        assert_eq!(prompt_at(&[Some(-300.), None], 200., false), Some(0));
+        // Nothing crossed yet; and at the end, the last one.
+        assert_eq!(prompt_at(&[Some(500.)], 200., false), None);
+        assert_eq!(prompt_at(&[Some(-300.), Some(450.)], 200., true), Some(1));
+    }
+
+    #[test]
+    fn a_subagent_report_is_read_without_its_wrapper() {
+        let sent = "Another Claude session sent a message:\n<agent-message from=\"adb79\">\n\
+                    [Subagent hand-back] The text below is the final report.\n\
+                    Notes above are not part of it.\n  J'ai fait les points.\n\n  **Commits**\n  - `397ebb7`\n\
+                    </agent-message>";
+        let message = agent_message(sent).unwrap();
+        assert_eq!(message.from, "adb79");
+        assert!(message.handback);
+        assert_eq!(
+            message.text,
+            "J'ai fait les points.\n\n**Commits**\n- `397ebb7`"
+        );
+        // Streaming in, and from a session that is not a subagent.
+        let other = agent_message("<agent-message from=\"x\">\nbonjour").unwrap();
+        assert_eq!((other.handback, other.text.as_str()), (false, "bonjour"));
+        // Typed by hand, or merely quoting one.
+        assert_eq!(agent_message("bonjour"), None);
+        assert_eq!(agent_message("a\nb\n<agent-message from=\"x\">"), None);
+    }
+
+    #[test]
+    fn an_edit_opens_and_a_command_stays_folded_until_the_hand_says() {
+        let mut chat = ready();
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "e", "title": "Edit a.rs",
+                    "kind": "edit", "status": "completed",
+                    "content": [{ "type": "diff", "path": "/w/a.rs", "oldText": "a", "newText": "b" }] }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "c", "title": "ls",
+                    "kind": "execute", "status": "completed", "rawInput": { "command": "ls" } }),
+        );
+        let expanded = |chat: &Chat, ix: usize| match &chat.entries[ix] {
+            Entry::Tool(tool) => tool.is_expanded(),
+            entry => panic!("{entry:?}"),
+        };
+        assert!(expanded(&chat, 0));
+        assert!(!expanded(&chat, 1));
+        // A press flips what is shown, whichever the default was.
+        chat.toggle(0);
+        chat.toggle(1);
+        assert!(!expanded(&chat, 0));
+        assert!(expanded(&chat, 1));
+    }
+
+    #[test]
     fn a_permission_is_asked_on_the_tool_and_answered_by_its_id() {
         let mut chat = ready();
         chat.prompt("edit it").unwrap();
@@ -2401,7 +2603,8 @@ mod tests {
             chat.entries[0],
             Entry::User {
                 text: "hello".into(),
-                images: 0
+                images: 0,
+                expanded: false
             }
         );
         assert_eq!(chat.entries.len(), 2);
@@ -2895,7 +3098,8 @@ mod tests {
             chat.entries[0],
             Entry::User {
                 text: String::new(),
-                images: 1
+                images: 1,
+                expanded: false
             }
         );
         // One that does not is sent the text alone, and nothing is sent without it.
@@ -3078,7 +3282,8 @@ mod tests {
             vec![
                 Entry::User {
                     text: "count".into(),
-                    images: 0
+                    images: 0,
+                    expanded: false
                 },
                 Entry::Subagent("toolu_A".into()),
             ]

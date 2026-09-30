@@ -21,8 +21,7 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::{
     canvas, div, point, prelude::*, AnyElement, App, AppContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, SharedString,
-    WeakEntity, Window,
+    FocusHandle, Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, WeakEntity, Window,
 };
 
 use gpui_kit::component::dock::{panel_handle, register_panel};
@@ -2017,57 +2016,6 @@ impl Render for TerminalPanel {
     }
 }
 
-/// The button that opens a chat with an agent, beside the terminals' `+`.
-///
-/// A click when there is one agent to speak to, a menu when there are
-/// several: unlike the shell, a chat has to be told whom it is with.
-pub(super) fn new_chat_button(
-    app: &WeakEntity<ClaudhubApp>,
-    view: crate::ui::settings::TerminalPlacement,
-    cx: &App,
-) -> AnyElement {
-    let agents = crate::ui::settings::Settings::global(cx)
-        .terminal
-        .chat_agents();
-    let button = Button::new("new-chat")
-        .ghost()
-        .small()
-        .icon(crate::ui::icons::icon("message-square-plus"))
-        .tooltip(tr!("chat-new"));
-    // No agent with a command to run: the button stays, and leads to where
-    // one is set. Hidden, it left nothing to find and nothing to say why.
-    if agents.is_empty() {
-        let app = app.clone();
-        return button
-            .tooltip(tr!("chat-configure"))
-            .on_click(move |_, window, cx| open_chat_settings(&app, window, cx))
-            .into_any_element();
-    }
-    if let [agent] = agents.as_slice() {
-        let (app, agent) = (app.clone(), agent.clone());
-        return button
-            .on_click(move |_, window, cx| open_chat(&app, agent.clone(), view, window, cx))
-            .into_any_element();
-    }
-    let app = app.clone();
-    button
-        .dropdown_menu(move |menu, _, _| {
-            agents.iter().fold(menu, |menu, agent| {
-                let (app, agent) = (app.clone(), agent.clone());
-                menu.item(
-                    gpui_kit::component::menu::PopupMenuItem::new(SharedString::from(
-                        agent.label().to_string(),
-                    ))
-                    .icon(crate::ui::icons::icon("bot"))
-                    .on_click(move |_, window, cx| {
-                        open_chat(&app, agent.clone(), view, window, cx)
-                    }),
-                )
-            })
-        })
-        .into_any_element()
-}
-
 /// The settings, on the page where the chat agents are declared.
 pub(super) fn open_chat_settings(app: &WeakEntity<ClaudhubApp>, window: &mut Window, cx: &mut App) {
     let Some(app) = app.upgrade() else {
@@ -2097,18 +2045,58 @@ fn open_chat(
 }
 
 /// The shell's `+` and the chat's button, as a terminal bar ends.
+/// The `+` at the end of a terminals' bar: a shell, or a chat with one of
+/// the agents — one menu where a button for each stood side by side. The
+/// runs' view holds what the run widget started, and its `+` is a shell.
 fn new_tab_buttons(
     app: &WeakEntity<ClaudhubApp>,
     view: crate::ui::settings::TerminalPlacement,
     cx: &App,
-) -> impl IntoElement {
-    gpui_kit::component::h_flex()
-        .gap_0p5()
-        .child(new_terminal_button(app, Some(view)))
-        // The runs' view holds what the run widget started, and nothing else.
-        .when(view != crate::ui::settings::TerminalPlacement::Run, |el| {
-            el.child(new_chat_button(app, view, cx))
+) -> AnyElement {
+    if view == crate::ui::settings::TerminalPlacement::Run {
+        return new_terminal_button(app, Some(view)).into_any_element();
+    }
+    let agents = crate::ui::settings::Settings::global(cx)
+        .terminal
+        .chat_agents();
+    let app = app.clone();
+    Button::new("new-tab")
+        .ghost()
+        .small()
+        .icon(crate::ui::icons::icon("plus"))
+        .tooltip(tr!("focus-home-add"))
+        .dropdown_menu(move |menu, _, _| {
+            let shell = app.clone();
+            let menu = menu.item(
+                gpui_kit::component::menu::PopupMenuItem::new(tr!("terminal-new"))
+                    .icon(crate::ui::icons::icon("square-terminal"))
+                    .on_click(move |_, window, cx| {
+                        open_terminal(&shell, None, Some(view), window, cx)
+                    }),
+            );
+            // No agent to speak to: the way to where one is declared.
+            if agents.is_empty() {
+                let app = app.clone();
+                return menu.separator().item(
+                    gpui_kit::component::menu::PopupMenuItem::new(tr!("chat-configure"))
+                        .icon(crate::ui::icons::icon("message-square-plus"))
+                        .on_click(move |_, window, cx| open_chat_settings(&app, window, cx)),
+                );
+            }
+            agents.iter().fold(menu.separator(), |menu, agent| {
+                let (app, agent) = (app.clone(), agent.clone());
+                menu.item(
+                    gpui_kit::component::menu::PopupMenuItem::new(tr!("chat-with", {
+                        agent: agent.label()
+                    }))
+                    .icon(crate::ui::icons::icon("message-square-plus"))
+                    .on_click(move |_, window, cx| {
+                        open_chat(&app, agent.clone(), view, window, cx)
+                    }),
+                )
+            })
         })
+        .into_any_element()
 }
 
 /// A chat with an agent, as a tab among the terminals — see `ui::chat_view`.

@@ -529,7 +529,7 @@ impl ClaudhubApp {
         let worktree = path.to_path_buf();
         let every = path.to_path_buf();
         let (app, hang) = (cx.entity().downgrade(), Hang::Worktree(path.to_path_buf()));
-        let chat_button = self.home_chat_button(path, cx);
+        let shared = app.clone();
         let bar = h_flex()
             .flex_none()
             .w_full()
@@ -544,25 +544,26 @@ impl ClaudhubApp {
                     .overflow_x_scroll()
                     .children(tabs),
             )
+            // One `+`: a shell, a chat, a note — the board's own way of
+            // adding, where three buttons stood side by side.
             .child(
-                Button::new("focus-home-terminal")
+                Button::new("focus-home-add")
                     .ghost()
                     .xsmall()
                     .icon(icon("plus"))
-                    .tooltip(tr!("terminal-new"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_home_terminal(&worktree, window, cx);
-                    })),
-            )
-            .child(chat_button)
-            .child(
-                Button::new("focus-home-agent-add")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("bot"))
-                    .label(tr!("focus-home-add"))
+                    .tooltip(tr!("focus-home-add"))
                     .dropdown_menu(move |menu, _, cx| {
-                        super::overview_view::add_items(&app, &hang, false, menu, cx)
+                        let (app, worktree) = (app.clone(), worktree.clone());
+                        let menu = menu.item(
+                            gpui_kit::component::menu::PopupMenuItem::new(tr!("terminal-new"))
+                                .icon(icon("square-terminal"))
+                                .on_click(move |_, window, cx| {
+                                    let _ = app.update(cx, |this, cx| {
+                                        this.open_home_terminal(&worktree, window, cx)
+                                    });
+                                }),
+                        );
+                        super::overview_view::add_items(&shared, &hang, false, menu, cx)
                     }),
             )
             .child(
@@ -633,13 +634,20 @@ impl ClaudhubApp {
                             .child(tr!("focus-terminals-none")),
                     )
                     .child(
-                        Button::new("focus-home-terminal-open")
-                            .small()
-                            .icon(icon("square-terminal"))
-                            .label(tr!("terminal-new"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_home_terminal(&worktree, window, cx);
-                            })),
+                        h_flex()
+                            .flex_wrap()
+                            .justify_center()
+                            .gap_2()
+                            .child(
+                                Button::new("focus-home-terminal-open")
+                                    .small()
+                                    .icon(icon("square-terminal"))
+                                    .label(tr!("terminal-new"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_home_terminal(&worktree, window, cx);
+                                    })),
+                            )
+                            .children(self.home_chat_offers(path, cx)),
                     )
                     .into_any_element()
             }
@@ -652,55 +660,35 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The button that opens a chat from a board's home, beside its `+`: a
-    /// click with one agent, a menu with several — see
-    /// `panels::new_chat_button`.
-    fn home_chat_button(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// What an empty home offers beside a shell: a chat with each agent —
+    /// or, with none declared, the way to where one is.
+    pub(super) fn home_chat_offers(&self, path: &Path, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let agents = super::settings::Settings::global(cx).terminal.chat_agents();
-        let button = Button::new("focus-home-chat")
-            .ghost()
-            .xsmall()
-            .icon(icon("message-square-plus"))
-            .tooltip(tr!("chat-new"));
-        let app = cx.entity().downgrade();
-        // No agent to run: to the settings — see `panels::new_chat_button`.
         if agents.is_empty() {
-            return button
-                .tooltip(tr!("chat-configure"))
+            let app = cx.entity().downgrade();
+            return vec![Button::new("focus-home-chat-configure")
+                .small()
+                .ghost()
+                .icon(icon("message-square-plus"))
+                .label(tr!("chat-configure"))
                 .on_click(move |_, window, cx| super::panels::open_chat_settings(&app, window, cx))
-                .into_any_element();
+                .into_any_element()];
         }
-        let worktree = path.to_path_buf();
-        if let [agent] = agents.as_slice() {
-            let agent = agent.clone();
-            return button
-                .on_click(move |_, window, cx| {
-                    let (worktree, agent) = (worktree.clone(), agent.clone());
-                    let _ = app.update(cx, |this, cx| {
-                        this.open_home_chat(&worktree, agent, window, cx)
-                    });
-                })
-                .into_any_element();
-        }
-        button
-            .dropdown_menu(move |menu, _, _| {
-                agents.iter().fold(menu, |menu, agent| {
-                    let (app, worktree, agent) = (app.clone(), worktree.clone(), agent.clone());
-                    menu.item(
-                        gpui_kit::component::menu::PopupMenuItem::new(
-                            gpui_kit::SharedString::from(agent.label().to_string()),
-                        )
-                        .icon(icon("bot"))
-                        .on_click(move |_, window, cx| {
-                            let (worktree, agent) = (worktree.clone(), agent.clone());
-                            let _ = app.update(cx, |this, cx| {
-                                this.open_home_chat(&worktree, agent, window, cx)
-                            });
-                        }),
-                    )
-                })
+        agents
+            .into_iter()
+            .enumerate()
+            .map(|(n, agent)| {
+                let worktree = path.to_path_buf();
+                Button::new(("focus-home-chat-open", n))
+                    .small()
+                    .icon(icon("message-square-plus"))
+                    .label(tr!("chat-with", { agent: agent.label() }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_chat(&worktree, agent.clone(), window, cx);
+                    }))
+                    .into_any_element()
             })
-            .into_any_element()
+            .collect()
     }
 
     /// Opens a chat from the home and shows it under its sub-tab, the keys in

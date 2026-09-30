@@ -2670,7 +2670,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=59b5176bc9d431741f5f3cb9a58d4588978e6094#59b5176bc9d431741f5f3cb9a58d4588978e6094"
+source = "git+https://github.com/Catvert/gpui-kit?rev=f2a59fa62124e092c712e57437067b16b4a75b8f#f2a59fa62124e092c712e57437067b16b4a75b8f"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2709,7 +2709,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=59b5176bc9d431741f5f3cb9a58d4588978e6094#59b5176bc9d431741f5f3cb9a58d4588978e6094"
+source = "git+https://github.com/Catvert/gpui-kit?rev=f2a59fa62124e092c712e57437067b16b4a75b8f#f2a59fa62124e092c712e57437067b16b4a75b8f"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2787,7 +2787,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=59b5176bc9d431741f5f3cb9a58d4588978e6094#59b5176bc9d431741f5f3cb9a58d4588978e6094"
+source = "git+https://github.com/Catvert/gpui-kit?rev=f2a59fa62124e092c712e57437067b16b4a75b8f#f2a59fa62124e092c712e57437067b16b4a75b8f"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=59b5176bc9d431741f5f3cb9a58d4588978e6094#59b5176bc9d431741f5f3cb9a58d4588978e6094"
+source = "git+https://github.com/Catvert/gpui-kit?rev=f2a59fa62124e092c712e57437067b16b4a75b8f#f2a59fa62124e092c712e57437067b16b4a75b8f"
 dependencies = [
  "anyhow",
  "gpui-pre",

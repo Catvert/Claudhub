@@ -27,15 +27,20 @@
 //! view is updated from inside the application's own event pump, where
 //! reaching back into the application would be a double borrow.
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
+use gpui_kit::base::TextSelection;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
+    highlighter::HighlightTheme,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     message_scroller::{MessageScroller, MessageScrollerState},
     popover::Popover,
     text::{TextView, TextViewState, TextViewStyle},
@@ -44,17 +49,20 @@ use gpui_kit::component::{
 use gpui_kit::{
     actions, div, prelude::*, px, rems, uniform_list, AnyElement, App, ClipboardItem, Context,
     Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle, Hsla, KeyBinding, MouseButton,
-    ScrollStrategy, SharedString, StyleRefinement, Subscription, UniformListScrollHandle,
-    WeakEntity, Window,
+    ScrollStrategy, SharedString, StyleRefinement, StyledText, Subscription,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 
 use crate::acp::chat::{
-    command_matches, mention_at_end, mentioned_files, Answer, Chat, Choice, ConfigOption, Entry,
-    Field, FieldKind, Notice, OptionKind, Phase, Status, ToolCall, ToolContent,
+    agent_message, command_matches, mention_at_end, mentioned_files, Answer, Chat, Choice,
+    ConfigOption, Entry, Field, FieldKind, Notice, OptionKind, Phase, Status, ToolCall,
+    ToolContent,
 };
 use crate::tr;
+use crate::ui::highlight::{language_for_path, DocumentHighlights, LineStyles};
 use crate::ui::icons::icon;
+use crate::ui::motion::{Axes, ScrollMotion};
 
 actions!(
     claudhub_chat,
@@ -66,7 +74,9 @@ actions!(
         /// The row picked into the text (Tab).
         ChatPickConfirm,
         /// Stops the turn under way (Escape).
-        ChatEscape
+        ChatEscape,
+        /// Copies the composer's selection, or else the transcript's.
+        ChatCopy
     ]
 );
 
@@ -87,6 +97,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", ChatPickDown, composer),
         KeyBinding::new("tab", ChatPickConfirm, composer),
         KeyBinding::new("escape", ChatEscape, composer),
+        // The field's own copy writes an empty clipboard when nothing is
+        // selected in it — and the keyboard stays in the composer while
+        // the mouse selects in the transcript.
+        KeyBinding::new("secondary-c", ChatCopy, composer),
         KeyBinding::new("up", ChatPickUp, picker),
         KeyBinding::new("down", ChatPickDown, picker),
     ]
@@ -129,11 +143,122 @@ const IMAGE_MAX: usize = 5 * 1024 * 1024;
 /// How many files the `@` list offers.
 const MENTIONS: usize = 50;
 
+/// The timeline's width, unfolded.
+const TIMELINE_WIDTH: f32 = 200.;
+
 /// How many diff rows a tool call shows before it stops.
 const DIFF_ROWS: usize = 200;
 
+/// How many it shows until asked for the rest: an edit is open by default,
+/// and a file written whole would otherwise fill the transcript.
+const DIFF_FOLDED: usize = 12;
+
 /// Lines of context kept around a diff's changes.
 const DIFF_CONTEXT: usize = 2;
+
+/// What a command line is shown after.
+const PROMPT: &str = "$ ";
+
+/// What a tool call's card shows that has a grammar — its command line, its
+/// diffs —, coloured when the call arrives or changes (`ChatView::paint`):
+/// never in a render, where every visible row is built at every frame and
+/// the first parse of a language compiles its queries.
+struct Painted {
+    /// What it was coloured from: a call is amended as it runs.
+    stamp: u64,
+    /// The command line's, over the command alone.
+    command: LineStyles,
+    /// One per content of the call, `None` where it is text.
+    diffs: Vec<Option<PaintedDiff>>,
+}
+
+/// A diff's rows, and each side coloured whole with the file's grammar —
+/// a row reads its colours on the side it shows.
+struct PaintedDiff {
+    rows: Vec<(char, usize)>,
+    old: DocumentHighlights,
+    new: DocumentHighlights,
+}
+
+/// The cards' colours, by tool call id.
+type Paints = HashMap<String, Painted>;
+
+impl Painted {
+    fn of(tool: &ToolCall, stamp: u64, theme: &HighlightTheme) -> Self {
+        let command = tool
+            .command()
+            .map(|command| {
+                let lines = DocumentHighlights::for_language("bash", &command, theme);
+                joined(&command, &lines)
+            })
+            .unwrap_or_default();
+        let diffs = tool
+            .content
+            .iter()
+            .map(|content| match content {
+                ToolContent::Diff { path, old, new } => {
+                    let old = old.as_deref().unwrap_or_default();
+                    // A fragment as often as a file — an edit's two strings —,
+                    // so read as one: `for_language` gives PHP its `<?php`.
+                    let colour = |text: &str| {
+                        language_for_path(Path::new(path))
+                            .map(|language| DocumentHighlights::for_language(language, text, theme))
+                            .unwrap_or_default()
+                    };
+                    Some(PaintedDiff {
+                        rows: diff_lines(old, new, DIFF_CONTEXT),
+                        old: colour(old),
+                        new: colour(new),
+                    })
+                }
+                ToolContent::Text(_) => None,
+            })
+            .collect();
+        Self {
+            stamp,
+            command,
+            diffs,
+        }
+    }
+
+    /// What a call's colours depend on, cheaply: its command, and the size
+    /// of each diff — a diff arrives whole, it is not rewritten in place.
+    fn stamp(tool: &ToolCall) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool.command().hash(&mut hasher);
+        for content in &tool.content {
+            if let ToolContent::Diff { path, old, new } = content {
+                (path, old.as_ref().map(String::len), new.len()).hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+}
+
+/// A text's per-line colours, laid back over the whole text.
+fn joined(text: &str, lines: &DocumentHighlights) -> LineStyles {
+    let mut at = 0;
+    let mut styles = Vec::new();
+    for (ix, line) in text.split('\n').enumerate() {
+        styles.extend(
+            lines
+                .line(ix)
+                .iter()
+                .map(|(range, style)| (range.start + at..range.end + at, *style)),
+        );
+        at += line.len() + 1;
+    }
+    styles
+}
+
+/// Colours moved right by what is written before their text.
+fn shifted(styles: &[(Range<usize>, HighlightStyle)], by: usize) -> LineStyles {
+    styles
+        .iter()
+        .map(|(range, style)| (range.start + by..range.end + by, *style))
+        .collect()
+}
 
 /// What the composer's list offers for the text so far.
 enum Suggest {
@@ -161,6 +286,16 @@ pub struct ChatView {
     resume: Option<String>,
     input: Entity<TextareaState>,
     scroller: Entity<MessageScrollerState>,
+    /// The wheel over the transcript, eased rather than let jump
+    /// (`scroll::wheel_capture`).
+    motion: ScrollMotion,
+    /// The tool calls' colours, and the theme they were computed under.
+    painted: Paints,
+    painted_theme: Option<Arc<HighlightTheme>>,
+    /// The diffs shown whole, by tool call id and content index.
+    open_diffs: HashSet<(String, usize)>,
+    /// The timeline unfolded, or a rail of points.
+    timeline_open: bool,
     /// One Markdown state per agent message or thought, beside the entry it
     /// renders, and how much of its text it has been fed: streaming appends,
     /// and a state re-parsed from the start at every chunk would cost the
@@ -227,6 +362,11 @@ impl ChatView {
             resume,
             input,
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
+            motion: ScrollMotion::new(Axes::Vertical),
+            painted: HashMap::new(),
+            painted_theme: None,
+            open_diffs: HashSet::new(),
+            timeline_open: true,
             markdown: Vec::new(),
             pick: 0,
             history_open: false,
@@ -364,6 +504,207 @@ impl ChatView {
             // Streaming grows the last rows, and a tool call is amended a few
             // rows back: those are measured again, not the whole transcript.
             scroller.remeasure_items(count.saturating_sub(8)..count, cx);
+        });
+        self.paint(cx);
+        cx.notify();
+    }
+
+    /// Colours what changed among the tool calls — see [`Painted`] —, the
+    /// subagents' included, and forgets the calls that are gone. All of
+    /// them again under a new theme.
+    fn paint(&mut self, cx: &App) {
+        let theme = cx.theme().highlight_theme.clone();
+        if !self
+            .painted_theme
+            .as_ref()
+            .is_some_and(|painted| Arc::ptr_eq(painted, &theme))
+        {
+            self.painted.clear();
+            self.painted_theme = Some(theme.clone());
+        }
+        let tools = self
+            .chat
+            .entries
+            .iter()
+            .chain(self.chat.subagents.iter().flat_map(|agent| &agent.entries))
+            .filter_map(|entry| match entry {
+                Entry::Tool(tool) => Some(tool),
+                _ => None,
+            });
+        let mut seen = HashSet::new();
+        for tool in tools {
+            seen.insert(tool.id.as_str());
+            let stamp = Painted::stamp(tool);
+            if self
+                .painted
+                .get(&tool.id)
+                .is_none_or(|painted| painted.stamp != stamp)
+            {
+                self.painted
+                    .insert(tool.id.clone(), Painted::of(tool, stamp, &theme));
+            }
+        }
+        self.painted.retain(|id, _| seen.contains(id.as_str()));
+    }
+
+    /// Brings a prompt to the top of the transcript — the timeline's press.
+    fn jump_to(&mut self, entry: usize, cx: &mut Context<Self>) {
+        // An easing under way would carry on from where it was.
+        self.motion.cancel();
+        self.scroller
+            .update(cx, |scroller, cx| scroller.scroll_to_item(entry, cx));
+        cx.notify();
+    }
+
+    /// The prompts on the right, to see where one is and go back to one:
+    /// a column with the first line of each, or folded, a rail of points.
+    fn render_timeline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.history_open {
+            return None;
+        }
+        let prompts = self.chat.prompts();
+        if prompts.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let list = self.scroller.read(cx).list_state().clone();
+        let view = list.viewport_bounds();
+        // Where each prompt starts against the view's top: above it, a
+        // measured row in it, or below.
+        let tops: Vec<Option<f32>> = prompts
+            .iter()
+            .map(|prompt| {
+                if list.item_is_above_viewport(prompt.entry) == Some(true) {
+                    return Some(f32::MIN);
+                }
+                list.bounds_for_item(prompt.entry)
+                    .filter(|bounds| bounds.top() < view.bottom())
+                    .map(|bounds| f32::from(bounds.top() - view.top()))
+            })
+            .collect();
+        let at_end = list.is_scrolled_to_end().unwrap_or(false) || list.is_following_tail();
+        let current = crate::acp::chat::prompt_at(&tops, f32::from(view.size.height) / 3., at_end);
+        let open = self.timeline_open;
+        let toggle = Button::new("chat-timeline-toggle")
+            .ghost()
+            .xsmall()
+            .icon(icon(if open {
+                "panel-right-close"
+            } else {
+                "panel-right-open"
+            }))
+            .tooltip(tr!("chat-timeline"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.timeline_open = !this.timeline_open;
+                cx.notify();
+            }));
+        let rows = prompts.into_iter().enumerate().map(|(n, prompt)| {
+            let lit = current == Some(n);
+            let summary: SharedString = match prompt.summary {
+                Some(line) => SharedString::from(line.to_string()),
+                None => tr!("chat-images-sent", { count: prompt.images }),
+            };
+            let entry = prompt.entry;
+            let dot = div()
+                .flex_none()
+                .size(px(if lit { 8. } else { 6. }))
+                .rounded_full()
+                .bg(if lit {
+                    theme.primary
+                } else {
+                    theme.muted_foreground.opacity(0.5)
+                });
+            let row = h_flex()
+                .id(("chat-timeline-row", n))
+                .flex_none()
+                .cursor_pointer()
+                .rounded(theme.radius)
+                .hover(|el| el.bg(theme.muted_foreground.opacity(0.1)))
+                .on_click(cx.listener(move |this, _, _, cx| this.jump_to(entry, cx)));
+            if open {
+                row.w_full()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .when(lit, |el| el.bg(theme.muted_foreground.opacity(0.08)))
+                    .child(dot)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(if lit {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(summary),
+                    )
+                    .into_any_element()
+            } else {
+                row.size(px(18.))
+                    .justify_center()
+                    .child(dot)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(summary.clone())
+                            .build(window, cx)
+                    })
+                    .into_any_element()
+            }
+        });
+        let list = v_flex()
+            .id("chat-timeline-list")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .gap_0p5()
+            .px_1()
+            .pb_2()
+            .overflow_y_scroll()
+            .when(!open, |el| el.items_center())
+            .children(rows);
+        let head = h_flex()
+            .flex_none()
+            .w_full()
+            .px_1()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .when(open, |el| {
+                el.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .pl_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("chat-timeline")),
+                )
+            })
+            .when(!open, |el| el.justify_center())
+            .child(toggle);
+        Some(
+            v_flex()
+                .flex_none()
+                .h_full()
+                .w(px(if open { TIMELINE_WIDTH } else { 28. }))
+                .border_l_1()
+                .border_color(theme.border)
+                .child(head)
+                .child(list)
+                .into_any_element(),
+        )
+    }
+
+    /// Shows a diff whole, or back to its first rows.
+    fn toggle_diff(&mut self, ix: usize, key: (String, usize), cx: &mut Context<Self>) {
+        if !self.open_diffs.remove(&key) {
+            self.open_diffs.insert(key);
+        }
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.remeasure_items(ix..ix + 1, cx);
         });
         cx.notify();
     }
@@ -632,6 +973,89 @@ impl ChatView {
 
     // — Painting ————————————————————————————————————————————————————
 
+    /// How full the context is — a gauge, the percentage, the counts and
+    /// the cost —, first on the composer's row with the agent's settings.
+    fn render_usage(&self, cx: &App) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        self.chat.usage.as_ref().map(|usage| {
+            let cost = usage
+                .cost
+                .as_ref()
+                .filter(|(amount, _)| *amount >= 0.005)
+                .map(|(amount, currency)| {
+                    SharedString::from(if currency == "USD" {
+                        format!("${amount:.2}")
+                    } else {
+                        format!("{amount:.2} {currency}")
+                    })
+                });
+            // Without a window to measure against, the count alone.
+            let Some(fill) = ContextFill::of(usage.used, usage.size) else {
+                return h_flex()
+                    .flex_none()
+                    .px_1()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::from(tokens(usage.used)))
+                    .children(cost)
+                    .into_any_element();
+            };
+            let color = match fill.level {
+                Level::Low => theme.success,
+                Level::High => theme.warning,
+                Level::Full => theme.danger,
+            };
+            let tip = tr!("chat-context-tip", {
+                used: grouped(usage.used),
+                size: grouped(usage.size),
+                percent: fill.percent,
+            });
+            h_flex()
+                .id("chat-context")
+                .flex_none()
+                .px_1()
+                .gap_1p5()
+                .items_center()
+                .text_xs()
+                .child(
+                    h_flex()
+                        .gap(px(2.))
+                        .children((0..CONTEXT_CELLS).map(|cell| {
+                            div()
+                                .w(px(5.))
+                                .h(px(11.))
+                                .rounded(px(1.5))
+                                .bg(if cell < fill.cells {
+                                    color
+                                } else {
+                                    theme.muted_foreground.opacity(0.2)
+                                })
+                        })),
+                )
+                .child(
+                    div()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child(SharedString::from(format!("{}%", fill.percent))),
+                )
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(format!(
+                            "{} / {}",
+                            tokens(usage.used),
+                            tokens(usage.size)
+                        ))),
+                )
+                .children(cost.map(|cost| div().text_color(theme.muted_foreground).child(cost)))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .into_any_element()
+        })
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let agent_name = self
@@ -647,28 +1071,6 @@ impl ChatView {
                 _ => tr!("chat-new-title", { agent: agent_name }),
             }
         };
-        let usage = self.chat.usage.as_ref().map(|usage| {
-            let mut text = if usage.size > 0 {
-                format!("{} / {}", tokens(usage.used), tokens(usage.size))
-            } else {
-                tokens(usage.used)
-            };
-            if let Some((amount, currency)) = &usage.cost {
-                if *amount >= 0.005 {
-                    text.push_str(&if currency == "USD" {
-                        format!(" · ${amount:.2}")
-                    } else {
-                        format!(" · {amount:.2} {currency}")
-                    });
-                }
-            }
-            div()
-                .flex_none()
-                .mr_1()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(SharedString::from(text))
-        });
         let this = cx.entity().downgrade();
         let current = self.agent.clone();
         let others: Vec<crate::acp::Agent> = crate::ui::settings::Settings::global(cx)
@@ -739,7 +1141,6 @@ impl ChatView {
                     .text_sm()
                     .child(title),
             )
-            .children(usage)
             .child(new_menu)
             .child(history)
     }
@@ -888,7 +1289,8 @@ impl ChatView {
             ),
             _ => {
                 let view = cx.entity();
-                MessageScroller::new(
+                let list = self.scroller.read(cx).list_state().clone();
+                let scroller = MessageScroller::new(
                     ("chat-messages", self.id),
                     self.scroller.clone(),
                     move |ix, window, cx| render_row(&view, ix, window, cx),
@@ -897,8 +1299,37 @@ impl ChatView {
                 .with_jump_button_label(tr!("chat-jump"))
                 .with_content_style(StyleRefinement::default().py(px(10.)))
                 .with_row_style(StyleRefinement::default().pb(px(0.)))
-                .size_full()
-                .into_any_element()
+                .size_full();
+                // The scroller's mask takes the wheel in the capture phase and
+                // jumps three lines a notch; the layer ahead of it takes the
+                // notch first and eases it.
+                div()
+                    .id("chat-transcript")
+                    .relative()
+                    .size_full()
+                    // The window's text selection, which spans messages and
+                    // cards alike: a right click does not clear it.
+                    .context_menu(|menu, window, cx| {
+                        let selected = TextSelection::has_selection(window, cx);
+                        menu.item(
+                            PopupMenuItem::new(tr!("chat-copy"))
+                                .icon(icon("copy"))
+                                .disabled(!selected)
+                                .on_click(|_, window, cx| {
+                                    let text = TextSelection::selected_text(window, cx);
+                                    if !text.trim().is_empty() {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
+                                }),
+                        )
+                    })
+                    .child(crate::ui::scroll::wheel_capture(
+                        list,
+                        cx.entity(),
+                        |this: &mut ChatView| &mut this.motion,
+                    ))
+                    .child(scroller)
+                    .into_any_element()
             }
         }
     }
@@ -1312,6 +1743,7 @@ impl ChatView {
         let theme = cx.theme().clone();
         let busy = self.chat.is_busy();
         let (options, model) = self.render_options(cx);
+        let usage = self.render_usage(cx);
         // During a turn, stop — and send too when the agent takes a message
         // into the turn (or queues it), as typing while Claude works does.
         let stop = busy.then(|| {
@@ -1395,6 +1827,17 @@ impl ChatView {
                     cx.propagate();
                 }
             }))
+            .on_action(cx.listener(|this, _: &ChatCopy, window, cx| {
+                let typed = this.input.read(cx).selected_text().to_string();
+                let text = if typed.is_empty() {
+                    TextSelection::selected_text(window, cx)
+                } else {
+                    typed
+                };
+                if !text.trim().is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ChatEscape, _, cx| {
                 if this.chat.is_busy() {
                     this.stop(cx);
@@ -1430,7 +1873,9 @@ impl ChatView {
                             .flex_1()
                             .min_w_0()
                             .flex_wrap()
+                            .items_center()
                             .gap_1()
+                            .children(usage)
                             .children(options),
                     )
                     .child(
@@ -1821,11 +2266,41 @@ impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         self.follow_form(window, cx);
+        // A theme changed under the cards: nothing else would colour them
+        // again before the next message.
+        if !self
+            .painted_theme
+            .as_ref()
+            .is_some_and(|painted| Arc::ptr_eq(painted, &theme.highlight_theme))
+        {
+            self.paint(cx);
+        }
+        let list = self.scroller.read(cx).list_state().clone();
+        if let Some(offset) = self.motion.advance_at(
+            list.scroll_px_offset_for_scrollbar(),
+            list.max_offset_for_scrollbar(),
+            window,
+        ) {
+            list.set_offset_from_scrollbar(offset);
+        }
         v_flex()
             .size_full()
             .bg(theme.background)
             .child(self.render_header(cx))
-            .child(div().flex_1().min_h_0().child(self.render_body(cx)))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_start()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.render_body(cx)),
+                    )
+                    .children(self.render_timeline(cx)),
+            )
             .children(self.render_form(cx))
             .children(self.render_plan(cx))
             .children(self.render_working(cx))
@@ -1861,7 +2336,16 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
     };
     let weak = view.downgrade();
     match entry {
-        Entry::User { text, images } => row
+        Entry::User { text, expanded, .. } if agent_message(text).is_some() => {
+            let Some(message) = agent_message(text) else {
+                return row.into_any_element();
+            };
+            row.child(render_agent_message(
+                &weak, ix, &message, *expanded, &this.chat, &theme,
+            ))
+            .into_any_element()
+        }
+        Entry::User { text, images, .. } => row
             .child(
                 v_flex()
                     .gap_1()
@@ -1942,7 +2426,7 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
         }
         Entry::Subagent(session) => match this.chat.subagent(session) {
             Some(agent) => row
-                .child(render_subagent(&weak, ix, agent, &theme))
+                .child(render_subagent(&weak, ix, agent, &this.painted, &theme))
                 .into_any_element(),
             None => row.into_any_element(),
         },
@@ -2015,7 +2499,14 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
             .into_any_element()
         }
         Entry::Tool(tool) => row
-            .child(render_tool(&weak, ix, tool, &theme))
+            .child(render_tool(
+                &weak,
+                ix,
+                tool,
+                this.painted.get(&tool.id),
+                &this.open_diffs,
+                &theme,
+            ))
             .into_any_element(),
         Entry::Notice(notice) => {
             let (text, error) = match notice {
@@ -2091,6 +2582,8 @@ fn render_tool(
     view: &WeakEntity<ChatView>,
     ix: usize,
     tool: &ToolCall,
+    painted: Option<&Painted>,
+    open_diffs: &HashSet<(String, usize)>,
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
     let (status_glyph, status_color) = match tool.status.as_str() {
@@ -2100,12 +2593,11 @@ fn render_tool(
         _ => ("loader-circle", theme.muted_foreground),
     };
     let asking = tool.permission.is_some();
-    let expanded = tool.expanded || asking;
-    // A command shows what it printed, folded or not: that is the half of
-    // it one opens the card for.
-    let terminal = tool
-        .is_command()
-        .then(|| render_terminal(ix, tool, expanded, true, view, theme));
+    let expanded = tool.is_expanded() || asking;
+    // A command's line, output and end, once unfolded: folded, its header
+    // says what it ran and how it went.
+    let terminal = (tool.is_command() && expanded)
+        .then(|| render_terminal(ix, tool, painted, expanded, true, view, theme));
     // Its text content is its output, already shown above.
     let output_in_content = tool.is_command() && tool.terminal.is_none();
     let mut body: Vec<AnyElement> = Vec::new();
@@ -2120,6 +2612,7 @@ fn render_tool(
                 .into_any_element()
         }));
         for (n, content) in tool.content.iter().enumerate() {
+            let paint = painted.and_then(|painted| painted.diffs.get(n)?.as_ref());
             if output_in_content && matches!(content, ToolContent::Text(_)) {
                 continue;
             }
@@ -2136,7 +2629,14 @@ fn render_tool(
                     )
                     .into_any_element(),
                 ToolContent::Diff { path, old, new } => {
-                    render_diff(path, old.as_deref(), new, theme)
+                    let key = (tool.id.clone(), n);
+                    let whole = open_diffs.contains(&key);
+                    let (view, id) = (view.clone(), ix * 16 + n);
+                    let unfold = move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                        let key = key.clone();
+                        let _ = view.update(cx, |this, cx| this.toggle_diff(ix, key, cx));
+                    };
+                    render_diff(path, old.as_deref(), new, paint, (id, whole, unfold), theme)
                 }
             });
         }
@@ -2196,13 +2696,7 @@ fn render_tool(
                 .text_color(theme.muted_foreground)
                 .hover(|el| el.text_color(theme.foreground))
                 .child(icon(kind_icon(&tool.kind)).xsmall())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(tool.title.clone())),
-                )
+                .child(tool_title(tool, painted, theme))
                 .child(icon(status_glyph).xsmall().text_color(status_color))
                 .on_click(move |_, _, cx| {
                     let _ = view.update(cx, |this, cx| this.toggle(ix, cx));
@@ -2211,6 +2705,135 @@ fn render_tool(
         .children(terminal)
         .when(!body.is_empty(), |el| {
             el.child(v_flex().gap_1().px_2().pb_2().children(body))
+        })
+        .into_any_element()
+}
+
+/// A card's title, on one line: a command's first, coloured as the shell
+/// reads it — a folded command is its header alone —; anything else's own.
+///
+/// **One line, whatever the title holds**: the adapter gives a command as
+/// its title, a heredoc whole, and a `\n` breaks the line even in a
+/// truncated text — a folded card showed the whole script. What is left
+/// out is counted.
+fn tool_title(
+    tool: &ToolCall,
+    painted: Option<&Painted>,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let command = tool.command().filter(|_| tool.is_command());
+    let text = command.as_deref().unwrap_or(&tool.title);
+    let mut lines = text.split('\n');
+    let first = lines.next().unwrap_or_default().to_string();
+    let more = lines.count();
+    let end = first.len();
+    let title = div().flex_1().min_w_0().truncate();
+    let title = match command {
+        Some(_) => {
+            // The whole command's colours, cut at the end of its first line.
+            let styles: LineStyles = painted
+                .map(|painted| {
+                    painted
+                        .command
+                        .iter()
+                        .filter(|(range, _)| range.start < end)
+                        .map(|(range, style)| (range.start..range.end.min(end), *style))
+                        .collect()
+                })
+                .unwrap_or_default();
+            title
+                .font_family(theme.mono_font_family.clone())
+                .child(StyledText::new(SharedString::from(first)).with_highlights(styles))
+        }
+        None => title.child(SharedString::from(first)),
+    };
+    h_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_1p5()
+        .child(title)
+        .when(more > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_color(theme.muted_foreground.opacity(0.7))
+                    .child(tr!("chat-more-lines", { count: more })),
+            )
+        })
+        .into_any_element()
+}
+
+/// What another session sent in — a subagent's report, most often: folded
+/// to a line, since the agent reads it and goes on to say what matters.
+fn render_agent_message(
+    view: &WeakEntity<ChatView>,
+    ix: usize,
+    message: &crate::acp::chat::AgentMessage,
+    expanded: bool,
+    chat: &Chat,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    // Named after its subagent's card, when one is the sender.
+    let name = chat
+        .subagents
+        .iter()
+        .find(|agent| agent.session == message.from && !agent.name.is_empty())
+        .map(|agent| SharedString::from(agent.name.clone()));
+    let label = match (message.handback, name) {
+        (true, Some(name)) => tr!("chat-handback-of", { name: name }),
+        (true, None) => tr!("chat-handback"),
+        (false, _) => tr!("chat-agent-message"),
+    };
+    let summary = message
+        .text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let toggle = view.clone();
+    v_flex()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            h_flex()
+                .id(("chat-agent-message", ix))
+                .gap_2()
+                .px_2()
+                .py_1()
+                .items_center()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .hover(|el| el.text_color(theme.foreground))
+                .child(chevron(expanded))
+                .child(icon("bot").xsmall())
+                .child(div().flex_none().text_color(theme.foreground).child(label))
+                .when(!expanded, |el| {
+                    el.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(summary)),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = toggle.update(cx, |this, cx| this.toggle(ix, cx));
+                }),
+        )
+        .when(expanded, |el| {
+            el.child(
+                div().px_2().pb_2().text_sm().child(
+                    TextView::markdown(
+                        SharedString::from(format!("chat-agent-message-{ix}")),
+                        SharedString::from(message.text.clone()),
+                    )
+                    .selectable(true)
+                    .style(text_style(theme)),
+                ),
+            )
         })
         .into_any_element()
 }
@@ -2226,6 +2849,7 @@ const OUTPUT_UNFOLDED: usize = 2000;
 fn render_terminal(
     ix: usize,
     tool: &ToolCall,
+    painted: Option<&Painted>,
     expanded: bool,
     // `false` for a subagent's call, whose card has nothing to unfold into.
     unfold: bool,
@@ -2276,9 +2900,13 @@ fn render_terminal(
         .text_xs()
         .font_family(mono)
         .children(tool.command().map(|command| {
-            div()
-                .text_color(theme.foreground)
-                .child(SharedString::from(format!("$ {command}")))
+            let styles = painted
+                .map(|painted| shifted(&painted.command, PROMPT.len()))
+                .unwrap_or_default();
+            div().text_color(theme.foreground).child(
+                StyledText::new(SharedString::from(format!("{PROMPT}{command}")))
+                    .with_highlights(styles),
+            )
         }))
         .when(hidden > 0 && !expanded && unfold, |el| {
             el.child(
@@ -2326,6 +2954,7 @@ fn render_subagent(
     view: &WeakEntity<ChatView>,
     ix: usize,
     agent: &crate::acp::chat::Subagent,
+    painted: &Paints,
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
     let asking = agent.permission.is_some()
@@ -2364,7 +2993,13 @@ fn render_subagent(
                         )
                         .into_any_element(),
                 ),
-                Entry::Tool(tool) => Some(render_nested_tool(view, ix * 1024 + n, tool, theme)),
+                Entry::Tool(tool) => Some(render_nested_tool(
+                    view,
+                    ix * 1024 + n,
+                    tool,
+                    painted.get(&tool.id),
+                    theme,
+                )),
                 _ => None,
             })
             .collect()
@@ -2483,6 +3118,7 @@ fn render_nested_tool(
     view: &WeakEntity<ChatView>,
     key: usize,
     tool: &ToolCall,
+    painted: Option<&Painted>,
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
     let (status_glyph, status_color) = match tool.status.as_str() {
@@ -2500,17 +3136,13 @@ fn render_nested_tool(
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(icon(kind_icon(&tool.kind)).xsmall())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(tool.title.clone())),
-                )
+                .child(tool_title(tool, painted, theme))
                 .child(icon(status_glyph).xsmall().text_color(status_color)),
         )
         .when(tool.is_command() && tool.output().is_some(), |el| {
-            el.child(render_terminal(key, tool, false, false, view, theme))
+            el.child(render_terminal(
+                key, tool, painted, false, false, view, theme,
+            ))
         })
         .children(tool.permission.as_ref().map(|permission| {
             h_flex()
@@ -2543,9 +3175,49 @@ fn render_diff(
     path: &str,
     old: Option<&str>,
     new: &str,
+    painted: Option<&PaintedDiff>,
+    // The row's id, whether it is shown whole, and what a press on its
+    // footer does.
+    (id, whole, unfold): (
+        usize,
+        bool,
+        impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
+    ),
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
-    let rows = diff_rows(old.unwrap_or_default(), new, DIFF_CONTEXT);
+    let old = old.unwrap_or_default();
+    // Painted when the call arrived; a card drawn before that frame reads
+    // plain.
+    let computed;
+    let rows = match painted {
+        Some(painted) => &painted.rows,
+        None => {
+            computed = diff_lines(old, new, DIFF_CONTEXT);
+            &computed
+        }
+    };
+    let (old_lines, new_lines): (Vec<&str>, Vec<&str>) =
+        (old.split('\n').collect(), new.split('\n').collect());
+    let shown = rows.len().min(if whole { DIFF_ROWS } else { DIFF_FOLDED });
+    let folded = rows.len().saturating_sub(DIFF_FOLDED);
+    let footer = (folded > 0).then(|| {
+        div()
+            .id(("chat-diff-more", id))
+            .px_2()
+            .py_0p5()
+            .border_t_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .hover(|el| el.text_color(theme.foreground))
+            .child(if whole {
+                tr!("chat-diff-less")
+            } else {
+                tr!("chat-diff-more", { count: folded })
+            })
+            .on_click(unfold)
+    });
     let mono = theme.mono_font_family.clone();
     v_flex()
         .w_full()
@@ -2563,11 +3235,22 @@ fn render_diff(
                 .border_color(theme.border)
                 .child(SharedString::from(path.to_string())),
         )
-        .children(rows.into_iter().take(DIFF_ROWS).map(|(sign, line)| {
+        .children(rows.iter().take(shown).map(|&(sign, line)| {
             let (bg, fg): (Option<Hsla>, Hsla) = match sign {
                 '+' => (Some(theme.success.opacity(0.12)), theme.foreground),
                 '-' => (Some(theme.danger.opacity(0.12)), theme.foreground),
                 _ => (None, theme.muted_foreground),
+            };
+            let (text, styles) = match sign {
+                '…' => ("", &[][..]),
+                '-' => (
+                    old_lines.get(line).copied().unwrap_or_default(),
+                    painted.map_or(&[][..], |painted| painted.old.line(line)),
+                ),
+                _ => (
+                    new_lines.get(line).copied().unwrap_or_default(),
+                    painted.map_or(&[][..], |painted| painted.new.line(line)),
+                ),
             };
             div()
                 .px_2()
@@ -2577,8 +3260,12 @@ fn render_diff(
                 .overflow_hidden()
                 .text_color(fg)
                 .when_some(bg, |el, bg| el.bg(bg))
-                .child(SharedString::from(format!("{sign} {line}")))
+                .child(
+                    StyledText::new(SharedString::from(format!("{sign} {text}")))
+                        .with_highlights(shifted(styles, sign.len_utf8() + 1)),
+                )
         }))
+        .children(footer)
         .into_any_element()
 }
 
@@ -2626,11 +3313,13 @@ fn chevron(expanded: bool) -> gpui_kit::component::Icon {
     .xsmall()
 }
 
-/// A diff's rows: `' '` context, `'-'` removed, `'+'` added, `'…'` a gap.
+/// A diff's rows: `' '` context, `'-'` removed, `'+'` added, `'…'` a gap —
+/// each with the line it shows, counted in `old` for a removal and in `new`
+/// otherwise, which is where its colours are read too.
 ///
 /// Pure, over `hunks::regions` — the comparison the gutter already trusts.
 /// A new file (`old` empty) is all additions.
-pub(crate) fn diff_rows(old: &str, new: &str, context: usize) -> Vec<(char, String)> {
+pub(crate) fn diff_lines(old: &str, new: &str, context: usize) -> Vec<(char, usize)> {
     let a: Vec<&str> = if old.is_empty() {
         Vec::new()
     } else {
@@ -2638,8 +3327,8 @@ pub(crate) fn diff_rows(old: &str, new: &str, context: usize) -> Vec<(char, Stri
     };
     let b: Vec<&str> = new.split('\n').collect();
     let regions = crate::ui::hunks::regions(&a, &b);
-    let shared = |rows: &mut Vec<(char, String)>, lines: &[&str]| {
-        rows.extend(lines.iter().map(|l| (' ', l.to_string())));
+    let shared = |rows: &mut Vec<(char, usize)>, lines: std::ops::Range<usize>| {
+        rows.extend(lines.map(|line| (' ', line)));
     };
     let mut rows = Vec::new();
     // Where the last change ended, on the new side.
@@ -2650,25 +3339,21 @@ pub(crate) fn diff_rows(old: &str, new: &str, context: usize) -> Vec<(char, Stri
         // would hide less than it costs.
         let lead = if n == 0 { 0 } else { context };
         if y.start - at_b > lead + context {
-            shared(&mut rows, &b[at_b..at_b + lead]);
-            rows.push(('…', String::new()));
-            shared(&mut rows, &b[y.start - context..y.start]);
+            shared(&mut rows, at_b..at_b + lead);
+            rows.push(('…', 0));
+            shared(&mut rows, y.start - context..y.start);
         } else {
-            shared(&mut rows, &b[at_b..y.start]);
+            shared(&mut rows, at_b..y.start);
         }
-        rows.extend(a[x].iter().map(|l| ('-', l.to_string())));
-        rows.extend(b[y.clone()].iter().map(|l| ('+', l.to_string())));
+        rows.extend(x.map(|line| ('-', line)));
+        rows.extend(y.clone().map(|line| ('+', line)));
         at_b = y.end;
     }
     let rest = b.len() - at_b;
     if !rows.is_empty() {
-        rows.extend(
-            b[at_b..at_b + rest.min(context)]
-                .iter()
-                .map(|l| (' ', l.to_string())),
-        );
+        shared(&mut rows, at_b..at_b + rest.min(context));
         if rest > context {
-            rows.push(('…', String::new()));
+            rows.push(('…', 0));
         }
     }
     rows
@@ -2710,6 +3395,65 @@ fn phase_word(phase: Phase) -> SharedString {
         Phase::SigningIn => tr!("chat-signing-in"),
         Phase::Resuming => tr!("chat-resuming"),
     }
+}
+
+/// How many cells the context gauge has — a tenth of the window each.
+const CONTEXT_CELLS: usize = 10;
+
+/// How full the context window is, as the gauge paints it.
+#[derive(Debug, PartialEq)]
+struct ContextFill {
+    percent: u64,
+    /// Lit cells: any use lights the first, and the last only once full.
+    cells: usize,
+    level: Level,
+}
+
+/// The gauge's colour: room left, filling up, about to be compacted.
+#[derive(Debug, PartialEq)]
+enum Level {
+    Low,
+    High,
+    Full,
+}
+
+impl ContextFill {
+    /// `None` without a window size to measure against.
+    fn of(used: u64, size: u64) -> Option<Self> {
+        if size == 0 {
+            return None;
+        }
+        let ratio = (used as f64 / size as f64).clamp(0., 1.);
+        let percent = (ratio * 100.).round() as u64;
+        let cells = if used == 0 {
+            0
+        } else {
+            ((ratio * CONTEXT_CELLS as f64).ceil() as usize).clamp(1, CONTEXT_CELLS)
+        };
+        let level = match percent {
+            0..=59 => Level::Low,
+            60..=84 => Level::High,
+            _ => Level::Full,
+        };
+        Some(Self {
+            percent,
+            cells,
+            level,
+        })
+    }
+}
+
+/// A count written whole, its thousands apart: `156 234`.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{202f}');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// A count of tokens as one reads it: `950`, `12k`, `1.2M`.
@@ -2892,7 +3636,47 @@ impl Render for OptionPicker {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_rows, tokens};
+    use super::{diff_lines, grouped, tokens, ContextFill, Level};
+
+    #[test]
+    fn the_context_gauge_fills_by_tenths_and_warns_late() {
+        assert_eq!(ContextFill::of(10, 0), None);
+        let empty = ContextFill::of(0, 200_000).unwrap();
+        assert_eq!((empty.percent, empty.cells), (0, 0));
+        // Any use lights a cell; 78 % lights eight, in the warning colour.
+        assert_eq!(ContextFill::of(1_000, 200_000).unwrap().cells, 1);
+        let most = ContextFill::of(156_000, 200_000).unwrap();
+        assert_eq!((most.percent, most.cells, most.level), (78, 8, Level::High));
+        assert_eq!(ContextFill::of(10_000, 200_000).unwrap().level, Level::Low);
+        let over = ContextFill::of(250_000, 200_000).unwrap();
+        assert_eq!(
+            (over.percent, over.cells, over.level),
+            (100, 10, Level::Full)
+        );
+    }
+
+    #[test]
+    fn a_whole_count_keeps_its_thousands_apart() {
+        assert_eq!(grouped(950), "950");
+        assert_eq!(grouped(156_234), "156\u{202f}234");
+        assert_eq!(grouped(1_000_000), "1\u{202f}000\u{202f}000");
+    }
+
+    /// The rows with their text, as the card shows them.
+    fn diff_rows(old: &str, new: &str, context: usize) -> Vec<(char, String)> {
+        let (a, b): (Vec<&str>, Vec<&str>) = (old.split('\n').collect(), new.split('\n').collect());
+        diff_lines(old, new, context)
+            .into_iter()
+            .map(|(sign, line)| {
+                let text = match sign {
+                    '…' => "",
+                    '-' => a[line],
+                    _ => b[line],
+                };
+                (sign, text.to_string())
+            })
+            .collect()
+    }
 
     #[test]
     fn a_new_file_is_all_additions() {
