@@ -141,9 +141,16 @@ impl ClaudhubApp {
                     .overflow_x_scroll()
                     .children(boards);
                 // The window's buttons are drawn over the top-right corner:
-                // where they are, the row starts under them.
-                let corner = Self::draws_window_buttons(window)
-                    .then(|| div().flex_none().h(super::theme::toolbar_height(cx)));
+                // where they are, the row starts under them. The band that
+                // leaves reads as a title bar, and moves the window as one:
+                // left bare, the sidebar's head was the only hold under
+                // Windows.
+                let corner = Self::draws_window_buttons(window).then(|| {
+                    self.window_drag_region("home-corner-drag", cx)
+                        .flex_none()
+                        .w_full()
+                        .h(super::theme::toolbar_height(cx))
+                });
                 v_flex()
                     .size_full()
                     .children(corner)
