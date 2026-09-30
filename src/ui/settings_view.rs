@@ -709,6 +709,28 @@ fn chat_agents_item() -> SettingItem {
     )
 }
 
+/// The agents shipped, back in the table — a row whose command was left
+/// empty offers no chat, and retyping an npm package name is not a gesture
+/// anyone should have to know.
+fn chat_agents_reset_item() -> SettingItem {
+    SettingItem::new(
+        tr!("settings-chat-agents-reset"),
+        SettingField::render(|_, _window, _cx| {
+            Button::new("chat-agents-reset")
+                .outline()
+                .small()
+                .icon(icon("refresh-cw"))
+                .label(tr!("settings-chat-agents-reset-button"))
+                .on_click(|_, _window, cx| {
+                    Settings::update_global(cx, |s| {
+                        s.terminal.chat_agents = crate::acp::Agent::defaults();
+                    });
+                })
+        }),
+    )
+    .description(tr!("settings-chat-agents-reset-help"))
+}
+
 fn profile_row<P: Profile>(
     profiles: Profiles<P>,
     index: usize,
@@ -993,6 +1015,7 @@ fn terminal_page(environment: &Environment) -> SettingPage {
                 .item(agents_item())
                 .item(default_agent_item())
                 .item(chat_agents_item())
+                .item(chat_agents_reset_item())
                 .item(
                     SettingItem::new(
                         tr!("settings-agent-hooks"),

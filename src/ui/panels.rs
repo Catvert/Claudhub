@@ -2034,9 +2034,14 @@ pub(super) fn new_chat_button(
         .small()
         .icon(crate::ui::icons::icon("message-square-plus"))
         .tooltip(tr!("chat-new"));
-    // Every agent taken out of the settings: no chat to offer.
+    // No agent with a command to run: the button stays, and leads to where
+    // one is set. Hidden, it left nothing to find and nothing to say why.
     if agents.is_empty() {
-        return div().into_any_element();
+        let app = app.clone();
+        return button
+            .tooltip(tr!("chat-configure"))
+            .on_click(move |_, window, cx| open_chat_settings(&app, window, cx))
+            .into_any_element();
     }
     if let [agent] = agents.as_slice() {
         let (app, agent) = (app.clone(), agent.clone());
@@ -2061,6 +2066,16 @@ pub(super) fn new_chat_button(
             })
         })
         .into_any_element()
+}
+
+/// The settings, on the page where the chat agents are declared.
+pub(super) fn open_chat_settings(app: &WeakEntity<ClaudhubApp>, window: &mut Window, cx: &mut App) {
+    let Some(app) = app.upgrade() else {
+        return;
+    };
+    app.update(cx, |app, cx| {
+        app.open_settings_at(crate::ui::settings_view::Page::Terminal, window, cx)
+    });
 }
 
 fn open_chat(

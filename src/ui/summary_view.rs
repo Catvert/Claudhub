@@ -657,15 +657,19 @@ impl ClaudhubApp {
     /// `panels::new_chat_button`.
     fn home_chat_button(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let agents = super::settings::Settings::global(cx).terminal.chat_agents();
-        if agents.is_empty() {
-            return div().into_any_element();
-        }
         let button = Button::new("focus-home-chat")
             .ghost()
             .xsmall()
             .icon(icon("message-square-plus"))
             .tooltip(tr!("chat-new"));
         let app = cx.entity().downgrade();
+        // No agent to run: to the settings — see `panels::new_chat_button`.
+        if agents.is_empty() {
+            return button
+                .tooltip(tr!("chat-configure"))
+                .on_click(move |_, window, cx| super::panels::open_chat_settings(&app, window, cx))
+                .into_any_element();
+        }
         let worktree = path.to_path_buf();
         if let [agent] = agents.as_slice() {
             let agent = agent.clone();
