@@ -3030,7 +3030,8 @@ pub(super) fn add_items(
     } else {
         menu
     };
-    let agents = !profiles.is_empty();
+    let chat_agents = super::settings::Settings::global(cx).terminal.chat_agents();
+    let agents = !profiles.is_empty() || !chat_agents.is_empty();
     let menu = profiles.into_iter().fold(menu, |menu, profile| {
         let (app, worktree) = (app.clone(), worktree.clone());
         let label = SharedString::from(profile.label().to_string());
@@ -3039,6 +3040,22 @@ pub(super) fn add_items(
                 .icon(icon("bot"))
                 .on_click(move |_, window, cx| {
                     open_on(&app, &worktree, Launch::agent(&profile), window, cx);
+                }),
+        )
+    });
+    // The chats beside the agents' terminals: the same agents, spoken to in
+    // a chat tab rather than a pty — see `ui::chat_view`.
+    let menu = chat_agents.into_iter().fold(menu, |menu, agent| {
+        let (app, worktree) = (app.clone(), worktree.clone());
+        let label = tr!("chat-with", { agent: agent.label() });
+        menu.item(
+            PopupMenuItem::new(label)
+                .icon(icon("message-square-plus"))
+                .on_click(move |_, window, cx| {
+                    let (worktree, agent) = (worktree.clone(), agent.clone());
+                    let _ = app.update(cx, |this, cx| {
+                        this.open_home_chat(&worktree, agent, window, cx)
+                    });
                 }),
         )
     });

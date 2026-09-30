@@ -1,5 +1,6 @@
 {
   "chat-new": "New chat with an agent",
+  "chat-with": "Chat with %{agent}",
   "chat-configure": "No chat agent has a command: set one in the settings",
   "chat-placeholder": "Ask the agent — Enter sends, Shift+Enter breaks the line",
   "chat-send": "Send",

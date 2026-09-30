@@ -1,5 +1,6 @@
 {
   "chat-new": "Nouveau chat avec un agent",
+  "chat-with": "Chat avec %{agent}",
   "chat-configure": "Aucun agent de chat n'a de commande : en régler un dans les réglages",
   "chat-placeholder": "Demandez à l'agent — Entrée envoie, Maj+Entrée va à la ligne",
   "chat-send": "Envoyer",

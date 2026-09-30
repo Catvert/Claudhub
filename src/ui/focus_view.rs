@@ -219,7 +219,7 @@ impl ClaudhubApp {
     }
 
     /// Keeps what the sidebar chose, for the next session too.
-    fn choose_focus(&mut self, chosen: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn choose_focus(&mut self, chosen: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.focus_chosen = chosen.clone();
         super::store::Store::update_global(cx, |store| store.session.focus_shown = chosen);
     }

@@ -713,6 +713,17 @@ impl ClaudhubApp {
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
+        // The plan has no chat node: a chat asked for there is shown on the
+        // focus view, its worktree's board on show.
+        if self.home_mode == overview::HomeMode::Canvas {
+            self.set_home_mode(overview::HomeMode::Focus, cx);
+        }
+        if !self.focus_worktrees().iter().any(|shown| shown == worktree) {
+            self.choose_focus(vec![worktree.to_path_buf()], cx);
+        }
+        if self.active.as_deref() != Some(worktree) {
+            self.select_worktree(worktree.to_path_buf(), window, cx);
+        }
         let placement = super::settings::Settings::global(cx).terminal.placement;
         self.open_chat(worktree, agent, placement, None, window, cx);
         let Some(open) = self.chats.last() else {
