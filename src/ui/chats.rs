@@ -105,7 +105,15 @@ impl ClaudhubApp {
                     });
                     view.update(cx, |view, cx| view.start(cx));
                 }
-                ChatEvent::Retitled => {}
+                ChatEvent::WantFiles => {
+                    let worktree = view.read(cx).worktree.clone();
+                    this.hand_files_to_chats(&worktree, cx);
+                    // Not listed yet: the listing is asked for the worktree
+                    // on show, and `project_files_arrived` hands it over.
+                    if this.active.as_deref() == Some(worktree.as_path()) {
+                        this.ensure_project_files(cx);
+                    }
+                }
             }
         })
         .detach();
@@ -204,6 +212,23 @@ impl ClaudhubApp {
             }
         }
         kept
+    }
+
+    /// Hands a worktree's file list to its chats, for their `@` — when the
+    /// explorer has one.
+    pub(super) fn hand_files_to_chats(&mut self, worktree: &Path, cx: &mut Context<Self>) {
+        let Some(files) = self
+            .explorers
+            .get(worktree)
+            .map(|explorer| explorer.files.clone())
+            .filter(|files| !files.is_empty())
+        else {
+            return;
+        };
+        for open in self.chats.iter().filter(|open| open.worktree == worktree) {
+            let files = files.clone();
+            open.view.update(cx, |view, cx| view.set_files(files, cx));
+        }
     }
 
     /// A worktree's chats, in the order they were opened.

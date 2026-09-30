@@ -402,7 +402,11 @@ survit à la fenêtre** (`SavedChat`, écrit avec les terminaux) : rouvert par
 `session/load` (l'historique rejoué), à défaut `session/resume`, à défaut une
 session neuve. Un programme introuvable est relancé par le shell de connexion
 (`$SHELL -lc`) : le `npx` de nvm n'est pas dans le `PATH` d'une fenêtre lancée
-du bureau, ni dans celui du serveur WSL.
+du bureau, ni dans celui du serveur WSL. **Les touches du compositeur** (`/`, `@`, flèches,
+Tab, Échap) sont hors de la table des raccourcis (`chat_view::key_bindings`,
+posées après celles du kit) et **rendent la touche au champ** (`propagate`)
+quand aucune liste n'est ouverte — sans quoi les flèches ne bougent plus le
+curseur, sans erreur. Rien n'y est animé (ni scintillement ni fondu).
 
 **Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal`) : un
 shell ou un agent vivant revient à sa place, Claude **dans sa conversation**

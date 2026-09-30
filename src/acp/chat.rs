@@ -89,6 +89,9 @@ pub struct AuthMethod {
 pub struct Choice {
     pub value: String,
     pub name: String,
+    /// The group it was listed under, when the agent grouped them — a
+    /// model's provider, say.
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +108,32 @@ pub enum OptionKind {
 pub struct ConfigOption {
     pub id: String,
     pub name: String,
+    /// `mode`, `model`, `thought_level`… — what the option is about, for the
+    /// view to place it and give it a glyph.
+    pub category: Option<String>,
     pub kind: OptionKind,
+}
+
+impl ConfigOption {
+    /// Whether this is the session's model — shown apart, next to send.
+    pub fn is_model(&self) -> bool {
+        self.category.as_deref() == Some("model") || self.id == "model"
+    }
+
+    /// Whether this is the permission mode — which makes the legacy modes
+    /// redundant.
+    pub fn is_mode(&self) -> bool {
+        self.category.as_deref() == Some("mode") || self.id == "mode"
+    }
+}
+
+/// An earlier conversation the agent keeps (`session/list`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: Option<String>,
+    /// RFC 3339, as the agent wrote it.
+    pub updated: Option<String>,
 }
 
 /// A slash command the agent announced.
@@ -159,10 +187,16 @@ pub struct ToolCall {
     pub content: Vec<ToolContent>,
     /// `path` or `path:line`.
     pub locations: Vec<String>,
+    /// What the tool was called with — shown when the call says nothing
+    /// else, a command line or a pattern being the whole of what it did.
+    pub raw_input: Value,
     pub permission: Option<Permission>,
     pub expanded: bool,
 }
 
+// One per line of the conversation, walked in order: boxing the tool call
+// would add an allocation per row and save nothing that matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
     User(String),
@@ -199,6 +233,8 @@ enum Pending {
     Prompt,
     /// A mode or an option: only an error is read.
     Setting,
+    /// `session/list`.
+    List,
 }
 
 pub struct Chat {
@@ -221,6 +257,8 @@ pub struct Chat {
     pub plan: Vec<PlanEntry>,
     pub usage: Option<Usage>,
     pub title: Option<String>,
+    /// The earlier conversations, once asked for (`list_sessions`).
+    pub sessions: Option<Vec<SessionSummary>>,
 }
 
 impl Chat {
@@ -243,6 +281,7 @@ impl Chat {
             plan: Vec::new(),
             usage: None,
             title: None,
+            sessions: None,
         }
     }
 
@@ -309,6 +348,13 @@ impl Chat {
 
     /// Sends what the user typed.
     pub fn prompt(&mut self, text: &str) -> Option<String> {
+        self.prompt_with(text, &[])
+    }
+
+    /// Sends what the user typed, and the files it mentions — each a
+    /// `resource_link` (its name and its `file://` URI), the baseline every
+    /// agent reads: the agent opens the file itself, and nothing here does.
+    pub fn prompt_with(&mut self, text: &str, files: &[(String, String)]) -> Option<String> {
         let text = text.trim();
         if text.is_empty() || !self.is_ready() {
             return None;
@@ -316,11 +362,75 @@ impl Chat {
         let session = self.session.clone()?;
         self.entries.push(Entry::User(text.to_string()));
         self.status = Status::Busy;
+        let mut prompt = vec![json!({ "type": "text", "text": text })];
+        prompt.extend(
+            files
+                .iter()
+                .map(|(name, uri)| json!({ "type": "resource_link", "name": name, "uri": uri })),
+        );
         Some(self.request(
             Pending::Prompt,
             "session/prompt",
-            json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
+            json!({ "sessionId": session, "prompt": prompt }),
         ))
+    }
+
+    /// Whether the agent keeps its conversations and lists them.
+    pub fn can_list(&self) -> bool {
+        self.can(&["sessionCapabilities", "list"])
+    }
+
+    /// Asks for the earlier conversations of this worktree.
+    pub fn list_sessions(&mut self) -> Option<String> {
+        if !self.can_list() || matches!(self.status, Status::Starting(_) | Status::Failed(_)) {
+            return None;
+        }
+        Some(self.request(Pending::List, "session/list", json!({ "cwd": self.cwd })))
+    }
+
+    /// Whether the agent's process is up and past its handshake — what a new
+    /// chat or an earlier one needs in this tab.
+    pub fn is_connected(&self) -> bool {
+        matches!(self.status, Status::Ready | Status::Busy)
+    }
+
+    /// A fresh conversation in the same tab, with the same agent. A turn
+    /// under way is stopped first.
+    pub fn new_chat(&mut self) -> Vec<String> {
+        if !self.is_connected() {
+            return Vec::new();
+        }
+        let mut lines = self.cancel();
+        self.forget();
+        lines.push(self.new_session());
+        lines
+    }
+
+    /// An earlier conversation, in place of this one.
+    pub fn reopen(&mut self, session: &str, title: Option<String>) -> Vec<String> {
+        if !self.is_connected() || self.session.as_deref() == Some(session) {
+            return Vec::new();
+        }
+        let mut lines = self.cancel();
+        self.forget();
+        self.title = title;
+        self.resume = Some(session.to_string());
+        lines.push(self.open_session());
+        lines
+    }
+
+    /// Everything that belonged to the conversation on show.
+    fn forget(&mut self) {
+        self.pending
+            .retain(|_, pending| *pending == Pending::Setting);
+        self.entries.clear();
+        self.plan.clear();
+        self.usage = None;
+        self.title = None;
+        self.session = None;
+        self.modes = None;
+        self.options.clear();
+        self.commands.clear();
     }
 
     /// Stops the running turn: the notification, and a `cancelled` for every
@@ -559,6 +669,27 @@ impl Chat {
                 self.entries.push(Entry::Notice(Notice::Error(message)));
                 Vec::new()
             }
+            (Pending::List, Ok(result)) => {
+                self.sessions = Some(
+                    list(&result["sessions"])
+                        .map(|session| SessionSummary {
+                            id: text(&session["sessionId"]),
+                            title: session["title"]
+                                .as_str()
+                                .filter(|title| !title.trim().is_empty())
+                                .map(str::to_string),
+                            updated: session["updatedAt"].as_str().map(str::to_string),
+                        })
+                        .filter(|session| !session.id.is_empty())
+                        .collect(),
+                );
+                Vec::new()
+            }
+            // A list that will not come is an empty one, not a spinner.
+            (Pending::List, Err(_)) => {
+                self.sessions = Some(Vec::new());
+                Vec::new()
+            }
         }
     }
 
@@ -737,6 +868,9 @@ impl Chat {
             if let Some(locations) = locations {
                 tool.locations = locations;
             }
+            if !update["rawInput"].is_null() {
+                tool.raw_input = update["rawInput"].clone();
+            }
             return;
         }
         self.entries.push(Entry::Tool(ToolCall {
@@ -745,6 +879,7 @@ impl Chat {
             status: update["status"].as_str().unwrap_or("pending").to_string(),
             content: content.unwrap_or_default(),
             locations: locations.unwrap_or_default(),
+            raw_input: update["rawInput"].clone(),
             permission: None,
             expanded: false,
             id,
@@ -842,14 +977,20 @@ fn parse_choices(options: &Value) -> Vec<Choice> {
         // A group holds its own options: flattened, the group being a label
         // the menu can do without.
         if option.get("options").is_some_and(Value::is_array) {
+            let group = option["name"]
+                .as_str()
+                .or(option["group"].as_str())
+                .map(str::to_string);
             choices.extend(list(&option["options"]).map(|o| Choice {
                 value: text(&o["value"]),
                 name: text(&o["name"]),
+                group: group.clone(),
             }));
         } else {
             choices.push(Choice {
                 value: text(&option["value"]),
                 name: text(&option["name"]),
+                group: None,
             });
         }
     }
@@ -870,6 +1011,7 @@ fn parse_options(options: &Value) -> Vec<ConfigOption> {
             Some(ConfigOption {
                 id: text(&o["id"]),
                 name: text(&o["name"]),
+                category: o["category"].as_str().map(str::to_string),
                 kind,
             })
         })
@@ -882,6 +1024,7 @@ fn parse_modes(modes: &Value) -> Option<(String, Vec<Choice>)> {
         .map(|m| Choice {
             value: text(&m["id"]),
             name: text(&m["name"]),
+            group: None,
         })
         .collect();
     Some((current, all))
@@ -894,6 +1037,58 @@ fn parse_plan(entries: &Value) -> Vec<PlanEntry> {
             status: text(&e["status"]),
         })
         .collect()
+}
+
+/// The slash commands the composer offers for what is typed: a `/` and a
+/// word with no space yet — the command's arguments are the agent's
+/// business. Matched on any part of the name, case ignored, in the agent's
+/// order.
+pub fn command_matches<'a>(typed: &str, commands: &'a [Command]) -> Vec<&'a Command> {
+    let Some(query) = typed.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if query.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = query.to_lowercase();
+    commands
+        .iter()
+        .filter(|command| command.name.to_lowercase().contains(&query))
+        .collect()
+}
+
+/// The mention being typed: the `@word` that ends the text — where its `@`
+/// is, and what follows it. A word elsewhere is already written, and an
+/// `@` inside a word (an address) is none.
+pub fn mention_at_end(typed: &str) -> Option<(usize, &str)> {
+    let start = typed.rfind(char::is_whitespace).map_or(0, |space| {
+        space + typed[space..].chars().next().map_or(1, char::len_utf8)
+    });
+    let word = &typed[start..];
+    let query = word.strip_prefix('@')?;
+    Some((start, query))
+}
+
+/// The files a prompt mentions: every `@path` word naming one of `known`,
+/// once each, in the order they appear. A trailing punctuation mark is the
+/// sentence's, not the path's.
+pub fn mentioned_files<'a>(
+    typed: &str,
+    known: &'a [std::path::PathBuf],
+) -> Vec<&'a std::path::Path> {
+    let mut found: Vec<&std::path::Path> = Vec::new();
+    for word in typed.split_whitespace() {
+        let Some(path) = word.strip_prefix('@') else {
+            continue;
+        };
+        let path = path.trim_end_matches([',', '.', ';', ':', '!', '?', ')']);
+        if let Some(file) = known.iter().find(|file| file.as_os_str() == path) {
+            if !found.contains(&file.as_path()) {
+                found.push(file);
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -1252,6 +1447,106 @@ mod tests {
                 "Session not found".into()
             ))]
         );
+    }
+
+    #[test]
+    fn slash_offers_the_agents_commands_until_the_first_space() {
+        let commands = vec![
+            Command {
+                name: "review".into(),
+                description: "Review".into(),
+            },
+            Command {
+                name: "compact".into(),
+                description: "Compact".into(),
+            },
+            Command {
+                name: "init".into(),
+                description: String::new(),
+            },
+        ];
+        let names = |typed: &str| -> Vec<String> {
+            command_matches(typed, &commands)
+                .iter()
+                .map(|c| c.name.clone())
+                .collect()
+        };
+        assert_eq!(names("/"), vec!["review", "compact", "init"]);
+        assert_eq!(names("/RE"), vec!["review"]);
+        assert_eq!(names("/co"), vec!["compact"]);
+        assert!(names("/review now").is_empty());
+        assert!(names("review").is_empty());
+    }
+
+    #[test]
+    fn a_mention_is_the_word_being_typed() {
+        assert_eq!(mention_at_end("look at @src/ma"), Some((8, "src/ma")));
+        assert_eq!(mention_at_end("@"), Some((0, "")));
+        assert_eq!(mention_at_end("é @x"), Some((3, "x")));
+        assert_eq!(mention_at_end("mail me@host"), None);
+        assert_eq!(mention_at_end("@done "), None);
+        let known = vec![
+            std::path::PathBuf::from("src/main.rs"),
+            std::path::PathBuf::from("README.md"),
+        ];
+        let found = mentioned_files(
+            "see @src/main.rs, and @README.md. @src/main.rs @nope",
+            &known,
+        );
+        assert_eq!(
+            found,
+            vec![
+                std::path::Path::new("src/main.rs"),
+                std::path::Path::new("README.md")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prompt_carries_the_files_it_mentions_as_links() {
+        let mut chat = ready();
+        let line = sent(
+            &chat
+                .prompt_with("read @a.rs", &[("a.rs".into(), "file:///w/a.rs".into())])
+                .unwrap(),
+        );
+        let prompt = &line["params"]["prompt"];
+        assert_eq!(prompt[1]["type"], "resource_link");
+        assert_eq!(prompt[1]["uri"], "file:///w/a.rs");
+    }
+
+    #[test]
+    fn the_history_lists_and_reopens_in_the_same_tab() {
+        let mut chat = Chat::new("/w");
+        let init = sent(&chat.start());
+        let answer = json!({ "jsonrpc": "2.0", "id": init["id"], "result": {
+            "agentCapabilities": { "loadSession": true, "sessionCapabilities": { "list": {} } } } });
+        let new = sent(&chat.receive(&answer.to_string())[0]);
+        let opened = json!({ "jsonrpc": "2.0", "id": new["id"], "result": { "sessionId": "s1" } });
+        chat.receive(&opened.to_string());
+        let list = sent(&chat.list_sessions().unwrap());
+        assert_eq!(list["params"]["cwd"], "/w");
+        let listed = json!({ "jsonrpc": "2.0", "id": list["id"], "result": { "sessions": [
+            { "sessionId": "old", "title": "Fix the build", "updatedAt": "2026-09-30T10:00:00Z" },
+            { "sessionId": "", "title": "broken" },
+            { "sessionId": "blank", "title": "  " } ] } });
+        chat.receive(&listed.to_string());
+        let sessions = chat.sessions.clone().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[1].title, None);
+        // The one on show is not reopened.
+        assert!(chat.reopen("s1", None).is_empty());
+        let lines = chat.reopen("old", Some("Fix the build".into()));
+        let load = sent(lines.last().unwrap());
+        assert_eq!(load["method"], "session/load");
+        assert_eq!(chat.title.as_deref(), Some("Fix the build"));
+        assert!(chat.entries.is_empty());
+        // And a new chat, once back.
+        let done = json!({ "jsonrpc": "2.0", "id": load["id"], "result": {} });
+        chat.receive(&done.to_string());
+        let lines = chat.new_chat();
+        assert_eq!(sent(lines.last().unwrap())["method"], "session/new");
+        assert_eq!(chat.session, None);
     }
 
     #[test]

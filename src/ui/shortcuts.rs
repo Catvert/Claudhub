@@ -1012,6 +1012,9 @@ fn install(cx: &mut App) {
     // the keymap is written here.
     cx.bind_keys(standard_bindings(&overrides));
     cx.bind_keys(vim_bindings(&overrides));
+    // The chat composer's list navigation: fixed, and handed back to the
+    // field when no list is open — see `chat_view::key_bindings`.
+    cx.bind_keys(crate::ui::chat_view::key_bindings());
 }
 
 /// A keystroke the user has just pressed, written the way the tables write it.

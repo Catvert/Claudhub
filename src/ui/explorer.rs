@@ -1069,9 +1069,11 @@ impl ClaudhubApp {
         dirs: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        let explorer = self.explorers.entry(worktree).or_default();
+        let explorer = self.explorers.entry(worktree.clone()).or_default();
         explorer.state = Listing::Ready;
         explorer.set_listing(files, ignored, dirs);
+        // The chats of this worktree mention its files with `@`.
+        self.hand_files_to_chats(&worktree, cx);
         // A fresh listing puts every directory back to unread, so what was open
         // inside `vendor/` is read again on the next frame — a chevron that
         // shuts under the hand on every `git add` is worse than the reads it
