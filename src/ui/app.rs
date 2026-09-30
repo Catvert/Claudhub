@@ -2974,6 +2974,10 @@ impl ClaudhubApp {
         // status, which the opening of the repository already pairs with a
         // read of the list.
         let refs_moved = state.status.branch.is_some() && refs_moved(&state.status, &status);
+        let upstream = status
+            .upstream
+            .is_some()
+            .then_some((status.ahead, status.behind));
         state.status = status;
         state.rows_changed();
         self.repos.set_branch(&worktree, branch.as_deref());
@@ -3003,9 +3007,21 @@ impl ClaudhubApp {
                 worktree: worktree.clone(),
             });
         }
+        // The home screen's titles and cards read the divergence off the
+        // outline, which the sweep rereads every ten seconds at best; the
+        // status is reread as soon as a reference moves. A pull or a push
+        // shows at once — and a commit's list and count are read again.
+        if let Some(outline) = self.outlines.get_mut(&worktree) {
+            outline.upstream = upstream;
+        }
         if refs_moved {
             if let Some(main) = self.main_of(&worktree) {
                 self.git.send(Cmd::LoadBranches { main });
+            }
+            if self.overview {
+                self.git.send(Cmd::LoadOutlines {
+                    worktrees: vec![worktree.clone()],
+                });
             }
         }
         // The tree's rows read the status by path: filed once here rather than
