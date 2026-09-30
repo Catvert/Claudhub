@@ -1966,10 +1966,15 @@ impl ClaudhubApp {
         if worktrees.is_empty() {
             return;
         }
+        let now = std::time::Instant::now();
         if with_summaries {
-            self.git.send(Cmd::LoadSummaries {
-                worktrees: worktrees.clone(),
-            });
+            // None of these again before the last one has answered — see
+            // `ui::sweep`.
+            if self.sweep.ask(super::sweep::Reading::Summaries, now) {
+                self.git.send(Cmd::LoadSummaries {
+                    worktrees: worktrees.clone(),
+                });
+            }
             // The `wt` reading follows the summaries': these are shell commands
             // declared by the project, one per worktree, and there is no reason
             // to run them more often than a `git status`.
@@ -1977,7 +1982,7 @@ impl ClaudhubApp {
             // And the home screen's cards, only while it is up: four commands
             // a worktree, for a screen nobody is looking at otherwise — and
             // of those not on it, one pass in six (`sweep::Sweep::outlines`).
-            if self.overview {
+            if self.overview && self.sweep.ask(super::sweep::Reading::Outlines, now) {
                 let mut shown: Vec<PathBuf> = self
                     .overview_repos()
                     .into_iter()
@@ -1985,7 +1990,9 @@ impl ClaudhubApp {
                     .collect();
                 shown.extend(self.active.clone());
                 let due = self.sweep.outlines(&worktrees, &shown);
-                if !due.is_empty() {
+                if due.is_empty() {
+                    self.sweep.answered(super::sweep::Reading::Outlines);
+                } else {
                     self.git.send(Cmd::LoadOutlines { worktrees: due });
                 }
             }
@@ -2007,7 +2014,7 @@ impl ClaudhubApp {
         }
         // Not again before the last scan has answered: behind a slow one,
         // they would pile up and all arrive stale — see `ui::sweep`.
-        if self.sweep.ask_agents(std::time::Instant::now()) {
+        if self.sweep.ask(super::sweep::Reading::Agents, now) {
             let programs = Settings::global(cx).terminal.agent_programs();
             self.git.send(Cmd::ScanAgents {
                 worktrees,
@@ -2458,7 +2465,10 @@ impl ClaudhubApp {
             Evt::Worktrees { main, worktrees } => {
                 self.worktrees_arrived(main, worktrees, window, cx)
             }
-            Evt::Summaries { summaries } => self.summaries_arrived(summaries),
+            Evt::Summaries { summaries } => {
+                self.sweep.answered(super::sweep::Reading::Summaries);
+                self.summaries_arrived(summaries)
+            }
             Evt::ClaudeProcesses { processes } => {
                 self.claude_processes_heard(&processes, cx);
                 self.settle_generations(&processes, window, cx);
@@ -2485,11 +2495,12 @@ impl ClaudhubApp {
             }
             Evt::CanvasWritten { worktree, created } => self.canvas_written(worktree, created, cx),
             Evt::Outlines { outlines } => {
+                self.sweep.answered(super::sweep::Reading::Outlines);
                 self.outlines.extend(outlines);
                 cx.notify();
             }
             Evt::Agents { agents } => {
-                self.sweep.agents_answered();
+                self.sweep.answered(super::sweep::Reading::Agents);
                 self.agents_scanned(agents)
             }
             Evt::AgentSessions { sessions } => self.agent_sessions_heard(sessions, cx),
@@ -2616,6 +2627,7 @@ impl ClaudhubApp {
                 launch,
             } => self.wt_task_ready(worktree, task, launch, window, cx),
             Evt::WtStates { states } => {
+                self.sweep.answered(super::sweep::Reading::Wt);
                 self.wt_states.extend(states);
             }
             Evt::WtLinks {
@@ -2996,7 +3008,17 @@ impl ClaudhubApp {
         // emptying them: clearing what is on screen before having something to
         // replace it makes the list flicker on every refresh, and one arrives
         // per file write.
-        let stale: Vec<DiffRange> = state.files.keys().cloned().collect();
+        //
+        // **Not a commit's**: named by its hash, its list never changes. Each
+        // one opened from the history, a stash or a tag stays filed, and was
+        // listed again at every file an agent wrote — the longer the window
+        // stayed open, the more of them.
+        let stale: Vec<DiffRange> = state
+            .files
+            .keys()
+            .filter(|range| !matches!(range, DiffRange::Commit { .. }))
+            .cloned()
+            .collect();
         for range in stale {
             if state.pending_files.insert(range.clone()) {
                 if state.disk_tree.as_ref().is_some_and(|(of, _)| *of == range) {

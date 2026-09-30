@@ -5,7 +5,12 @@
 //!
 //! - **A periodic reading is not sent again before its answer is back.**
 //!   Behind a slow scan on the background worker, the next ones would pile
-//!   up and then all arrive stale, one after the other. An answer that never
+//!   up and then all arrive stale, one after the other. The summaries, the
+//!   cards and `wt` ran unchecked every ten seconds: a pass that took longer
+//!   — a status over an agent's growing diff, a slow probe — grew the queue
+//!   by one pass every ten seconds, and everything else on the worker
+//!   answered later and later the longer the window stayed open. An answer
+//!   that never
 //!   comes — the server lost, a command dropped before the handshake — does
 //!   not hold the reading back for ever: past `GIVE_UP`, it is asked again,
 //!   and `ServerLost` forgets everything at once.
@@ -25,11 +30,24 @@ const GIVE_UP: Duration = Duration::from_secs(30);
 /// those on show: every minute, at ten seconds a pass.
 const OUTLINES_ALL_EVERY: u32 = 6;
 
+/// A periodic reading of the whole window, answered by a single event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Reading {
+    /// `ScanAgents`, every two seconds.
+    Agents,
+    /// `LoadSummaries`, every ten.
+    Summaries,
+    /// `LoadOutlines`, with the summaries while the home screen is up.
+    Outlines,
+    /// `WtScan`, with the summaries.
+    Wt,
+}
+
 /// The periodic readings on their way, and the count of the passes.
 #[derive(Debug, Default)]
 pub(crate) struct Sweep {
-    /// `ScanAgents`, since when.
-    agents: Option<Instant>,
+    /// The readings asked for, since when.
+    asked: HashMap<Reading, Instant>,
     /// `ReadCanvas`, by worktree, since when.
     canvas: HashMap<PathBuf, Instant>,
     /// The summary passes made — see `outlines_due`.
@@ -37,17 +55,17 @@ pub(crate) struct Sweep {
 }
 
 impl Sweep {
-    /// Whether the agents may be scanned; if so, they are now asked.
-    pub fn ask_agents(&mut self, now: Instant) -> bool {
-        let free = free(self.agents, now);
+    /// Whether a reading may be sent; if so, it is now asked.
+    pub fn ask(&mut self, reading: Reading, now: Instant) -> bool {
+        let free = free(self.asked.get(&reading).copied(), now);
         if free {
-            self.agents = Some(now);
+            self.asked.insert(reading, now);
         }
         free
     }
 
-    pub fn agents_answered(&mut self) {
-        self.agents = None;
+    pub fn answered(&mut self, reading: Reading) {
+        self.asked.remove(&reading);
     }
 
     /// Whether a worktree's node files may be read by the sweep.
@@ -66,7 +84,7 @@ impl Sweep {
 
     /// The server is gone: what it was asked will not come back.
     pub fn forget_asked(&mut self) {
-        self.agents = None;
+        self.asked.clear();
         self.canvas.clear();
     }
 
@@ -108,11 +126,14 @@ mod tests {
     fn a_reading_waits_for_its_answer_or_the_ceiling() {
         let now = Instant::now();
         let mut sweep = Sweep::default();
-        assert!(sweep.ask_agents(now));
-        assert!(!sweep.ask_agents(now + Duration::from_secs(2)));
-        sweep.agents_answered();
-        assert!(sweep.ask_agents(now + Duration::from_secs(4)));
-        assert!(sweep.ask_agents(now + Duration::from_secs(4) + GIVE_UP));
+        assert!(sweep.ask(Reading::Agents, now));
+        assert!(!sweep.ask(Reading::Agents, now + Duration::from_secs(2)));
+        // Each reading waits for its own answer, not another's.
+        assert!(sweep.ask(Reading::Summaries, now + Duration::from_secs(2)));
+        sweep.answered(Reading::Agents);
+        assert!(sweep.ask(Reading::Agents, now + Duration::from_secs(4)));
+        assert!(sweep.ask(Reading::Agents, now + Duration::from_secs(4) + GIVE_UP));
+        assert!(!sweep.ask(Reading::Summaries, now + Duration::from_secs(12)));
 
         let a = PathBuf::from("/a");
         assert!(sweep.canvas_free(&a, now));
@@ -125,7 +146,8 @@ mod tests {
         sweep.canvas_asked(a.clone(), now);
         sweep.forget_asked();
         assert!(sweep.canvas_free(&a, now));
-        assert!(sweep.ask_agents(now));
+        assert!(sweep.ask(Reading::Agents, now));
+        assert!(sweep.ask(Reading::Summaries, now));
     }
 
     /// Those on show at every pass, the others once a minute — starting

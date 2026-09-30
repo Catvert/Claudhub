@@ -55,25 +55,81 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 /// How far apart the terminals nobody types in are repainted.
 const PAINT_PERIOD: std::time::Duration = std::time::Duration::from_millis(33);
 
-/// The terminals waiting for the next shared repaint.
+/// How far apart a program's new titles reach the tabs that show them.
+///
+/// Claude animates its spinner **in the title**, several frames a second.
+/// The label is an entity every tab, card and sidebar row reads during the
+/// root's render, so each of those frames was a render of the whole window
+/// — the paint clock bypassed, for every agent at work, out of phase with
+/// the others. A tab's name has no use for more than one change a second.
+const LABEL_PERIOD: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Terminals waiting for a clock shared by all of them, and whether it is
+/// wound.
 ///
 /// **One clock for all of them, not a notify per burst**: a Claude at work
 /// writes ten or fifteen times a second, and four of them out of phase asked
 /// for a frame at every refresh of the screen — each one a render of the
 /// whole root, which on the home screen is the whole home screen. Gathered
-/// here, their notifies land in one update, and gpui draws them in one
-/// frame: thirty a second at most, however many agents are writing. The
-/// terminal under the hand is not on it — typing answers at once.
+/// here, what they owe lands in one update, and gpui draws it in one frame.
 #[derive(Default)]
-struct PaintClock {
+struct Clock {
     due: Vec<gpui_kit::WeakEntity<TerminalView>>,
     armed: bool,
 }
 
+/// The repaint of the terminals nobody types in: thirty a second at most,
+/// however many agents are writing. The terminal under the hand is not on
+/// it — typing answers at once.
+#[derive(Default)]
+struct PaintClock(Clock);
+
 impl gpui_kit::Global for PaintClock {}
 
+/// The labels their titles changed — see `LABEL_PERIOD`.
+#[derive(Default)]
+struct LabelClock(Clock);
+
+impl gpui_kit::Global for LabelClock {}
+
 fn paint_later(view: gpui_kit::WeakEntity<TerminalView>, cx: &mut App) {
-    let clock = cx.default_global::<PaintClock>();
+    on_clock(
+        view,
+        PAINT_PERIOD,
+        |clock: &mut PaintClock| &mut clock.0,
+        |_, cx| cx.notify(),
+        cx,
+    );
+}
+
+fn label_later(view: gpui_kit::WeakEntity<TerminalView>, cx: &mut App) {
+    on_clock(
+        view,
+        LABEL_PERIOD,
+        |clock: &mut LabelClock| &mut clock.0,
+        |view, cx| {
+            let label = view.label();
+            view.shown.update(cx, |shown, cx| {
+                if *shown != label {
+                    *shown = label;
+                    cx.notify();
+                }
+            });
+        },
+        cx,
+    );
+}
+
+/// Puts `view` on the clock `C`, winding it if it was not: `fire` runs for
+/// every view on it once `period` has passed, all in one update.
+fn on_clock<C: gpui_kit::Global + Default>(
+    view: gpui_kit::WeakEntity<TerminalView>,
+    period: std::time::Duration,
+    clock_of: fn(&mut C) -> &mut Clock,
+    fire: fn(&mut TerminalView, &mut Context<TerminalView>),
+    cx: &mut App,
+) {
+    let clock = clock_of(cx.default_global::<C>());
     if !clock.due.contains(&view) {
         clock.due.push(view);
     }
@@ -81,15 +137,15 @@ fn paint_later(view: gpui_kit::WeakEntity<TerminalView>, cx: &mut App) {
         return;
     }
     cx.spawn(async move |cx| {
-        cx.background_executor().timer(PAINT_PERIOD).await;
+        cx.background_executor().timer(period).await;
         cx.update(|cx| {
             let due = {
-                let clock = cx.default_global::<PaintClock>();
+                let clock = clock_of(cx.default_global::<C>());
                 clock.armed = false;
                 std::mem::take(&mut clock.due)
             };
             for view in due {
-                let _ = view.update(cx, |_, cx| cx.notify());
+                let _ = view.update(cx, fire);
             }
         });
     })
@@ -270,13 +326,7 @@ impl TerminalView {
                                 TerminalEvent::Title(title) => {
                                     view.title = SharedString::from(title.clone());
                                     view.terminal.set_title(title);
-                                    let label = view.label();
-                                    view.shown.update(cx, |shown, cx| {
-                                        if *shown != label {
-                                            *shown = label;
-                                            cx.notify();
-                                        }
-                                    });
+                                    label_later(cx.entity().downgrade(), cx);
                                 }
                                 TerminalEvent::Bell => {}
                                 // The child is gone and the tab has nothing left to

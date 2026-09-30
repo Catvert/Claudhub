@@ -388,7 +388,11 @@ impl ClaudhubApp {
                     .map(|w| (repo.main.clone(), w.path.clone()))
             })
             .collect();
-        if targets.is_empty() {
+        if targets.is_empty()
+            || !self
+                .sweep
+                .ask(super::sweep::Reading::Wt, std::time::Instant::now())
+        {
             return;
         }
         self.git.send(Cmd::WtScan { targets });
