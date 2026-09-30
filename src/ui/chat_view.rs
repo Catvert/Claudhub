@@ -101,7 +101,30 @@ pub enum ChatEvent {
     Restart,
     /// The worktree's files, for the `@` list.
     WantFiles,
+    /// A login to run in a terminal — the agent's own `auth login`.
+    Login {
+        program: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
 }
+
+/// An image pasted into the composer, waiting to go with the prompt.
+struct Pasted {
+    mime: &'static str,
+    /// Base64, as the prompt carries it.
+    data: String,
+    bytes: usize,
+}
+
+/// The formats Claude reads, and the size past which the API refuses one.
+const IMAGE_FORMATS: [gpui_kit::ImageFormat; 4] = [
+    gpui_kit::ImageFormat::Png,
+    gpui_kit::ImageFormat::Jpeg,
+    gpui_kit::ImageFormat::Gif,
+    gpui_kit::ImageFormat::Webp,
+];
+const IMAGE_MAX: usize = 5 * 1024 * 1024;
 
 /// How many files the `@` list offers.
 const MENTIONS: usize = 50;
@@ -155,6 +178,12 @@ pub struct ChatView {
     picker: Option<(String, Entity<OptionPicker>)>,
     /// What the user has given the form the agent waits on so far.
     form: Option<FormState>,
+    /// Images pasted into the composer, sent with the next prompt.
+    pasted: Vec<Pasted>,
+    /// The earlier chat whose deletion waits on a second press.
+    deleting: Option<String>,
+    /// A login was launched in a terminal: the auth screen says to come back.
+    login_launched: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -206,6 +235,9 @@ impl ChatView {
             files_asked: false,
             picker: None,
             form: None,
+            pasted: Vec::new(),
+            deleting: None,
+            login_launched: false,
             _subscriptions: vec![subscription],
         }
     }
@@ -453,9 +485,15 @@ impl ChatView {
                 )
             })
             .collect();
-        let Some(line) = self.chat.prompt_with(&text, &links) else {
+        let images: Vec<(String, String)> = self
+            .pasted
+            .iter()
+            .map(|image| (image.mime.to_string(), image.data.clone()))
+            .collect();
+        let Some(line) = self.chat.prompt_with(&text, &links, &images) else {
             return;
         };
+        self.pasted.clear();
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.history_open = false;
@@ -463,6 +501,71 @@ impl ChatView {
         self.scroller
             .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
         self.send(vec![line], cx);
+    }
+
+    /// Text handed over from elsewhere in the window — a note, a failing
+    /// test, a Sentry issue: sent when the chat can take it, left in the
+    /// composer otherwise.
+    pub fn deliver(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(line) = self.chat.prompt_with(text, &[], &[]) {
+            self.sync(cx);
+            self.scroller
+                .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+            self.send(vec![line], cx);
+            return;
+        }
+        let text = text.to_string();
+        self.input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        cx.notify();
+    }
+
+    /// Takes the images out of a paste, when the agent reads them: `true`
+    /// when the paste was images and nothing else is to be done with it.
+    fn paste_images(&mut self, item: &gpui_kit::ClipboardItem, cx: &mut Context<Self>) -> bool {
+        if !self.chat.takes_images() {
+            return false;
+        }
+        let mut took = false;
+        for entry in item.entries() {
+            let gpui_kit::ClipboardEntry::Image(image) = entry else {
+                continue;
+            };
+            if !IMAGE_FORMATS.contains(&image.format) || image.bytes.len() > IMAGE_MAX {
+                continue;
+            }
+            use base64::Engine as _;
+            self.pasted.push(Pasted {
+                mime: image.format.mime_type(),
+                data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                bytes: image.bytes.len(),
+            });
+            took = true;
+        }
+        if took {
+            cx.notify();
+        }
+        took
+    }
+
+    /// Runs one of the agent's logins in a terminal.
+    fn login(&mut self, launch: &crate::acp::chat::AuthLaunch, cx: &mut Context<Self>) {
+        let (program, args) = match &launch.command {
+            Some(command) => (command.clone(), launch.args.clone()),
+            // The agent's own command, the method's arguments after its own.
+            None => {
+                let mut args = self.agent.args.clone();
+                args.extend(launch.args.iter().cloned());
+                (self.agent.command.clone(), args)
+            }
+        };
+        self.login_launched = true;
+        cx.emit(ChatEvent::Login {
+            program,
+            args,
+            env: launch.env.clone(),
+        });
+        cx.notify();
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
@@ -708,6 +811,8 @@ impl ChatView {
                         .enumerate()
                         .map(|(ix, method)| {
                             let id = method.id.clone();
+                            let launch = method.launch.clone();
+                            let in_terminal = launch.is_some();
                             v_flex()
                                 .gap_1()
                                 .child(
@@ -715,11 +820,24 @@ impl ChatView {
                                         Button::new(("chat-auth", ix))
                                             .outline()
                                             .small()
-                                            .icon(icon("log-in"))
+                                            .icon(icon(if in_terminal {
+                                                "square-terminal"
+                                            } else {
+                                                "log-in"
+                                            }))
                                             .label(SharedString::from(method.name.clone()))
+                                            .when(in_terminal, |button| {
+                                                button.tooltip(tr!("chat-login-terminal"))
+                                            })
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                let line = this.chat.authenticate(&id);
-                                                this.send(line.into_iter().collect(), cx);
+                                                match &launch {
+                                                    // Its own flow, in one of our terminals.
+                                                    Some(launch) => this.login(launch, cx),
+                                                    None => {
+                                                        let line = this.chat.authenticate(&id);
+                                                        this.send(line.into_iter().collect(), cx);
+                                                    }
+                                                }
                                             })),
                                     ),
                                 )
@@ -733,6 +851,14 @@ impl ChatView {
                                 })
                         }),
                 )
+                .when(self.login_launched, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.warning)
+                            .child(tr!("chat-login-launched")),
+                    )
+                })
                 .child(
                     h_flex().child(
                         Button::new("chat-auth-retry")
@@ -787,6 +913,8 @@ impl ChatView {
         }
         let now = chrono::Utc::now().timestamp();
         let current = self.chat.session.clone();
+        let (can_fork, can_delete) = (self.chat.can_fork(), self.chat.can_delete());
+        let deleting = self.deleting.clone();
         div()
             .id("chat-history-list")
             .size_full()
@@ -805,6 +933,52 @@ impl ChatView {
                     .map(SharedString::from)
                     .unwrap_or_else(|| tr!("chat-untitled"));
                 let on_show = current.as_deref() == Some(session.id.as_str());
+                let confirming = deleting.as_deref() == Some(session.id.as_str());
+                let (fork_id, fork_title) = (session.id.clone(), session.title.clone());
+                let delete_id = session.id.clone();
+                // Copy it and go on from the copy; delete it, on a second
+                // press — a conversation deleted is gone from the agent too.
+                let actions = h_flex()
+                    .flex_none()
+                    .gap_0p5()
+                    .when(can_fork, |el| {
+                        el.child(
+                            Button::new(("chat-session-fork", ix))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("git-fork"))
+                                .tooltip(tr!("chat-session-fork"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    let line = this.chat.fork_session(&fork_id, fork_title.clone());
+                                    this.history_open = false;
+                                    this.send(line.into_iter().collect(), cx);
+                                })),
+                        )
+                    })
+                    .when(can_delete && !on_show, |el| {
+                        el.child(
+                            Button::new(("chat-session-delete", ix))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("trash-2"))
+                                .when(confirming, |button| {
+                                    button.danger().label(tr!("chat-session-delete-confirm"))
+                                })
+                                .tooltip(tr!("chat-session-delete"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if this.deleting.as_deref() == Some(delete_id.as_str()) {
+                                        this.deleting = None;
+                                        let line = this.chat.delete_session(&delete_id);
+                                        this.send(line.into_iter().collect(), cx);
+                                    } else {
+                                        this.deleting = Some(delete_id.clone());
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                    });
                 h_flex()
                     .id(("chat-session", ix))
                     .mx_1()
@@ -825,7 +999,9 @@ impl ChatView {
                             .text_color(theme.muted_foreground)
                             .child(when),
                     )
+                    .child(actions)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.deleting = None;
                         this.reopen(session.id.clone(), session.title.clone(), cx);
                     }))
             }))
@@ -1135,24 +1311,66 @@ impl ChatView {
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let busy = self.chat.is_busy();
-        let ready = self.chat.is_ready();
         let (options, model) = self.render_options(cx);
-        let send = if busy {
+        // During a turn, stop — and send too when the agent takes a message
+        // into the turn (or queues it), as typing while Claude works does.
+        let stop = busy.then(|| {
             Button::new("chat-stop")
                 .ghost()
                 .xsmall()
                 .icon(icon("circle-stop"))
                 .tooltip(tr!("chat-stop"))
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-        } else {
+        });
+        let send = (!busy || self.chat.can_send()).then(|| {
             Button::new("chat-send")
                 .primary()
                 .xsmall()
                 .icon(icon("arrow-up"))
-                .tooltip(tr!("chat-send"))
-                .disabled(!ready)
+                .tooltip(if busy {
+                    tr!("chat-send-during")
+                } else {
+                    tr!("chat-send")
+                })
+                .disabled(!self.chat.can_send())
                 .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
-        };
+        });
+        let view = cx.entity().downgrade();
+        let pasted: Vec<AnyElement> = self
+            .pasted
+            .iter()
+            .enumerate()
+            .map(|(ix, image)| {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .pl_2()
+                    .pr_1()
+                    .py(px(1.))
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .child(icon("image").xsmall().text_color(theme.muted_foreground))
+                    .child(tr!("chat-image-chip", {
+                        n: ix + 1,
+                        size: (image.bytes / 1024).max(1)
+                    }))
+                    .child(
+                        Button::new(("chat-image-remove", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("x"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if ix < this.pasted.len() {
+                                    this.pasted.remove(ix);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         div()
             .relative()
             .flex_none()
@@ -1185,11 +1403,21 @@ impl ChatView {
                 }
             }))
             .children(self.render_suggest(cx))
+            .when(!pasted.is_empty(), |el| {
+                el.child(h_flex().flex_wrap().gap_1().px_2().pt_2().children(pasted))
+            })
             .child(
-                div()
-                    .px_1()
-                    .pt_1()
-                    .child(Textarea::new(&self.input).appearance(false).bordered(false)),
+                div().px_1().pt_1().child(
+                    Textarea::new(&self.input)
+                        .appearance(false)
+                        .bordered(false)
+                        // A pasted image joins the prompt; anything else is
+                        // pasted as the field pastes it.
+                        .on_paste(move |item, _, cx| {
+                            view.update(cx, |this, cx| this.paste_images(item, cx))
+                                .unwrap_or(false)
+                        }),
+                ),
             )
             .child(
                 h_flex()
@@ -1211,7 +1439,8 @@ impl ChatView {
                             .items_center()
                             .gap_1()
                             .children(model)
-                            .child(send),
+                            .children(stop)
+                            .children(send),
                     ),
             )
     }
@@ -1328,8 +1557,69 @@ impl ChatView {
     /// composer, framed in the colour of what waits on a hand.
     fn render_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let form = self.chat.form.as_ref()?;
-        let state = self.form.as_ref()?;
         let theme = cx.theme().clone();
+        // A link to open — an MCP server's sign-in: opened in the browser of
+        // the desktop the window is on, which is where one signs in.
+        if let Some(url) = form.url.clone() {
+            return Some(
+                v_flex()
+                    .flex_none()
+                    .mx_2()
+                    .mt_2()
+                    .p_3()
+                    .gap_2()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.warning.opacity(0.7))
+                    .bg(theme.background)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .text_sm()
+                            .child(icon("globe").xsmall().text_color(theme.warning))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(SharedString::from(form.message.clone())),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(SharedString::from(url.clone())),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_1()
+                            .child(
+                                Button::new("chat-url-decline")
+                                    .ghost()
+                                    .small()
+                                    .label(tr!("chat-url-decline"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.decline_form(cx))),
+                            )
+                            .child(
+                                Button::new("chat-url-open")
+                                    .primary()
+                                    .small()
+                                    .icon(icon("globe"))
+                                    .label(tr!("chat-url-open"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.open_url(&url);
+                                        let line = this.chat.accept_url();
+                                        this.send(line.into_iter().collect(), cx);
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let state = self.form.as_ref()?;
         let fields: Vec<AnyElement> = form
             .fields
             .iter()
@@ -1550,8 +1840,14 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
     let entries = &this.chat.entries;
     let last = ix + 1 == entries.len();
     // Tight between the steps of one turn, roomier around what is said.
-    let step =
-        |entry: Option<&Entry>| matches!(entry, Some(Entry::Tool(_) | Entry::Thought { .. }));
+    let step = |entry: Option<&Entry>| {
+        matches!(
+            entry,
+            Some(
+                Entry::Tool(_) | Entry::Thought { .. } | Entry::Subagent(_) | Entry::Compaction(_)
+            )
+        )
+    };
     let gap = if last {
         0.
     } else if step(entries.get(ix)) && step(entries.get(ix + 1)) {
@@ -1565,9 +1861,10 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
     };
     let weak = view.downgrade();
     match entry {
-        Entry::User(text) => row
+        Entry::User { text, images } => row
             .child(
-                div()
+                v_flex()
+                    .gap_1()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
@@ -1575,9 +1872,80 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
                     .px_3()
                     .py_2()
                     .text_sm()
-                    .child(SharedString::from(text.clone())),
+                    .when(!text.is_empty(), |el| {
+                        el.child(SharedString::from(text.clone()))
+                    })
+                    .when(*images > 0, |el| {
+                        el.child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(icon("image").xsmall())
+                                .child(tr!("chat-images-sent", { count: images })),
+                        )
+                    }),
             )
             .into_any_element(),
+        Entry::Compaction(compaction) => {
+            let (word, color) = match compaction.status.as_str() {
+                "completed" => (tr!("chat-compaction-done"), theme.muted_foreground),
+                "failed" => (tr!("chat-compaction-failed"), theme.danger),
+                "cancelled" => (tr!("chat-compaction-cancelled"), theme.muted_foreground),
+                _ => (tr!("chat-compaction-running"), theme.warning),
+            };
+            let expanded = compaction.expanded;
+            let foldable = !compaction.summary.is_empty() || compaction.error.is_some();
+            row.child(
+                h_flex()
+                    .id(("chat-compaction", ix))
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(color)
+                    .when(foldable, |el| {
+                        el.cursor_pointer()
+                            .hover(|el| el.text_color(theme.foreground))
+                            .child(chevron(expanded))
+                    })
+                    .child(icon("archive").xsmall())
+                    .child(word)
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| this.toggle(ix, cx));
+                    }),
+            )
+            .when(expanded, |el| {
+                el.child(
+                    v_flex()
+                        .mt_1()
+                        .pl_3()
+                        .gap_1()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .children(compaction.error.clone().map(|error| {
+                            div()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(error))
+                        }))
+                        .when(!compaction.summary.is_empty(), |el| {
+                            el.child(TextView::markdown(
+                                SharedString::from(format!("chat-compaction-{ix}")),
+                                SharedString::from(compaction.summary.clone()),
+                            ))
+                        }),
+                )
+            })
+            .into_any_element()
+        }
+        Entry::Subagent(session) => match this.chat.subagent(session) {
+            Some(agent) => row
+                .child(render_subagent(&weak, ix, agent, &theme))
+                .into_any_element(),
+            None => row.into_any_element(),
+        },
         Entry::Agent { .. } => {
             let Some(Some((state, _))) = this.markdown.get(ix) else {
                 return row.into_any_element();
@@ -1658,6 +2026,48 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
                 Notice::ResumedWithoutHistory => (tr!("chat-resumed-without-history"), false),
                 Notice::NotResumed(reason) => (tr!("chat-not-resumed", { reason: reason }), false),
                 Notice::Error(message) => (SharedString::from(message.clone()), true),
+                // The agent's own, with its weight: a warning in the warning's
+                // colour, its title before what it explains.
+                Notice::Agent {
+                    severity,
+                    title,
+                    description,
+                } => {
+                    let (glyph, color) = match severity.as_str() {
+                        "error" => ("circle-x", theme.danger),
+                        "warning" => ("triangle-alert", theme.warning),
+                        _ => ("info", theme.muted_foreground),
+                    };
+                    return row
+                        .child(
+                            h_flex()
+                                .items_start()
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(color.opacity(0.5))
+                                .text_xs()
+                                .child(icon(glyph).xsmall().mt_0p5().text_color(color))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                .child(SharedString::from(title.clone())),
+                                        )
+                                        .children(description.clone().map(|description| {
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .child(SharedString::from(description))
+                                        })),
+                                ),
+                        )
+                        .into_any_element();
+                }
             };
             row.child(
                 h_flex()
@@ -1686,6 +2096,7 @@ fn render_tool(
     let (status_glyph, status_color) = match tool.status.as_str() {
         "completed" => ("check", theme.success),
         "failed" => ("circle-x", theme.danger),
+        "cancelled" => ("circle-stop", theme.muted_foreground),
         _ => ("loader-circle", theme.muted_foreground),
     };
     let asking = tool.permission.is_some();
@@ -1694,7 +2105,7 @@ fn render_tool(
     // it one opens the card for.
     let terminal = tool
         .is_command()
-        .then(|| render_terminal(ix, tool, expanded, view, theme));
+        .then(|| render_terminal(ix, tool, expanded, true, view, theme));
     // Its text content is its output, already shown above.
     let output_in_content = tool.is_command() && tool.terminal.is_none();
     let mut body: Vec<AnyElement> = Vec::new();
@@ -1816,6 +2227,8 @@ fn render_terminal(
     ix: usize,
     tool: &ToolCall,
     expanded: bool,
+    // `false` for a subagent's call, whose card has nothing to unfold into.
+    unfold: bool,
     view: &WeakEntity<ChatView>,
     theme: &gpui_kit::component::Theme,
 ) -> AnyElement {
@@ -1848,9 +2261,10 @@ fn render_terminal(
             (None, None) => (tr!("chat-exit-ended"), theme.muted_foreground),
         }),
         (None, "failed") => Some((tr!("chat-exit-failed"), theme.danger)),
+        (None, "cancelled") => Some((tr!("chat-exit-interrupted"), theme.muted_foreground)),
         _ => None,
     };
-    let unfold = view.clone();
+    let unfolding = view.clone();
     v_flex()
         .mx_2()
         .mb_2()
@@ -1866,7 +2280,7 @@ fn render_terminal(
                 .text_color(theme.foreground)
                 .child(SharedString::from(format!("$ {command}")))
         }))
-        .when(hidden > 0 && !expanded, |el| {
+        .when(hidden > 0 && !expanded && unfold, |el| {
             el.child(
                 div()
                     .id(("chat-output-more", ix))
@@ -1875,7 +2289,7 @@ fn render_terminal(
                     .hover(|el| el.text_color(theme.foreground))
                     .child(tr!("chat-output-more", { count: hidden }))
                     .on_click(move |_, _, cx| {
-                        let _ = unfold.update(cx, |this, cx| this.toggle(ix, cx));
+                        let _ = unfolding.update(cx, |this, cx| this.toggle(ix, cx));
                     }),
             )
         })
@@ -1903,6 +2317,225 @@ fn render_terminal(
             )
         })
         .children(ended.map(|(word, color)| div().text_color(color).child(word)))
+        .into_any_element()
+}
+
+/// A subagent: its name, its task, how it stands — and, unfolded, what it
+/// did: its messages, and its calls with their output and their questions.
+fn render_subagent(
+    view: &WeakEntity<ChatView>,
+    ix: usize,
+    agent: &crate::acp::chat::Subagent,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let asking = agent.permission.is_some()
+        || agent
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Tool(tool) if tool.permission.is_some()));
+    let expanded = agent.expanded || asking;
+    let (glyph, color) = match agent.state.as_deref() {
+        Some("completed") => ("check", theme.success),
+        Some("failed" | "disconnected") => ("circle-x", theme.danger),
+        Some(_) => ("circle-stop", theme.muted_foreground),
+        None => ("loader-circle", theme.warning),
+    };
+    let calls = agent
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Tool(_)))
+        .count();
+    let toggle = view.clone();
+    let mut body: Vec<AnyElement> = if expanded {
+        agent
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(n, entry)| match entry {
+                Entry::Agent { text, .. } => Some(
+                    div()
+                        .text_xs()
+                        .child(
+                            TextView::markdown(
+                                SharedString::from(format!("chat-sub-{ix}-{n}")),
+                                SharedString::from(text.clone()),
+                            )
+                            .selectable(true),
+                        )
+                        .into_any_element(),
+                ),
+                Entry::Tool(tool) => Some(render_nested_tool(view, ix * 1024 + n, tool, theme)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if expanded && !agent.report.is_empty() {
+        // What it handed back, after what it did.
+        body.push(
+            div()
+                .pt_1()
+                .text_xs()
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("chat-sub-report-{ix}")),
+                        SharedString::from(agent.report.clone()),
+                    )
+                    .selectable(true),
+                )
+                .into_any_element(),
+        );
+    }
+    if let Some(permission) = &agent.permission {
+        let buttons = permission.options.iter().enumerate().map(|(n, option)| {
+            let (view, agent_id, option_id) =
+                (view.clone(), agent.session.clone(), option.id.clone());
+            let button = Button::new(("chat-subagent-permission", ix * 16 + n))
+                .xsmall()
+                .label(SharedString::from(option.name.clone()))
+                .on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        let line = this.chat.answer(&agent_id, &option_id);
+                        this.send(line.into_iter().collect(), cx);
+                        this.sync(cx);
+                    });
+                });
+            if option.kind.starts_with("allow") {
+                button.outline()
+            } else {
+                button.ghost()
+            }
+        });
+        body.push(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .children(buttons)
+                .into_any_element(),
+        );
+    }
+    v_flex()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(if asking {
+            theme.warning.opacity(0.7)
+        } else {
+            theme.border
+        })
+        .child(
+            h_flex()
+                .id(("chat-subagent", ix))
+                .gap_2()
+                .px_2()
+                .py_1()
+                .items_center()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .hover(|el| el.text_color(theme.foreground))
+                .child(chevron(expanded))
+                .child(icon("bot").xsmall())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.foreground)
+                        .child(SharedString::from(if agent.name.is_empty() {
+                            tr!("chat-subagent").to_string()
+                        } else {
+                            agent.name.clone()
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(agent.task.clone())),
+                )
+                .when(calls > 0, |el| {
+                    el.child(tr!("chat-subagent-calls", { count: calls }))
+                })
+                .child(icon(glyph).xsmall().text_color(color))
+                .on_click(move |_, _, cx| {
+                    let _ = toggle.update(cx, |this, cx| this.toggle(ix, cx));
+                }),
+        )
+        .when(!body.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap_1()
+                    .px_2()
+                    .pb_2()
+                    .ml_2()
+                    .pl_2()
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .children(body),
+            )
+        })
+        .into_any_element()
+}
+
+/// A subagent's call: a line, the tail of its output when it ran a command,
+/// and its permission when it asks one.
+fn render_nested_tool(
+    view: &WeakEntity<ChatView>,
+    key: usize,
+    tool: &ToolCall,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let (status_glyph, status_color) = match tool.status.as_str() {
+        "completed" => ("check", theme.success),
+        "failed" => ("circle-x", theme.danger),
+        "cancelled" => ("circle-stop", theme.muted_foreground),
+        _ => ("loader-circle", theme.muted_foreground),
+    };
+    v_flex()
+        .gap_1()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(icon(kind_icon(&tool.kind)).xsmall())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(tool.title.clone())),
+                )
+                .child(icon(status_glyph).xsmall().text_color(status_color)),
+        )
+        .when(tool.is_command() && tool.output().is_some(), |el| {
+            el.child(render_terminal(key, tool, false, false, view, theme))
+        })
+        .children(tool.permission.as_ref().map(|permission| {
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .children(permission.options.iter().enumerate().map(|(n, option)| {
+                    let (view, tool_id, option_id) =
+                        (view.clone(), tool.id.clone(), option.id.clone());
+                    let button = Button::new(("chat-sub-permission", key * 16 + n))
+                        .xsmall()
+                        .label(SharedString::from(option.name.clone()))
+                        .on_click(move |_, _, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                let line = this.chat.answer(&tool_id, &option_id);
+                                this.send(line.into_iter().collect(), cx);
+                                this.sync(cx);
+                            });
+                        });
+                    if option.kind.starts_with("allow") {
+                        button.outline()
+                    } else {
+                        button.ghost()
+                    }
+                }))
+        }))
         .into_any_element()
 }
 

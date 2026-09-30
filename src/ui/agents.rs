@@ -48,7 +48,7 @@ impl ClaudhubApp {
     }
 
     /// "repository · checkout", as the strip's heads write it.
-    fn agent_place(&self, worktree: &Path) -> SharedString {
+    pub(super) fn agent_place(&self, worktree: &Path) -> SharedString {
         match self.project_label(worktree) {
             (Some(repo), label) => SharedString::from(format!("{repo} · {label}")),
             (None, label) => label,

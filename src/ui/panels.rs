@@ -2159,6 +2159,14 @@ impl ChatPanel {
     }
 }
 
+impl ChatPanel {
+    /// Makes this chat the displayed tab of its group.
+    pub fn activate(panel: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let group = panel.read(cx).group.clone();
+        select_own_tab(group, panel.entity_id(), window, cx);
+    }
+}
+
 impl Focusable for ChatPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.view.read(cx).focus_handle(cx)

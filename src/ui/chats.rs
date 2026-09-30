@@ -25,6 +25,9 @@ pub struct OpenChat {
     /// Refreshed by the application whenever the chat moves (`refresh`).
     pub label: gpui_kit::SharedString,
     pub doing: crate::ui::overview::Doing,
+    /// When the chat was last written to: what `send_to_agent` hands text
+    /// to, among a worktree's chats.
+    pub last_used: std::time::Instant,
 }
 
 impl OpenChat {
@@ -79,43 +82,66 @@ impl ClaudhubApp {
                 cx,
             )
         });
-        cx.subscribe(&view, |this, view, event: &ChatEvent, cx| {
-            let chat = view.read(cx).id;
-            // A gesture in the chat — a prompt, an answer — moves what the
-            // home screen shows of it.
-            this.chat_moved(chat, cx);
-            match event {
-                ChatEvent::Send(lines) => {
-                    for line in lines {
-                        this.git.send(Cmd::AcpSend {
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, view, event: &ChatEvent, window, cx| {
+                let chat = view.read(cx).id;
+                // A gesture in the chat — a prompt, an answer — moves what the
+                // home screen shows of it.
+                this.chat_moved(chat, cx);
+                match event {
+                    ChatEvent::Send(lines) => {
+                        if let Some(open) = this.chats.iter_mut().find(|open| open.chat == chat) {
+                            open.last_used = std::time::Instant::now();
+                        }
+                        for line in lines {
+                            this.git.send(Cmd::AcpSend {
+                                chat,
+                                line: line.clone(),
+                            });
+                        }
+                    }
+                    ChatEvent::Restart => {
+                        let (worktree, agent) = {
+                            let view = view.read(cx);
+                            (view.worktree.clone(), view.agent.clone())
+                        };
+                        this.git.send(Cmd::AcpStart {
                             chat,
-                            line: line.clone(),
+                            worktree,
+                            agent,
                         });
+                        view.update(cx, |view, cx| view.start(cx));
+                    }
+                    // The agent's own login, in a terminal of the same worktree —
+                    // where a terminal agent would have run it too.
+                    ChatEvent::Login { program, args, env } => {
+                        let (worktree, label) = {
+                            let view = view.read(cx);
+                            (view.worktree.clone(), view.agent.label().to_string())
+                        };
+                        let launch = crate::ui::terminal_view::Launch {
+                            command: Some((program.clone(), args.clone())),
+                            env: env.iter().cloned().collect(),
+                            label: crate::tr!("chat-login-tab", { agent: label }),
+                            agent: false,
+                            placement: None,
+                        };
+                        this.open_terminal(&worktree, launch, window, cx);
+                    }
+                    ChatEvent::WantFiles => {
+                        let worktree = view.read(cx).worktree.clone();
+                        this.hand_files_to_chats(&worktree, cx);
+                        // Not listed yet: the listing is asked for the worktree
+                        // on show, and `project_files_arrived` hands it over.
+                        if this.active.as_deref() == Some(worktree.as_path()) {
+                            this.ensure_project_files(cx);
+                        }
                     }
                 }
-                ChatEvent::Restart => {
-                    let (worktree, agent) = {
-                        let view = view.read(cx);
-                        (view.worktree.clone(), view.agent.clone())
-                    };
-                    this.git.send(Cmd::AcpStart {
-                        chat,
-                        worktree,
-                        agent,
-                    });
-                    view.update(cx, |view, cx| view.start(cx));
-                }
-                ChatEvent::WantFiles => {
-                    let worktree = view.read(cx).worktree.clone();
-                    this.hand_files_to_chats(&worktree, cx);
-                    // Not listed yet: the listing is asked for the worktree
-                    // on show, and `project_files_arrived` hands it over.
-                    if this.active.as_deref() == Some(worktree.as_path()) {
-                        this.ensure_project_files(cx);
-                    }
-                }
-            }
-        })
+            },
+        )
         .detach();
         if self.active.as_deref() == Some(worktree) {
             self.show_panel(view_name, cx);
@@ -136,6 +162,7 @@ impl ClaudhubApp {
             chat,
             label: gpui_kit::SharedString::default(),
             doing: crate::ui::overview::Doing::Rest,
+            last_used: std::time::Instant::now(),
         });
         // The process first, then its first line: both go down the same lane,
         // in the order they are sent.
@@ -301,14 +328,63 @@ impl ClaudhubApp {
     /// Copies again what the renders read of a chat, and redraws only when
     /// that changed — not at every chunk the agent streams.
     fn chat_moved(&mut self, chat: u64, cx: &mut Context<Self>) {
+        use crate::ui::overview::Doing;
         let Some(open) = self.chats.iter_mut().find(|open| open.chat == chat) else {
             return;
         };
         let before = (open.label.clone(), open.doing);
         open.refresh(cx);
-        if (open.label.clone(), open.doing) != before {
-            cx.notify();
+        let (label, doing) = (open.label.clone(), open.doing);
+        let worktree = open.worktree.clone();
+        if (label.clone(), doing) == before {
+            return;
         }
+        cx.notify();
+        // A turn over, or a question: said in a bubble, as the agents'
+        // hooks are — and, like them, only for a worktree one is not
+        // looking at, where the chat's own colour already says it.
+        let told = match (before.1, doing) {
+            (Doing::Working, Doing::Rest) => Some(crate::tr!("chat-finished-in", {
+                chat: label,
+                worktree: self.agent_place(&worktree)
+            })),
+            (Doing::Rest | Doing::Working, Doing::Waiting) => Some(crate::tr!("chat-waiting-in", {
+                chat: label,
+                worktree: self.agent_place(&worktree)
+            })),
+            _ => None,
+        };
+        let looked_at = !self.overview && self.active.as_deref() == Some(worktree.as_path());
+        if let Some(told) = told.filter(|_| !looked_at) {
+            self.announce(told, cx);
+        }
+    }
+
+    /// Hands a text to the worktree's chat — the one written to last —, and
+    /// brings it forward. `false` when the worktree has no chat, and the text
+    /// goes to a terminal agent instead (`send_to_agent`).
+    pub(super) fn deliver_to_chat(
+        &mut self,
+        worktree: &Path,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(open) = self
+            .chats
+            .iter()
+            .filter(|open| open.worktree == worktree)
+            .max_by_key(|open| open.last_used)
+        else {
+            return false;
+        };
+        let (view, panel, view_name) = (open.view.clone(), open.panel.clone(), open.view_name);
+        self.show_panel(view_name, cx);
+        crate::ui::panels::ChatPanel::activate(&panel, window, cx);
+        view.update(cx, |view, cx| view.deliver(text, window, cx));
+        let focus = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
+        window.focus(&focus, cx);
+        true
     }
 
     /// A chat's agent is gone.

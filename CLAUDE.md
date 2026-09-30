@@ -410,7 +410,13 @@ du bureau, ni dans celui du serveur WSL. **Les touches du compositeur** (`/`, `@
 Tab, Échap) sont hors de la table des raccourcis (`chat_view::key_bindings`,
 posées après celles du kit) et **rendent la touche au champ** (`propagate`)
 quand aucune liste n'est ouverte — sans quoi les flèches ne bougent plus le
-curseur, sans erreur. Rien n'y est animé (ni scintillement ni fondu).
+curseur, sans erreur. Rien n'y est animé (ni scintillement ni fondu). **Un
+message pendant un tour est injecté** (`_session/steering`), à défaut mis en
+file ; l'injection interrompt la génération, et un appel abandonné n'est jamais
+clos par l'adaptateur — la fin du tour le clôt. **Les sous-agents se lisent sur
+l'appel `Agent`** et le `parentToolUseId` de leurs appels : la capacité
+`subagents` est retirée par le schéma du SDK ACP avant d'atteindre l'agent.
+`send_to_agent` (notes, Sentry, tests) va au chat du worktree s'il en a un.
 
 **Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal`) : un
 shell ou un agent vivant revient à sa place, Claude **dans sa conversation**

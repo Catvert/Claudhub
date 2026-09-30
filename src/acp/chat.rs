@@ -75,6 +75,14 @@ pub enum Notice {
     ResumedWithoutHistory,
     /// The earlier conversation could not come back; this is a new one.
     NotResumed(String),
+    /// What the agent flags beside its reply (`sessionUpdate: notice`): a
+    /// setting it could not honour, a hook that blocked, a limit near.
+    Agent {
+        /// `info`, `warning` or `error`.
+        severity: String,
+        title: String,
+        description: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +90,21 @@ pub struct AuthMethod {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// A login run in a terminal rather than through `authenticate` — see
+    /// [`AuthLaunch`].
+    pub launch: Option<AuthLaunch>,
+}
+
+/// A login the agent wants run in a terminal (`type: terminal`): Claude's
+/// adapter offers `claude auth login` this way, and only to a client that
+/// says it can (`auth.terminal`) — Claudhub has terminals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLaunch {
+    /// The program, when the agent names it (`_meta.terminal-auth`); `None`
+    /// is the agent's own command, the arguments after it.
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
 }
 
 /// One value of a select — a mode, a model.
@@ -376,7 +399,11 @@ pub fn tail(text: &str, lines: usize) -> (&str, usize) {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
-    User(String),
+    /// What the user sent, and how many images went with it.
+    User {
+        text: String,
+        images: usize,
+    },
     /// The agent's reply, Markdown, and the message it belongs to — two replies
     /// in a row are two messages only when the agent says so.
     Agent {
@@ -389,6 +416,51 @@ pub enum Entry {
     },
     Tool(ToolCall),
     Notice(Notice),
+    /// The context being compacted (`/compact`, or the agent's own).
+    Compaction(Compaction),
+    /// A subagent the agent started — its session id; its transcript is in
+    /// [`Chat::subagents`].
+    Subagent(String),
+}
+
+/// A compaction of the context, as the agent reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compaction {
+    pub id: String,
+    /// `in_progress`, `completed`, `failed` or `cancelled`.
+    pub status: String,
+    /// What the conversation was reduced to.
+    pub summary: String,
+    pub error: Option<String>,
+    pub expanded: bool,
+}
+
+/// A subagent (Claude's `Agent` / `Task` tool), and what it did.
+///
+/// **Two ways in.** The protocol's: a session of its own, announced in its
+/// parent's (`subagent_spawned`), whose updates arrive under its own session
+/// id, closed by `subagent_state_update` — offered by the `subagents` client
+/// capability, which the ACP SDK's schema **drops** today (checked against
+/// claude-agent-acp 0.84: the field never reaches the adapter). And the one
+/// that works now: the `Agent` call is the subagent — its input names its
+/// type and task, its status its state, its content its report — and every
+/// call of the subagent's carries the `Agent` call's id as
+/// `_meta.claudeCode.parentToolUseId`. The key is then that id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subagent {
+    /// Its session id, or the id of the `Agent` call that started it.
+    pub session: String,
+    pub name: String,
+    pub task: String,
+    /// `None` while it runs; `completed`, `failed`, `cancelled` or
+    /// `disconnected` once it ended.
+    pub state: Option<String>,
+    pub entries: Vec<Entry>,
+    /// What it handed back to its parent, when it ended.
+    pub report: String,
+    /// The `Agent` call's own permission, when it asks one.
+    pub permission: Option<Permission>,
+    pub expanded: bool,
 }
 
 /// Context used and available, in tokens, and what the session has cost.
@@ -400,7 +472,7 @@ pub struct Usage {
 }
 
 /// What an answer we wait on belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Pending {
     Initialize,
     NewSession,
@@ -412,6 +484,13 @@ enum Pending {
     Setting,
     /// `session/list`.
     List,
+    /// `_session/steering`, and the prompt it carried — sent again as a
+    /// `session/prompt` when the turn it aimed at was over.
+    Steer(Vec<Value>),
+    /// `session/delete`, and which.
+    Delete(String),
+    /// `session/fork`, and the title the copy opens under.
+    Fork(Option<String>),
 }
 
 pub struct Chat {
@@ -438,6 +517,16 @@ pub struct Chat {
     pub sessions: Option<Vec<SessionSummary>>,
     /// The form the agent waits on (`elicitation/create`) — see [`Form`].
     pub form: Option<Form>,
+    /// The subagents of this conversation, in the order they started.
+    pub subagents: Vec<Subagent>,
+    /// Prompts sent and not answered yet: a turn is over when it is zero.
+    open_prompts: usize,
+    /// The agent takes a message into the turn under way
+    /// (`_session/steering`, advertised in `initialize`'s `_meta`).
+    steering: bool,
+    /// The agent queues a prompt sent while a turn runs
+    /// (`_meta.claudeCode.promptQueueing`).
+    queueing: bool,
 }
 
 impl Chat {
@@ -462,6 +551,10 @@ impl Chat {
             title: None,
             sessions: None,
             form: None,
+            subagents: Vec::new(),
+            open_prompts: 0,
+            steering: false,
+            queueing: false,
         }
     }
 
@@ -491,11 +584,68 @@ impl Chat {
 
     /// Whether a permission question is waiting on the user.
     pub fn is_asking(&self) -> bool {
-        self.form.is_some()
-            || self
-                .entries
+        let asks = |entries: &[Entry]| {
+            entries
                 .iter()
                 .any(|entry| matches!(entry, Entry::Tool(tool) if tool.permission.is_some()))
+        };
+        self.form.is_some()
+            || asks(&self.entries)
+            || self
+                .subagents
+                .iter()
+                .any(|agent| agent.permission.is_some() || asks(&agent.entries))
+    }
+
+    /// Whether what is typed can go now: at rest, or during a turn to an
+    /// agent that takes it in (steering) or queues it.
+    pub fn can_send(&self) -> bool {
+        self.is_ready() || (self.is_busy() && (self.steering || self.queueing))
+    }
+
+    /// Whether the agent reads images in a prompt.
+    pub fn takes_images(&self) -> bool {
+        self.can(&["promptCapabilities", "image"])
+    }
+
+    /// Whether the agent deletes its conversations.
+    pub fn can_delete(&self) -> bool {
+        self.can(&["sessionCapabilities", "delete"])
+    }
+
+    /// Whether the agent copies a conversation to go on from it apart.
+    pub fn can_fork(&self) -> bool {
+        self.can(&["sessionCapabilities", "fork"])
+    }
+
+    /// Deletes an earlier conversation.
+    pub fn delete_session(&mut self, session: &str) -> Option<String> {
+        if !self.can_delete() || !self.is_connected() || self.session.as_deref() == Some(session) {
+            return None;
+        }
+        Some(self.request(
+            Pending::Delete(session.to_string()),
+            "session/delete",
+            json!({ "sessionId": session }),
+        ))
+    }
+
+    /// Copies a conversation, and opens the copy here once it exists.
+    pub fn fork_session(&mut self, session: &str, title: Option<String>) -> Option<String> {
+        if !self.can_fork() || !self.is_connected() {
+            return None;
+        }
+        Some(self.request(
+            Pending::Fork(title),
+            "session/fork",
+            json!({ "sessionId": session, "cwd": self.cwd, "mcpServers": [] }),
+        ))
+    }
+
+    /// The user opened the link a URL form points at: `accept`.
+    pub fn accept_url(&mut self) -> Option<String> {
+        let form = self.form.take_if(|form| form.url.is_some())?;
+        Some(response(form.request, Ok(json!({ "action": "accept" }))))
     }
 
     /// The user filled the form in: `accept`, with what the fields hold.
@@ -527,8 +677,15 @@ impl Chat {
             (Some(method), Some(id)) => self.asked(id, method, &message["params"]),
             (Some("session/update"), None) => {
                 let params = &message["params"];
-                if params["sessionId"].as_str() == self.session.as_deref() {
+                let session = params["sessionId"].as_str();
+                if session.is_some() && session == self.session.as_deref() {
                     self.update(&params["update"]);
+                } else if let Some(agent) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|agent| Some(agent.session.as_str()) == session)
+                {
+                    fold(&mut agent.entries, &params["update"]);
                 }
                 Vec::new()
             }
@@ -539,6 +696,7 @@ impl Chat {
     /// The process is gone. `None` when the view ended it.
     pub fn ended(&mut self, reason: Option<String>) {
         self.pending.clear();
+        self.open_prompts = 0;
         self.drop_permissions();
         if let Some(reason) = reason {
             self.status = Status::Failed(reason);
@@ -547,31 +705,73 @@ impl Chat {
 
     /// Sends what the user typed.
     pub fn prompt(&mut self, text: &str) -> Option<String> {
-        self.prompt_with(text, &[])
+        self.prompt_with(text, &[], &[])
     }
 
     /// Sends what the user typed, and the files it mentions — each a
     /// `resource_link` (its name and its `file://` URI), the baseline every
     /// agent reads: the agent opens the file itself, and nothing here does.
-    pub fn prompt_with(&mut self, text: &str, files: &[(String, String)]) -> Option<String> {
+    ///
+    /// And the images pasted with it — `(mime type, base64)` —, when the agent
+    /// reads them.
+    ///
+    /// **During a turn**, the message goes into it (`_session/steering`) when
+    /// the agent offers that — as typing while Claude works does in its CLI —
+    /// and is otherwise queued behind it as one more `session/prompt`.
+    pub fn prompt_with(
+        &mut self,
+        text: &str,
+        files: &[(String, String)],
+        images: &[(String, String)],
+    ) -> Option<String> {
         let text = text.trim();
-        if text.is_empty() || !self.is_ready() {
+        let images: &[(String, String)] = if self.takes_images() { images } else { &[] };
+        if (text.is_empty() && images.is_empty()) || !self.can_send() {
             return None;
         }
         let session = self.session.clone()?;
-        self.entries.push(Entry::User(text.to_string()));
-        self.status = Status::Busy;
-        let mut prompt = vec![json!({ "type": "text", "text": text })];
+        self.entries.push(Entry::User {
+            text: text.to_string(),
+            images: images.len(),
+        });
+        let mut prompt = Vec::new();
+        if !text.is_empty() {
+            prompt.push(json!({ "type": "text", "text": text }));
+        }
+        prompt.extend(
+            images
+                .iter()
+                .map(|(mime, data)| json!({ "type": "image", "mimeType": mime, "data": data })),
+        );
         prompt.extend(
             files
                 .iter()
                 .map(|(name, uri)| json!({ "type": "resource_link", "name": name, "uri": uri })),
         );
-        Some(self.request(
+        if self.is_busy() && self.steering {
+            return Some(self.request(
+                Pending::Steer(prompt.clone()),
+                "_session/steering",
+                json!({
+                    "sessionId": session,
+                    "prompt": prompt,
+                    // A turn that ended meanwhile hands the message back
+                    // rather than starting one this chat does not follow.
+                    "_meta": { "steering": { "idleBehavior": "promptRequired" } }
+                }),
+            ));
+        }
+        Some(self.send_prompt(session, prompt))
+    }
+
+    fn send_prompt(&mut self, session: String, prompt: Vec<Value>) -> String {
+        self.status = Status::Busy;
+        self.open_prompts += 1;
+        self.request(
             Pending::Prompt,
             "session/prompt",
             json!({ "sessionId": session, "prompt": prompt }),
-        ))
+        )
     }
 
     /// Whether the agent keeps its conversations and lists them.
@@ -621,7 +821,9 @@ impl Chat {
     /// Everything that belonged to the conversation on show.
     fn forget(&mut self) {
         self.pending
-            .retain(|_, pending| *pending == Pending::Setting);
+            .retain(|_, pending| matches!(pending, Pending::Setting));
+        self.open_prompts = 0;
+        self.subagents.clear();
         self.entries.clear();
         self.plan.clear();
         self.usage = None;
@@ -651,7 +853,10 @@ impl Chat {
 
     /// The user picked one of a tool call's permission options.
     pub fn answer(&mut self, tool: &str, option: &str) -> Option<String> {
-        let permission = self.tool_mut(tool)?.permission.take()?;
+        let permission = match self.subagent_mut(tool) {
+            Some(agent) => agent.permission.take()?,
+            None => self.tool_mut(tool)?.permission.take()?,
+        };
         Some(response(
             permission.request,
             Ok(json!({ "outcome": { "outcome": "selected", "optionId": option } })),
@@ -710,13 +915,31 @@ impl Chat {
         Some(self.request(Pending::Setting, "session/set_config_option", params))
     }
 
-    /// Folds or unfolds a thought or a tool call.
+    /// Folds or unfolds a thought, a tool call, a compaction or a subagent.
     pub fn toggle(&mut self, ix: usize) {
         match self.entries.get_mut(ix) {
             Some(Entry::Thought { expanded, .. }) => *expanded = !*expanded,
             Some(Entry::Tool(tool)) => tool.expanded = !tool.expanded,
+            Some(Entry::Compaction(compaction)) => compaction.expanded = !compaction.expanded,
+            Some(Entry::Subagent(session)) => {
+                let session = session.clone();
+                if let Some(agent) = self.subagent_mut(&session) {
+                    agent.expanded = !agent.expanded;
+                }
+            }
             _ => {}
         }
+    }
+
+    /// A subagent, by its session id.
+    pub fn subagent(&self, session: &str) -> Option<&Subagent> {
+        self.subagents.iter().find(|agent| agent.session == session)
+    }
+
+    fn subagent_mut(&mut self, session: &str) -> Option<&mut Subagent> {
+        self.subagents
+            .iter_mut()
+            .find(|agent| agent.session == session)
     }
 
     // — Lines out ————————————————————————————————————————————————————
@@ -784,6 +1007,8 @@ impl Chat {
         match (pending, result) {
             (Pending::Initialize, Ok(result)) => {
                 self.caps = result["agentCapabilities"].clone();
+                self.steering = result["_meta"]["steering"]["supported"] == json!(true);
+                self.queueing = self.caps["_meta"]["claudeCode"]["promptQueueing"] == json!(true);
                 self.agent_name = result["agentInfo"]["title"]
                     .as_str()
                     .or(result["agentInfo"]["name"].as_str())
@@ -794,6 +1019,7 @@ impl Chat {
                         id: text(&m["id"]),
                         name: text(&m["name"]),
                         description: text(&m["description"]),
+                        launch: auth_launch(m),
                     })
                     .collect();
                 vec![self.open_session()]
@@ -814,8 +1040,12 @@ impl Chat {
                 Vec::new()
             }
             (Pending::Prompt, Ok(result)) => {
-                self.status = Status::Ready;
-                self.drop_permissions();
+                self.open_prompts = self.open_prompts.saturating_sub(1);
+                if self.open_prompts == 0 {
+                    self.status = Status::Ready;
+                    self.drop_permissions();
+                    self.close_abandoned_calls();
+                }
                 let notice = match result["stopReason"].as_str() {
                     Some("max_tokens") => Some(Notice::TokenLimit),
                     Some("max_turn_requests") => Some(Notice::TurnLimit),
@@ -859,8 +1089,42 @@ impl Chat {
                 Vec::new()
             }
             (Pending::Prompt, Err((_, message))) => {
-                self.status = Status::Ready;
-                self.drop_permissions();
+                self.open_prompts = self.open_prompts.saturating_sub(1);
+                if self.open_prompts == 0 {
+                    self.status = Status::Ready;
+                    self.drop_permissions();
+                }
+                self.entries.push(Entry::Notice(Notice::Error(message)));
+                Vec::new()
+            }
+            (Pending::Steer(prompt), Ok(result)) => {
+                // The turn ended before the message reached it: it is a turn
+                // of its own.
+                if result["outcome"] == json!("promptRequired") {
+                    if let Some(session) = self.session.clone() {
+                        return vec![self.send_prompt(session, prompt)];
+                    }
+                }
+                Vec::new()
+            }
+            (Pending::Steer(_), Err((_, message))) => {
+                self.entries.push(Entry::Notice(Notice::Error(message)));
+                Vec::new()
+            }
+            (Pending::Delete(session), Ok(_)) => {
+                if let Some(sessions) = &mut self.sessions {
+                    sessions.retain(|summary| summary.id != session);
+                }
+                Vec::new()
+            }
+            (Pending::Fork(title), Ok(result)) => match result["sessionId"].as_str() {
+                Some(copy) => {
+                    let copy = copy.to_string();
+                    self.reopen(&copy, title)
+                }
+                None => Vec::new(),
+            },
+            (Pending::Delete(_) | Pending::Fork(_), Err((_, message))) => {
                 self.entries.push(Entry::Notice(Notice::Error(message)));
                 Vec::new()
             }
@@ -915,15 +1179,40 @@ impl Chat {
             )];
         }
         let tool = &params["toolCall"];
-        self.upsert_tool(tool);
-        let options = list(&params["options"])
+        let tool_id = text(&tool["toolCallId"]);
+        let options: Vec<PermissionOption> = list(&params["options"])
             .map(|o| PermissionOption {
                 id: text(&o["optionId"]),
                 name: text(&o["name"]),
                 kind: text(&o["kind"]),
             })
             .collect();
-        let tool_id = text(&tool["toolCallId"]);
+        // The `Agent` call itself asks: the question is the subagent's.
+        if let Some(agent) = self.subagent_mut(&tool_id) {
+            agent.permission = Some(Permission {
+                request: id,
+                options,
+            });
+            agent.expanded = true;
+            return Vec::new();
+        }
+        // A subagent's call is its own, in its transcript — by the session
+        // it came from, the call it names as its parent, or where it was
+        // already filed.
+        let session = params["sessionId"].as_str();
+        let parent = tool["_meta"]["claudeCode"]["parentToolUseId"].as_str();
+        let owner = self.subagents.iter().position(|agent| {
+            Some(agent.session.as_str()) == session
+                || Some(agent.session.as_str()) == parent
+                || agent
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Tool(call) if call.id == tool_id))
+        });
+        match owner {
+            Some(owner) => upsert_tool(&mut self.subagents[owner].entries, tool),
+            None => upsert_tool(&mut self.entries, tool),
+        }
         match self.tool_mut(&tool_id) {
             Some(tool) => {
                 tool.permission = Some(Permission {
@@ -944,9 +1233,6 @@ impl Chat {
     /// it, and a second one while the first is open is refused rather than
     /// hidden behind it.
     fn form_asked(&mut self, id: Value, params: &Value) -> Vec<String> {
-        if params["mode"].as_str().is_some_and(|mode| mode != "form") {
-            return vec![response(id, Ok(json!({ "action": "decline" })))];
-        }
         if self.form.is_some() {
             return vec![response(id, Ok(json!({ "action": "decline" })))];
         }
@@ -969,7 +1255,20 @@ impl Chat {
             .map(|form| response(form.request, Ok(json!({ "action": "cancel" }))))
             .into_iter()
             .collect();
-        for entry in &mut self.entries {
+        for agent in &mut self.subagents {
+            if let Some(permission) = agent.permission.take() {
+                lines.push(response(
+                    permission.request,
+                    Ok(json!({ "outcome": { "outcome": "cancelled" } })),
+                ));
+            }
+        }
+        let entries = self.entries.iter_mut().chain(
+            self.subagents
+                .iter_mut()
+                .flat_map(|agent| agent.entries.iter_mut()),
+        );
+        for entry in entries {
             if let Entry::Tool(tool) = entry {
                 if let Some(permission) = tool.permission.take() {
                     lines.push(response(
@@ -982,10 +1281,39 @@ impl Chat {
         lines
     }
 
+    /// The calls still pending once the turn is over, marked `cancelled`.
+    ///
+    /// **A steered message aborts the generation under way** (that is what
+    /// taking it "now" means), and a call the model had started there is
+    /// started again, under a new id, with nothing ever closing the first —
+    /// seen against claude-agent-acp 0.84. Left as it is, it spins for good.
+    fn close_abandoned_calls(&mut self) {
+        let entries = self.entries.iter_mut().chain(
+            self.subagents
+                .iter_mut()
+                .flat_map(|agent| agent.entries.iter_mut()),
+        );
+        for entry in entries {
+            if let Entry::Tool(tool) = entry {
+                if matches!(tool.status.as_str(), "pending" | "in_progress") {
+                    tool.status = "cancelled".to_string();
+                }
+            }
+        }
+    }
+
     /// The open questions, forgotten: the turn they belonged to is over.
     fn drop_permissions(&mut self) {
         self.form = None;
-        for entry in &mut self.entries {
+        for agent in &mut self.subagents {
+            agent.permission = None;
+        }
+        let entries = self.entries.iter_mut().chain(
+            self.subagents
+                .iter_mut()
+                .flat_map(|agent| agent.entries.iter_mut()),
+        );
+        for entry in entries {
             if let Entry::Tool(tool) = entry {
                 tool.permission = None;
             }
@@ -995,36 +1323,79 @@ impl Chat {
     // — The session's news ——————————————————————————————————————————
 
     fn update(&mut self, update: &Value) {
+        if self.route_subagent_call(update) {
+            return;
+        }
+        if fold(&mut self.entries, update) {
+            return;
+        }
         match update["sessionUpdate"].as_str().unwrap_or_default() {
-            "agent_message_chunk" => {
-                let chunk = block_text(&update["content"]);
-                let id = update["messageId"].as_str().map(str::to_string);
-                match self.entries.last_mut() {
-                    Some(Entry::Agent { text, id: last }) if id.is_none() || *last == id => {
-                        text.push_str(&chunk)
-                    }
-                    _ => self.entries.push(Entry::Agent { text: chunk, id }),
-                }
-            }
-            "agent_thought_chunk" => {
-                let chunk = block_text(&update["content"]);
-                match self.entries.last_mut() {
-                    Some(Entry::Thought { text, .. }) => text.push_str(&chunk),
-                    _ => self.entries.push(Entry::Thought {
-                        text: chunk,
-                        expanded: false,
-                    }),
-                }
-            }
-            "user_message_chunk" => {
-                let chunk = block_text(&update["content"]);
-                match self.entries.last_mut() {
-                    Some(Entry::User(text)) => text.push_str(&chunk),
-                    _ => self.entries.push(Entry::User(chunk)),
-                }
-            }
-            "tool_call" | "tool_call_update" => self.upsert_tool(update),
             "plan" => self.plan = parse_plan(&update["entries"]),
+            "notice" => self.entries.push(Entry::Notice(Notice::Agent {
+                severity: update["severity"].as_str().unwrap_or("info").to_string(),
+                title: text(&update["title"]),
+                description: update["description"].as_str().map(str::to_string),
+            })),
+            "compaction_update" => {
+                let id = text(&update["compactionId"]);
+                let summary: String = list(&update["summary"]).map(block_text).collect();
+                let error = update["error"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| update["error"]["message"].as_str().map(str::to_string));
+                let status = update["status"]
+                    .as_str()
+                    .unwrap_or("in_progress")
+                    .to_string();
+                match self.compaction_mut(&id) {
+                    Some(compaction) => {
+                        compaction.status = status;
+                        if !summary.is_empty() {
+                            compaction.summary = summary;
+                        }
+                        if error.is_some() {
+                            compaction.error = error;
+                        }
+                    }
+                    None => self.entries.push(Entry::Compaction(Compaction {
+                        id,
+                        status,
+                        summary,
+                        error,
+                        expanded: false,
+                    })),
+                }
+            }
+            "compaction_summary_chunk" => {
+                let id = text(&update["compactionId"]);
+                let chunk = block_text(&update["content"]);
+                if let Some(compaction) = self.compaction_mut(&id) {
+                    compaction.summary.push_str(&chunk);
+                }
+            }
+            "subagent_spawned" => {
+                let session = text(&update["subagentSessionId"]);
+                if session.is_empty() || self.subagent(&session).is_some() {
+                    return;
+                }
+                self.subagents.push(Subagent {
+                    session: session.clone(),
+                    name: text(&update["name"]),
+                    task: text(&update["task"]),
+                    state: None,
+                    entries: Vec::new(),
+                    report: String::new(),
+                    permission: None,
+                    expanded: false,
+                });
+                self.entries.push(Entry::Subagent(session));
+            }
+            "subagent_state_update" => {
+                let session = text(&update["subagentSessionId"]);
+                if let Some(agent) = self.subagent_mut(&session) {
+                    agent.state = update["state"].as_str().map(str::to_string);
+                }
+            }
             "available_commands_update" => {
                 self.commands = list(&update["availableCommands"])
                     .map(|c| Command {
@@ -1058,67 +1429,238 @@ impl Chat {
         }
     }
 
+    /// A subagent's call, filed under the subagent; or the `Agent` call
+    /// itself, which is the subagent. `false` for any other update.
+    fn route_subagent_call(&mut self, update: &Value) -> bool {
+        if !matches!(
+            update["sessionUpdate"].as_str(),
+            Some("tool_call" | "tool_call_update")
+        ) {
+            return false;
+        }
+        let meta = &update["_meta"]["claudeCode"];
+        let id = text(&update["toolCallId"]);
+        if let Some(parent) = meta["parentToolUseId"].as_str() {
+            if let Some(agent) = self.subagent_mut(parent) {
+                upsert_tool(&mut agent.entries, update);
+                return true;
+            }
+        }
+        let is_agent = matches!(meta["toolName"].as_str(), Some("Agent" | "Task"))
+            || self.subagent(&id).is_some();
+        if !is_agent || id.is_empty() {
+            return false;
+        }
+        if self.subagent(&id).is_none() {
+            self.subagents.push(Subagent {
+                session: id.clone(),
+                name: String::new(),
+                task: String::new(),
+                state: None,
+                entries: Vec::new(),
+                report: String::new(),
+                permission: None,
+                expanded: false,
+            });
+            self.entries.push(Entry::Subagent(id.clone()));
+        }
+        let Some(agent) = self.subagent_mut(&id) else {
+            return true;
+        };
+        let input = &update["rawInput"];
+        if let Some(kind) = input["subagent_type"].as_str().filter(|k| !k.is_empty()) {
+            agent.name = kind.to_string();
+        }
+        match input["description"].as_str().filter(|d| !d.is_empty()) {
+            Some(task) => agent.task = task.to_string(),
+            None => {
+                // The first title is the tool's own name; the description
+                // comes after it.
+                if let Some(title) = update["title"].as_str() {
+                    if !title.is_empty() && !matches!(title, "Agent" | "Task") {
+                        agent.task = title.to_string();
+                    }
+                }
+            }
+        }
+        if let Some(state @ ("completed" | "failed")) = update["status"].as_str() {
+            agent.state = Some(state.to_string());
+        }
+        if let Some(content) = update.get("content").filter(|c| c.is_array()) {
+            let report: Vec<String> = tool_content(content)
+                .into_iter()
+                .filter_map(|content| match content {
+                    ToolContent::Text(text) => Some(text),
+                    ToolContent::Diff { .. } => None,
+                })
+                .collect();
+            if !report.is_empty() {
+                agent.report = report.join("\n\n");
+            }
+        }
+        true
+    }
+
+    /// A tool call, in the transcript or in a subagent's.
     fn tool_mut(&mut self, id: &str) -> Option<&mut ToolCall> {
-        self.entries.iter_mut().rev().find_map(|entry| match entry {
-            Entry::Tool(tool) if tool.id == id => Some(tool),
-            _ => None,
+        let Chat {
+            entries, subagents, ..
+        } = self;
+        tool_in(entries, id).or_else(|| {
+            subagents
+                .iter_mut()
+                .find_map(|agent| tool_in(&mut agent.entries, id))
         })
     }
 
-    /// A `tool_call` creates, a `tool_call_update` amends what it names — and
-    /// creates too, when the call it names was never announced.
-    fn upsert_tool(&mut self, update: &Value) {
-        let id = text(&update["toolCallId"]);
-        let content = update
-            .get("content")
-            .filter(|content| content.is_array())
-            .map(tool_content);
-        let locations = update.get("locations").filter(|l| l.is_array()).map(|l| {
-            list(l)
-                .map(|location| match location["line"].as_u64() {
-                    Some(line) => format!("{}:{line}", text(&location["path"])),
-                    None => text(&location["path"]),
-                })
-                .collect::<Vec<_>>()
-        });
-        if let Some(tool) = self.tool_mut(&id) {
-            if let Some(title) = update["title"].as_str() {
-                tool.title = title.to_string();
-            }
-            if let Some(kind) = update["kind"].as_str() {
-                tool.kind = kind.to_string();
-            }
-            if let Some(status) = update["status"].as_str() {
-                tool.status = status.to_string();
-            }
-            if let Some(content) = content {
-                tool.content = content;
-            }
-            if let Some(locations) = locations {
-                tool.locations = locations;
-            }
-            if !update["rawInput"].is_null() {
-                tool.raw_input = update["rawInput"].clone();
-            }
-            tool.read_terminal(&update["_meta"]);
-            return;
-        }
-        self.entries.push(Entry::Tool(ToolCall {
-            title: update["title"].as_str().unwrap_or("Tool").to_string(),
-            kind: update["kind"].as_str().unwrap_or("other").to_string(),
-            status: update["status"].as_str().unwrap_or("pending").to_string(),
-            content: content.unwrap_or_default(),
-            locations: locations.unwrap_or_default(),
-            raw_input: update["rawInput"].clone(),
-            terminal: None,
-            permission: None,
-            expanded: false,
-            id,
-        }));
-        if let Some(Entry::Tool(tool)) = self.entries.last_mut() {
-            tool.read_terminal(&update["_meta"]);
-        }
+    fn compaction_mut(&mut self, id: &str) -> Option<&mut Compaction> {
+        self.entries.iter_mut().rev().find_map(|entry| match entry {
+            Entry::Compaction(compaction) if compaction.id == id => Some(compaction),
+            _ => None,
+        })
     }
+}
+
+/// Folds what a transcript is made of — the messages, the thoughts, the tool
+/// calls — into `entries`: the conversation's, or a subagent's. `false` for
+/// an update that is about something else.
+fn fold(entries: &mut Vec<Entry>, update: &Value) -> bool {
+    match update["sessionUpdate"].as_str().unwrap_or_default() {
+        "agent_message_chunk" => {
+            let chunk = block_text(&update["content"]);
+            let id = update["messageId"].as_str().map(str::to_string);
+            match entries.last_mut() {
+                Some(Entry::Agent { text, id: last }) if id.is_none() || *last == id => {
+                    text.push_str(&chunk)
+                }
+                _ => entries.push(Entry::Agent { text: chunk, id }),
+            }
+        }
+        "agent_thought_chunk" => {
+            let chunk = block_text(&update["content"]);
+            match entries.last_mut() {
+                Some(Entry::Thought { text, .. }) => text.push_str(&chunk),
+                _ => entries.push(Entry::Thought {
+                    text: chunk,
+                    expanded: false,
+                }),
+            }
+        }
+        "user_message_chunk" => {
+            let block = &update["content"];
+            let image = block["type"] == json!("image");
+            let chunk = if image {
+                String::new()
+            } else {
+                block_text(block)
+            };
+            match entries.last_mut() {
+                Some(Entry::User { text, images }) => {
+                    text.push_str(&chunk);
+                    *images += usize::from(image);
+                }
+                _ => entries.push(Entry::User {
+                    text: chunk,
+                    images: usize::from(image),
+                }),
+            }
+        }
+        "tool_call" | "tool_call_update" => upsert_tool(entries, update),
+        _ => return false,
+    }
+    true
+}
+
+fn tool_in<'a>(entries: &'a mut [Entry], id: &str) -> Option<&'a mut ToolCall> {
+    entries.iter_mut().rev().find_map(|entry| match entry {
+        Entry::Tool(tool) if tool.id == id => Some(tool),
+        _ => None,
+    })
+}
+
+/// A `tool_call` creates, a `tool_call_update` amends what it names — and
+/// creates too, when the call it names was never announced.
+fn upsert_tool(entries: &mut Vec<Entry>, update: &Value) {
+    let id = text(&update["toolCallId"]);
+    let content = update
+        .get("content")
+        .filter(|content| content.is_array())
+        .map(tool_content);
+    let locations = update.get("locations").filter(|l| l.is_array()).map(|l| {
+        list(l)
+            .map(|location| match location["line"].as_u64() {
+                Some(line) => format!("{}:{line}", text(&location["path"])),
+                None => text(&location["path"]),
+            })
+            .collect::<Vec<_>>()
+    });
+    if let Some(tool) = tool_in(entries, &id) {
+        if let Some(title) = update["title"].as_str() {
+            tool.title = title.to_string();
+        }
+        if let Some(kind) = update["kind"].as_str() {
+            tool.kind = kind.to_string();
+        }
+        if let Some(status) = update["status"].as_str() {
+            tool.status = status.to_string();
+        }
+        if let Some(content) = content {
+            tool.content = content;
+        }
+        if let Some(locations) = locations {
+            tool.locations = locations;
+        }
+        if !update["rawInput"].is_null() {
+            tool.raw_input = update["rawInput"].clone();
+        }
+        tool.read_terminal(&update["_meta"]);
+        return;
+    }
+    entries.push(Entry::Tool(ToolCall {
+        title: update["title"].as_str().unwrap_or("Tool").to_string(),
+        kind: update["kind"].as_str().unwrap_or("other").to_string(),
+        status: update["status"].as_str().unwrap_or("pending").to_string(),
+        content: content.unwrap_or_default(),
+        locations: locations.unwrap_or_default(),
+        raw_input: update["rawInput"].clone(),
+        terminal: None,
+        permission: None,
+        expanded: false,
+        id,
+    }));
+    if let Some(Entry::Tool(tool)) = entries.last_mut() {
+        tool.read_terminal(&update["_meta"]);
+    }
+}
+
+/// How a login method wants to be run in a terminal, when it does.
+fn auth_launch(method: &Value) -> Option<AuthLaunch> {
+    let env = |value: &Value| -> Vec<(String, String)> {
+        value
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+            .collect()
+    };
+    let args = |value: &Value| -> Vec<String> {
+        list(value)
+            .filter_map(|arg| arg.as_str().map(str::to_string))
+            .collect()
+    };
+    let named = &method["_meta"]["terminal-auth"];
+    if let Some(command) = named["command"].as_str() {
+        return Some(AuthLaunch {
+            command: Some(command.to_string()),
+            args: args(&named["args"]),
+            env: env(&named["env"]),
+        });
+    }
+    (method["type"] == json!("terminal")).then(|| AuthLaunch {
+        command: None,
+        args: args(&method["args"]),
+        env: env(&method["env"]),
+    })
 }
 
 /// `initialize`'s parameters: a chat, and nothing else — see the module.
@@ -1129,12 +1671,29 @@ fn initialize_params() -> Value {
             "fs": { "readTextFile": false, "writeTextFile": false },
             "terminal": false,
             // A command's output reported on its call, in pieces — see
-            // `Terminal`.
-            "_meta": { "terminal_output": true, "terminal_output_delta": true },
+            // `Terminal` —, and a login run in one of our terminals — see
+            // `AuthLaunch`.
+            "_meta": {
+                "terminal_output": true,
+                "terminal_output_delta": true,
+                "terminal-auth": true
+            },
+            "auth": { "terminal": true },
             // Forms: what makes Claude's `AskUserQuestion` available at all —
             // without it the adapter takes the tool away, and the questions
-            // come back as text to answer "by letter". See `Form`.
-            "elicitation": { "form": {} }
+            // come back as text to answer "by letter". See `Form`. And the
+            // links an MCP server's sign-in opens in a browser.
+            "elicitation": { "form": {}, "url": {} },
+            // A subagent's work in a transcript of its own — see `Subagent`.
+            "subagents": {},
+            "session": {
+                // Notices beside the reply, rather than bold lines inside it.
+                "notices": {},
+                // `/compact`'s progress and summary.
+                "compaction": {},
+                // Fast mode as a switch rather than an on/off select.
+                "configOptions": { "boolean": {} }
+            }
         },
         "clientInfo": {
             "name": "claudhub",
@@ -1295,6 +1854,9 @@ pub struct Form {
     request: Value,
     pub message: String,
     pub fields: Vec<Field>,
+    /// A form of the `url` mode: no field, a link to open — an MCP server's
+    /// sign-in, most often.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1344,6 +1906,15 @@ impl Form {
     }
 
     fn parse(request: Value, params: &Value) -> Option<Self> {
+        if params["mode"] == json!("url") {
+            let url = params["url"].as_str().filter(|url| !url.is_empty())?;
+            return Some(Self {
+                request,
+                message: text(&params["message"]),
+                fields: Vec::new(),
+                url: Some(url.to_string()),
+            });
+        }
         let schema = &params["requestedSchema"];
         let fields: Vec<Field> = schema["properties"]
             .as_object()
@@ -1365,6 +1936,7 @@ impl Form {
             request,
             message: text(&params["message"]),
             fields,
+            url: None,
         })
     }
 
@@ -1825,7 +2397,13 @@ mod tests {
         chat.receive(&done.to_string());
         assert!(chat.is_ready());
         assert_eq!(chat.session.as_deref(), Some("old"));
-        assert_eq!(chat.entries[0], Entry::User("hello".into()));
+        assert_eq!(
+            chat.entries[0],
+            Entry::User {
+                text: "hello".into(),
+                images: 0
+            }
+        );
         assert_eq!(chat.entries.len(), 2);
     }
 
@@ -1925,7 +2503,11 @@ mod tests {
         let mut chat = ready();
         let line = sent(
             &chat
-                .prompt_with("read @a.rs", &[("a.rs".into(), "file:///w/a.rs".into())])
+                .prompt_with(
+                    "read @a.rs",
+                    &[("a.rs".into(), "file:///w/a.rs".into())],
+                    &[],
+                )
                 .unwrap(),
         );
         let prompt = &line["params"]["prompt"];
@@ -2202,6 +2784,355 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A chat past its handshake with an agent that answers as Claude's
+    /// adapter does: images, steering, queueing, subagents, delete and fork.
+    fn ready_like_claude() -> Chat {
+        let mut chat = Chat::new("/w");
+        let init = sent(&chat.start());
+        let answer = json!({ "jsonrpc": "2.0", "id": init["id"], "result": {
+            "agentCapabilities": {
+                "_meta": { "claudeCode": { "promptQueueing": true } },
+                "promptCapabilities": { "image": true },
+                "loadSession": true,
+                "sessionCapabilities": { "delete": {}, "fork": {}, "list": {} } },
+            "authMethods": [
+                { "id": "claude-ai-login", "name": "Claude Subscription", "type": "terminal",
+                  "args": ["--cli", "auth", "login", "--claudeai"],
+                  "_meta": { "terminal-auth": { "command": "/usr/bin/node",
+                      "args": ["/x/index.js", "--cli", "auth", "login", "--claudeai"],
+                      "label": "Claude Login" } } },
+                { "id": "console-login", "name": "Anthropic Console", "type": "terminal",
+                  "args": ["--cli", "auth", "login", "--console"] },
+                { "id": "gateway", "name": "Gateway" } ],
+            "_meta": { "steering": { "supported": true } } } });
+        let new = sent(&chat.receive(&answer.to_string())[0]);
+        let opened = json!({ "jsonrpc": "2.0", "id": new["id"], "result": { "sessionId": "s1" } });
+        chat.receive(&opened.to_string());
+        chat
+    }
+
+    #[test]
+    fn capabilities_offer_what_the_view_can_show() {
+        let caps = &super::initialize_params()["clientCapabilities"];
+        assert_eq!(caps["auth"]["terminal"], true);
+        assert_eq!(caps["_meta"]["terminal-auth"], true);
+        assert!(caps["elicitation"]["url"].is_object());
+        assert!(caps["subagents"].is_object());
+        assert!(caps["session"]["notices"].is_object());
+        assert!(caps["session"]["compaction"].is_object());
+        assert!(caps["session"]["configOptions"]["boolean"].is_object());
+        // The login methods: named, the agent's own, or none.
+        let chat = ready_like_claude();
+        let launch = chat.auth_methods[0].launch.clone().unwrap();
+        assert_eq!(launch.command.as_deref(), Some("/usr/bin/node"));
+        assert_eq!(launch.args[0], "/x/index.js");
+        let own = chat.auth_methods[1].launch.clone().unwrap();
+        assert_eq!(own.command, None);
+        assert_eq!(own.args, vec!["--cli", "auth", "login", "--console"]);
+        assert_eq!(chat.auth_methods[2].launch, None);
+    }
+
+    #[test]
+    fn a_message_during_a_turn_is_steered_into_it() {
+        let mut chat = ready_like_claude();
+        let first = sent(&chat.prompt("build it").unwrap());
+        assert!(chat.is_busy() && chat.can_send());
+        let steer = sent(&chat.prompt("and add a test").unwrap());
+        assert_eq!(steer["method"], "_session/steering");
+        assert_eq!(steer["params"]["prompt"][0]["text"], "and add a test");
+        assert_eq!(
+            steer["params"]["_meta"]["steering"]["idleBehavior"],
+            "promptRequired"
+        );
+        let injected =
+            json!({ "jsonrpc": "2.0", "id": steer["id"], "result": { "outcome": "injected" } });
+        assert!(chat.receive(&injected.to_string()).is_empty());
+        // The turn's answer ends it.
+        let done =
+            json!({ "jsonrpc": "2.0", "id": first["id"], "result": { "stopReason": "end_turn" } });
+        chat.receive(&done.to_string());
+        assert!(chat.is_ready());
+        // A steer that finds the turn over is sent again as a prompt.
+        chat.prompt("x").unwrap();
+        let late = sent(&chat.prompt("late").unwrap());
+        let over = json!({ "jsonrpc": "2.0", "id": late["id"], "result": { "outcome": "promptRequired" } });
+        let again = sent(&chat.receive(&over.to_string())[0]);
+        assert_eq!(again["method"], "session/prompt");
+        assert_eq!(again["params"]["prompt"][0]["text"], "late");
+    }
+
+    #[test]
+    fn without_steering_a_message_is_queued_and_the_turn_waits_for_both() {
+        let mut chat = ready_like_claude();
+        chat.steering = false;
+        let first = sent(&chat.prompt("one").unwrap());
+        let second = sent(&chat.prompt("two").unwrap());
+        assert_eq!(second["method"], "session/prompt");
+        let done = |id: &Value| {
+            json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" } })
+                .to_string()
+        };
+        chat.receive(&done(&first["id"]));
+        assert!(chat.is_busy());
+        chat.receive(&done(&second["id"]));
+        assert!(chat.is_ready());
+        // An agent that does neither waits for the turn.
+        chat.queueing = false;
+        chat.prompt("three").unwrap();
+        assert!(chat.prompt("four").is_none());
+    }
+
+    #[test]
+    fn images_go_with_the_prompt_to_an_agent_that_reads_them() {
+        let mut chat = ready_like_claude();
+        let images = vec![("image/png".to_string(), "iVBOR".to_string())];
+        let line = sent(&chat.prompt_with("", &[], &images).unwrap());
+        assert_eq!(line["params"]["prompt"][0]["type"], "image");
+        assert_eq!(line["params"]["prompt"][0]["mimeType"], "image/png");
+        assert_eq!(
+            chat.entries[0],
+            Entry::User {
+                text: String::new(),
+                images: 1
+            }
+        );
+        // One that does not is sent the text alone, and nothing is sent without it.
+        let mut plain = ready();
+        assert!(plain.prompt_with("", &[], &images).is_none());
+        let line = sent(&plain.prompt_with("look", &[], &images).unwrap());
+        assert_eq!(line["params"]["prompt"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_subagent_has_its_own_transcript_and_its_own_questions() {
+        let mut chat = ready_like_claude();
+        chat.prompt("explore").unwrap();
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "subagent_spawned", "subagentSessionId": "sub1",
+                    "name": "Explore", "task": "Find the parser", "capabilities": {} }),
+        );
+        let child = |update: Value| {
+            json!({ "jsonrpc": "2.0", "method": "session/update",
+                    "params": { "sessionId": "sub1", "update": update } })
+            .to_string()
+        };
+        chat.receive(&child(
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "c1",
+                                     "title": "Grep parse", "kind": "search" }),
+        ));
+        chat.receive(&child(json!({ "sessionUpdate": "agent_message_chunk",
+                                     "content": { "type": "text", "text": "Found it." } })));
+        assert_eq!(chat.entries.len(), 2, "{:?}", chat.entries);
+        assert_eq!(chat.entries[1], Entry::Subagent("sub1".into()));
+        let agent = chat.subagent("sub1").unwrap();
+        assert_eq!(agent.name, "Explore");
+        assert_eq!(agent.entries.len(), 2);
+        // Its permission is asked on its own call.
+        let ask = json!({ "jsonrpc": "2.0", "id": 30, "method": "session/request_permission",
+            "params": { "sessionId": "sub1", "toolCall": { "toolCallId": "c2", "title": "Edit" },
+                        "options": [{ "optionId": "ok", "name": "Allow", "kind": "allow_once" }] } });
+        chat.receive(&ask.to_string());
+        assert!(chat.is_asking());
+        assert_eq!(chat.subagent("sub1").unwrap().entries.len(), 3);
+        let answer = sent(&chat.answer("c2", "ok").unwrap());
+        assert_eq!(answer["id"], 30);
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "subagent_state_update", "subagentSessionId": "sub1",
+                    "state": "completed" }),
+        );
+        assert_eq!(
+            chat.subagent("sub1").unwrap().state.as_deref(),
+            Some("completed")
+        );
+        chat.toggle(1);
+        assert!(chat.subagent("sub1").unwrap().expanded);
+    }
+
+    #[test]
+    fn notices_and_compaction_are_their_own_rows() {
+        let mut chat = ready();
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "notice", "severity": "warning",
+                    "title": "Auto mode unavailable", "description": "Using Accept edits." }),
+        );
+        assert_eq!(
+            chat.entries[0],
+            Entry::Notice(Notice::Agent {
+                severity: "warning".into(),
+                title: "Auto mode unavailable".into(),
+                description: Some("Using Accept edits.".into())
+            })
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "compaction_update", "compactionId": "k", "status": "in_progress" }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "compaction_summary_chunk", "compactionId": "k",
+                    "content": { "type": "text", "text": "We fixed " } }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "compaction_summary_chunk", "compactionId": "k",
+                    "content": { "type": "text", "text": "the build." } }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "compaction_update", "compactionId": "k", "status": "completed" }),
+        );
+        let Entry::Compaction(compaction) = &chat.entries[1] else {
+            panic!("{:?}", chat.entries);
+        };
+        assert_eq!(compaction.status, "completed");
+        assert_eq!(compaction.summary, "We fixed the build.");
+    }
+
+    #[test]
+    fn earlier_chats_are_deleted_and_copied() {
+        let mut chat = ready_like_claude();
+        chat.sessions = Some(vec![SessionSummary {
+            id: "old".into(),
+            title: Some("Old".into()),
+            updated: None,
+        }]);
+        assert!(chat.delete_session("s1").is_none(), "not the one on show");
+        let delete = sent(&chat.delete_session("old").unwrap());
+        assert_eq!(delete["method"], "session/delete");
+        chat.receive(&json!({ "jsonrpc": "2.0", "id": delete["id"], "result": {} }).to_string());
+        assert!(chat.sessions.as_ref().unwrap().is_empty());
+        let fork = sent(&chat.fork_session("s1", Some("Mine".into())).unwrap());
+        assert_eq!(fork["method"], "session/fork");
+        let copied = json!({ "jsonrpc": "2.0", "id": fork["id"], "result": { "sessionId": "s2" } });
+        let load = sent(chat.receive(&copied.to_string()).last().unwrap());
+        assert_eq!(load["method"], "session/load");
+        assert_eq!(load["params"]["sessionId"], "s2");
+        assert_eq!(chat.title.as_deref(), Some("Mine"));
+    }
+
+    #[test]
+    fn a_link_to_open_is_a_form_without_fields() {
+        let mut chat = ready();
+        let ask = json!({ "jsonrpc": "2.0", "id": 9, "method": "elicitation/create",
+            "params": { "mode": "url", "sessionId": "s1", "message": "Sign in to Linear",
+                        "url": "https://linear.app/oauth", "elicitationId": "e1" } });
+        assert!(chat.receive(&ask.to_string()).is_empty());
+        let form = chat.form.clone().unwrap();
+        assert_eq!(form.url.as_deref(), Some("https://linear.app/oauth"));
+        assert!(form.fields.is_empty());
+        let line = sent(&chat.accept_url().unwrap());
+        assert_eq!(line["result"]["action"], "accept");
+        // A url form without its url is declined.
+        let bare = json!({ "jsonrpc": "2.0", "id": 10, "method": "elicitation/create",
+            "params": { "mode": "url", "message": "?" } });
+        assert_eq!(
+            sent(&chat.receive(&bare.to_string())[0])["result"]["action"],
+            "decline"
+        );
+    }
+
+    /// As claude-agent-acp 0.84 really reports a subagent (recorded): the
+    /// `Agent` call, and the subagent's calls naming it as their parent.
+    #[test]
+    fn the_agent_call_is_the_subagent_and_its_calls_are_filed_under_it() {
+        let mut chat = ready_like_claude();
+        chat.prompt("count").unwrap();
+        let meta = |tool: &str, parent: Option<&str>| match parent {
+            Some(parent) => {
+                json!({ "claudeCode": { "toolName": tool, "parentToolUseId": parent } })
+            }
+            None => json!({ "claudeCode": { "toolName": tool } }),
+        };
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_A", "title": "Task",
+                    "kind": "think", "rawInput": {}, "_meta": meta("Agent", None) }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "toolu_A",
+                    "title": "Exécuter ls et compter les fichiers",
+                    "rawInput": { "description": "Exécuter ls et compter les fichiers",
+                                  "subagent_type": "general-purpose", "prompt": "…" },
+                    "_meta": meta("Agent", None) }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_B", "title": "ls -1 | wc -l",
+                    "kind": "execute", "rawInput": { "command": "ls -1 | wc -l" },
+                    "_meta": meta("Bash", Some("toolu_A")) }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "toolu_A", "status": "completed",
+                    "content": [{ "type": "content", "content": { "type": "text", "text": "3 files." } }],
+                    "_meta": meta("Agent", None) }),
+        );
+        assert_eq!(
+            chat.entries,
+            vec![
+                Entry::User {
+                    text: "count".into(),
+                    images: 0
+                },
+                Entry::Subagent("toolu_A".into()),
+            ]
+        );
+        let agent = chat.subagent("toolu_A").unwrap();
+        assert_eq!(agent.name, "general-purpose");
+        assert_eq!(agent.task, "Exécuter ls et compter les fichiers");
+        assert_eq!(agent.state.as_deref(), Some("completed"));
+        assert_eq!(agent.report, "3 files.");
+        assert!(matches!(&agent.entries[0], Entry::Tool(tool) if tool.id == "toolu_B"));
+        // A permission for one of its calls lands on that call, not beside it.
+        let ask = json!({ "jsonrpc": "2.0", "id": 41, "method": "session/request_permission",
+            "params": { "sessionId": "s1", "toolCall": { "toolCallId": "toolu_B" },
+                        "options": [{ "optionId": "y", "name": "Allow", "kind": "allow_once" }] } });
+        chat.receive(&ask.to_string());
+        assert_eq!(chat.subagent("toolu_A").unwrap().entries.len(), 1);
+        assert!(chat.is_asking());
+        assert_eq!(sent(&chat.answer("toolu_B", "y").unwrap())["id"], 41);
+        // And the `Agent` call's own question is the subagent's.
+        let own = json!({ "jsonrpc": "2.0", "id": 42, "method": "session/request_permission",
+            "params": { "sessionId": "s1", "toolCall": { "toolCallId": "toolu_A" },
+                        "options": [{ "optionId": "y", "name": "Allow", "kind": "allow_once" }] } });
+        chat.receive(&own.to_string());
+        assert!(chat.subagent("toolu_A").unwrap().permission.is_some());
+        assert_eq!(chat.entries.len(), 2);
+        assert_eq!(sent(&chat.answer("toolu_A", "y").unwrap())["id"], 42);
+    }
+
+    #[test]
+    fn a_call_left_pending_when_the_turn_ends_is_closed() {
+        let mut chat = ready();
+        let prompt = sent(&chat.prompt("go").unwrap());
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "ghost", "title": "Terminal",
+                    "kind": "execute", "status": "pending" }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "real", "kind": "execute",
+                    "status": "completed" }),
+        );
+        let done =
+            json!({ "jsonrpc": "2.0", "id": prompt["id"], "result": { "stopReason": "end_turn" } });
+        chat.receive(&done.to_string());
+        let statuses: Vec<&str> = chat
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Tool(tool) => Some(tool.status.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(statuses, vec!["cancelled", "completed"]);
     }
 
     #[test]

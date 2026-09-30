@@ -3083,6 +3083,10 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A worktree with a chat open is one worked in through its chat.
+        if self.deliver_to_chat(worktree, &text, window, cx) {
+            return;
+        }
         if let Some(view) = self.agent_terminal(worktree, cx) {
             // Its tab may be behind another's: focusing a panel does not make
             // it the one on screen, and a message delivered into a hidden tab
