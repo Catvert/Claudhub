@@ -2317,7 +2317,15 @@ impl ClaudhubApp {
             run: None,
             stopping: false,
         });
-        self.dock_terminal(&worktree, panel, placement, window, cx);
+        let id = panel.entity_id();
+        self.dock_terminal(
+            &worktree,
+            gpui_kit::component::dock::panel_handle(panel),
+            id,
+            placement,
+            window,
+            cx,
+        );
         let handle = view.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
@@ -2335,10 +2343,14 @@ impl ClaudhubApp {
     /// centre*, so a terminal opened under the whole row raised the list along
     /// with the diff. The list is a tool window; "under the centre" is no
     /// longer ambiguous.
-    fn dock_terminal(
+    ///
+    /// A chat tab goes the same way (`open_chat`): it is a tab of the same
+    /// bar, so its siblings are the shells and the chats alike.
+    pub(super) fn dock_terminal(
         &mut self,
         worktree: &Path,
-        panel: Entity<crate::ui::panels::TerminalPanel>,
+        handle: std::sync::Arc<dyn gpui_kit::component::dock::BasePanelView>,
+        id: gpui_kit::EntityId,
         wanted: crate::ui::settings::TerminalPlacement,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2359,12 +2371,18 @@ impl ClaudhubApp {
         // bar. A list and no longer the last one alone: with terminals on two
         // edges at once, the most recent may well be on the other one, and
         // asking its node of this zone's tree answers nothing.
-        let siblings: Vec<_> = self
+        let siblings: Vec<gpui_kit::EntityId> = self
             .terminals
             .iter()
             .filter(|terminal| terminal.worktree == worktree && terminal.view_name == view_name)
-            .map(|terminal| terminal.panel.clone())
-            .filter(|other| other.entity_id() != panel.entity_id())
+            .map(|terminal| terminal.panel.entity_id())
+            .chain(
+                self.chats
+                    .iter()
+                    .filter(|chat| chat.worktree == worktree && chat.view_name == view_name)
+                    .map(|chat| chat.panel.entity_id()),
+            )
+            .filter(|other| *other != id)
             .rev()
             .collect();
         dock.update(cx, |dock, cx| {
@@ -2376,7 +2394,7 @@ impl ClaudhubApp {
             // into nothing.
             crate::ui::panels::dock_panel_at(
                 dock,
-                gpui_kit::component::dock::panel_handle(panel.clone()),
+                handle,
                 placement,
                 // The size the zone takes if the area has to make one: without
                 // it a fresh zone is born at twice the minimum panel size,
@@ -2384,9 +2402,10 @@ impl ClaudhubApp {
                 Some(size),
                 |dock| {
                     let tree = dock.layout(placement)?;
-                    let Some(node) = siblings.iter().find_map(|sibling| {
-                        tree.find_panel_node(PanelId::from(sibling.entity_id()))
-                    }) else {
+                    let Some(node) = siblings
+                        .iter()
+                        .find_map(|sibling| tree.find_panel_node(PanelId::from(*sibling)))
+                    else {
                         // **The first terminal of a zone lands in the terminals'
                         // own half**, and it has to be said here: without a
                         // target the panel stays where `add_panel_view` put it,

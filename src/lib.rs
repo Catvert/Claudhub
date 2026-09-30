@@ -19,6 +19,7 @@ const _: &str = include_str!("../assets/i18n/fr.json");
 #[cfg(feature = "ui")]
 rust_i18n::i18n!("assets/i18n", fallback = "en");
 
+pub mod acp;
 pub mod agent;
 pub mod agent_hooks;
 pub mod canvas;

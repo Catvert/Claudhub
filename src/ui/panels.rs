@@ -16,11 +16,13 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, DockRegions, Panel, PanelControl, PanelEvent};
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::{
-    canvas, div, point, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, WeakEntity, Window,
+    canvas, div, point, prelude::*, AnyElement, App, AppContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, SharedString,
+    WeakEntity, Window,
 };
 
 use gpui_kit::component::dock::{panel_handle, register_panel};
@@ -1974,11 +1976,12 @@ impl Panel for TerminalPanel {
     fn tab_bar_trailing(
         &mut self,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        Some(new_terminal_button(
+        Some(new_tab_buttons(
             &self.app,
-            Some(Self::placement_of(self.name)),
+            Self::placement_of(self.name),
+            cx,
         ))
     }
 
@@ -2004,6 +2007,262 @@ impl Render for TerminalPanel {
         // rebuild the whole grid's elements each time — what changes a
         // terminal notifies the terminal, and a settings change refreshes
         // the window, cache and all.
+        pane_frame(
+            self.view
+                .clone()
+                .cached(gpui_kit::StyleRefinement::default().size_full()),
+            cx,
+        )
+        .into_any_element()
+    }
+}
+
+/// The button that opens a chat with an agent, beside the terminals' `+`.
+///
+/// A click when there is one agent to speak to, a menu when there are
+/// several: unlike the shell, a chat has to be told whom it is with.
+pub(super) fn new_chat_button(
+    app: &WeakEntity<ClaudhubApp>,
+    view: crate::ui::settings::TerminalPlacement,
+    cx: &App,
+) -> AnyElement {
+    let agents = crate::ui::settings::Settings::global(cx)
+        .terminal
+        .chat_agents();
+    let button = Button::new("new-chat")
+        .ghost()
+        .small()
+        .icon(crate::ui::icons::icon("message-square-plus"))
+        .tooltip(tr!("chat-new"));
+    if let [agent] = agents.as_slice() {
+        let (app, agent) = (app.clone(), agent.clone());
+        return button
+            .on_click(move |_, window, cx| open_chat(&app, agent.clone(), view, window, cx))
+            .into_any_element();
+    }
+    let app = app.clone();
+    button
+        .dropdown_menu(move |menu, _, _| {
+            agents.iter().fold(menu, |menu, agent| {
+                let (app, agent) = (app.clone(), agent.clone());
+                menu.item(
+                    gpui_kit::component::menu::PopupMenuItem::new(SharedString::from(
+                        agent.label().to_string(),
+                    ))
+                    .icon(crate::ui::icons::icon("bot"))
+                    .on_click(move |_, window, cx| {
+                        open_chat(&app, agent.clone(), view, window, cx)
+                    }),
+                )
+            })
+        })
+        .into_any_element()
+}
+
+fn open_chat(
+    app: &WeakEntity<ClaudhubApp>,
+    agent: crate::acp::Agent,
+    placement: crate::ui::settings::TerminalPlacement,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(app) = app.upgrade() else {
+        return;
+    };
+    app.update(cx, |app, cx| {
+        let Some(worktree) = app.active_path() else {
+            return;
+        };
+        app.open_chat(&worktree, agent, placement, window, cx);
+    });
+}
+
+/// The shell's `+` and the chat's button, as a terminal bar ends.
+fn new_tab_buttons(
+    app: &WeakEntity<ClaudhubApp>,
+    view: crate::ui::settings::TerminalPlacement,
+    cx: &App,
+) -> impl IntoElement {
+    gpui_kit::component::h_flex()
+        .gap_0p5()
+        .child(new_terminal_button(app, Some(view)))
+        // The runs' view holds what the run widget started, and nothing else.
+        .when(view != crate::ui::settings::TerminalPlacement::Run, |el| {
+            el.child(new_chat_button(app, view, cx))
+        })
+}
+
+/// A chat with an agent, as a tab among the terminals — see `ui::chat_view`.
+///
+/// **It answers to a terminal view's name**: a tool window is a name, and the
+/// chat belongs to the same bar as the shells beside it — the same rail
+/// button, the same fold, the same pruning out of `layout.json`. What tells it
+/// apart is the struct, never the name.
+pub struct ChatPanel {
+    app: WeakEntity<ClaudhubApp>,
+    name: &'static str,
+    worktree: std::path::PathBuf,
+    view: Entity<crate::ui::chat_view::ChatView>,
+    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
+    /// Given and not read, for `TerminalPanel::new`'s reason.
+    visible: bool,
+}
+
+impl ChatPanel {
+    pub fn new(
+        app: &Entity<ClaudhubApp>,
+        name: &'static str,
+        worktree: std::path::PathBuf,
+        view: Entity<crate::ui::chat_view::ChatView>,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mine = worktree.clone();
+        cx.observe(app, move |this: &mut Self, app, cx| {
+            let visible = app.read(cx).terminal_shown(&mine, this.name);
+            if this.visible != visible {
+                this.visible = visible;
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
+        // The tab's title follows the session's.
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        Self {
+            app: app.downgrade(),
+            name,
+            worktree,
+            view,
+            group: None,
+            visible,
+        }
+    }
+}
+
+impl Focusable for ChatPanel {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.read(cx).focus_handle(cx)
+    }
+}
+
+impl EventEmitter<PanelEvent> for ChatPanel {}
+
+impl BasePanel for ChatPanel {
+    fn regions(&self, _: &App) -> DockRegions {
+        regions_of(self.panel_name())
+    }
+
+    fn panel_name(&self) -> &'static str {
+        self.name
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        true
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+
+    fn on_added_to(
+        &mut self,
+        group: gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.group = Some(group);
+    }
+
+    /// The agent dies with the tab. Deferred, for `TerminalPanel::on_removed`'s
+    /// reason: we are inside the dock's own edit.
+    fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.view.entity_id();
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        cx.defer_in(window, move |_, window, cx| {
+            app.update(cx, |app, cx| app.close_chat(id, window, cx));
+        });
+    }
+
+    /// Pruned with the terminals before `layout.json` is written — the name is
+    /// theirs —, so this is never read back.
+    fn dump(&self, _: &App) -> gpui_kit::component::dock::PanelState {
+        let mut state = gpui_kit::component::dock::PanelState::new(self.name);
+        state.info = gpui_kit::component::dock::PanelInfo::panel(
+            serde_json::json!({ "worktree": self.worktree }),
+        );
+        state
+    }
+}
+
+impl Panel for ChatPanel {
+    /// The agent's glyph, the session's name, and the cross that ends it.
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = self.view.entity_id();
+        let label = self.view.read(cx).label();
+        let app = self.app.clone();
+        let closing = {
+            let app = app.clone();
+            move |window: &mut Window, cx: &mut App| {
+                let Some(app) = app.upgrade() else {
+                    return;
+                };
+                window.defer(cx, move |window, cx| {
+                    app.update(cx, |app, cx| app.close_chat(id, window, cx));
+                });
+            }
+        };
+        close_on_middle_click(
+            gpui_kit::component::h_flex()
+                .id(("chat-tab", id))
+                .gap_1()
+                .items_center(),
+            closing,
+        )
+        .child(crate::ui::icons::glyph("bot"))
+        .child(label)
+        .child(
+            Button::new("close-chat")
+                .ghost()
+                .small()
+                .icon(crate::ui::icons::icon("x"))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let Some(app) = app.upgrade() else {
+                        return;
+                    };
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| app.close_chat(id, window, cx));
+                    });
+                }),
+        )
+    }
+
+    fn tab_bar_trailing(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        Some(new_tab_buttons(
+            &self.app,
+            TerminalPanel::placement_of(self.name),
+            cx,
+        ))
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+
+    fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
+        fold_button(&self.app, self.name)
+    }
+}
+
+impl Render for ChatPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         pane_frame(
             self.view
                 .clone()

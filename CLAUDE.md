@@ -99,6 +99,10 @@ src/
   agent.rs      les agents dans `/proc`, et le suivi (travaille, fini, attend)
   agent_hooks.rs  les hooks de Claude Code : la ligne shell, le fichier lu, la
                 fusion dans `.claude/settings.local.json`
+  acp/          l'Agent Client Protocol — un agent parlé en chat
+    mod.rs      la voie : un processus par chat, des lignes qui entrent et sortent
+    chat.rs     la conversation : poignée de main, `session/update`, permissions
+                — pur, testé
   db/           bases de données — `sqlx`, testable sans gpui
     mod.rs      connexions, schémas, résultats ; le choix du moteur
     scope.rs    quelles bases appartiennent au worktree regardé
@@ -180,6 +184,7 @@ src/
     sentry.rs / github.rs / keyring.rs
     lsp.rs           le pont vers le serveur de langage
     terminal_view.rs
+    chat_view.rs / chats.rs  l'onglet de chat ACP, et son ouverture
     server.rs        la mise en route du serveur WSL
     settings.rs / settings_view.rs  les réglages, et la page « Journal »
     store.rs / session.rs  ce qu'on retient par worktree, et où l'on en était
@@ -231,8 +236,8 @@ table qu'un test verrouille : une commande mal rangée n'échoue pas, elle atten
 - **Tests** (un) : un run se mesure en minutes ; le **relevé** des suites reste
   au fond.
 
-Hors des files : la surveillance de fichiers, les serveurs de langage (une voie
-chacun, l'ordre compte), et le **stop d'un run de tests**, un drapeau que le
+Hors des files : la surveillance de fichiers, les serveurs de langage et les
+chats ACP (une voie chacun, l'ordre compte), et le **stop d'un run de tests**, un drapeau que le
 worker sonde — rangé dans sa file, il arriverait après la mort qu'il demande.
 
 ### Le mode distant
@@ -383,6 +388,14 @@ Sept pièges du dock :
 d'onglets ouvre dans **sa** vue, après le dernier onglet (`tab_bar_trailing`),
 et le groupe rejoint est celui d'un frère **de la même vue** — sans frère, la
 cible se dit quand même (`dock_layout::target_for`).
+
+**Un chat ACP est un onglet des terminaux** (`panels::ChatPanel`, `ui::chat_view`) :
+il répond au **nom** de leur vue, donc même bandeau, même repli, même élagage
+de `layout.json` — mais aucun pty, et rien de ce qui lit un terminal (accueil,
+signal des agents, résurrection) ne le voit. Le client n'offre à l'agent **ni
+`fs/*` ni `terminal/*`** : l'agent travaille avec ses propres outils, et ce qu'il
+demande quand même est refusé, jamais laissé en suspens. La vue n'envoie rien
+elle-même : elle émet `ChatEvent::Send`, qu'on reçoit hors de la pompe.
 
 **Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal`) : un
 shell ou un agent vivant revient à sa place, Claude **dans sa conversation**

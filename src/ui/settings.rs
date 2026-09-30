@@ -262,6 +262,11 @@ pub struct TerminalSettings {
     pub agents: Vec<AgentProfile>,
     /// Name of the profile launched by default. Empty, or unknown: the first.
     pub default_agent: String,
+    /// The agents a chat tab speaks to over ACP — see `crate::acp`. A second
+    /// list and not a flag on the profiles: what runs in a terminal is the
+    /// agent's own program, what speaks ACP is usually an adapter beside it
+    /// (`claude-agent-acp` for `claude`). Empty, the ones shipped.
+    pub chat_agents: Vec<crate::acp::Agent>,
     /// Which side a screen's first terminal opens on.
     pub placement: TerminalPlacement,
     /// Puts our Claude Code hooks in every worktree that appears — see
@@ -296,6 +301,7 @@ impl Default for TerminalSettings {
             // file written by an earlier version.
             agents: Vec::new(),
             default_agent: String::new(),
+            chat_agents: Vec::new(),
             placement: TerminalPlacement::default(),
             agent_hooks: true,
             column_min: COLUMN_MIN_DEFAULT,
@@ -330,6 +336,22 @@ impl TerminalSettings {
             .map(|profile| vec![profile])
             .unwrap_or_else(|| vec![AgentProfile::claude()]);
         self.agent_command.clear();
+    }
+
+    /// The agents a chat can be opened on: the configured ones, or the ones
+    /// shipped — an empty list read back is a file that never set any.
+    pub fn chat_agents(&self) -> Vec<crate::acp::Agent> {
+        let configured: Vec<_> = self
+            .chat_agents
+            .iter()
+            .filter(|agent| agent.is_runnable())
+            .cloned()
+            .collect();
+        if configured.is_empty() {
+            crate::acp::Agent::defaults()
+        } else {
+            configured
+        }
     }
 
     /// The profile launched when nobody says which.

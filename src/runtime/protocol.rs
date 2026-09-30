@@ -944,6 +944,28 @@ pub enum Cmd {
         applied: bool,
     },
 
+    // — The agents' chats ———————————————————————————————————————
+    /// Launches an agent speaking ACP for one chat — see `crate::acp`.
+    ///
+    /// The declaration travels, for `LspStart`'s reason: it comes from the
+    /// settings, which live on the interface's side.
+    AcpStart {
+        /// The view's chat number, counted for the window and never reused.
+        chat: u64,
+        worktree: WorktreeId,
+        agent: crate::acp::Agent,
+    },
+    /// One JSON-RPC line for a chat's agent, written by `acp::chat::Chat`:
+    /// the lane carries lines and knows no method.
+    AcpSend {
+        chat: u64,
+        line: String,
+    },
+    /// Ends a chat's agent — its tab was closed.
+    AcpStop {
+        chat: u64,
+    },
+
     // — The world outside the repository —————————————————————————
     /// One request a view makes of a service — see `crate::outside`.
     ///
@@ -1009,6 +1031,9 @@ impl Cmd {
             Self::LspRequest { .. } => "LspRequest",
             Self::LspCancel { .. } => "LspCancel",
             Self::LspApplied { .. } => "LspApplied",
+            Self::AcpStart { .. } => "AcpStart",
+            Self::AcpSend { .. } => "AcpSend",
+            Self::AcpStop { .. } => "AcpStop",
             Self::OpenIfRepo(..) => "OpenIfRepo",
             Self::RefreshRepo { .. } => "RefreshRepo",
             Self::RefreshStatus { .. } => "RefreshStatus",
@@ -1513,6 +1538,19 @@ pub enum Evt {
     LspBusy {
         worktree: WorktreeId,
         message: Option<String>,
+    },
+
+    /// One line a chat's agent wrote, as it wrote it — read by the view's
+    /// `acp::chat::Chat`.
+    AcpLine {
+        chat: u64,
+        line: String,
+    },
+    /// A chat's agent is gone. `reason` is `None` when the view ended it, and
+    /// otherwise carries the exit and the last of its stderr.
+    AcpEnded {
+        chat: u64,
+        reason: Option<String>,
     },
 
     // — Transport ——————————————————————————————————————————————————

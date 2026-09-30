@@ -259,6 +259,9 @@ enum HandleInner {
         /// `didChange` must reach the server before the completion that depends
         /// on it, which several workers sharing one channel cannot promise.
         lsp: std::sync::Arc<crate::lsp::Host>,
+        /// The ninth: the agents' chats, for the language servers' two
+        /// reasons — they live for hours, and their lines keep their order.
+        acp: std::sync::Arc<crate::acp::Host>,
     },
     Remote(async_channel::Sender<Order>),
     /// No worker at all: the commands are dropped.
@@ -324,11 +327,15 @@ impl Handle {
                 tests,
                 watcher,
                 lsp,
+                acp,
             } => {
                 let Some(cmd) = route_watch(watcher.as_ref(), cmd) else {
                     return;
                 };
                 let Some(cmd) = route_lsp(lsp, cmd) else {
+                    return;
+                };
+                let Some(cmd) = route_acp(acp, cmd) else {
                     return;
                 };
                 // A stop must overtake the run it names: handed straight to
@@ -428,6 +435,22 @@ fn route_lsp(host: &std::sync::Arc<crate::lsp::Host>, cmd: Cmd) -> Option<Cmd> {
     None
 }
 
+/// Hands the chats' orders to their host and returns the others — the same
+/// shape as `route_lsp`, and for its reasons.
+fn route_acp(host: &crate::acp::Host, cmd: Cmd) -> Option<Cmd> {
+    match cmd {
+        Cmd::AcpStart {
+            chat,
+            worktree,
+            agent,
+        } => host.start(chat, worktree, agent),
+        Cmd::AcpSend { chat, line } => host.send(chat, line),
+        Cmd::AcpStop { chat } => host.stop(chat),
+        other => return Some(other),
+    }
+    None
+}
+
 /// Starts the workers and returns what is needed to talk and listen to them.
 pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (read_tx, read_rx) = async_channel::unbounded::<Order>();
@@ -499,6 +522,8 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     // written — becomes events on the same channel as everything else, a single
     // stream to carry over a wire, local or remote.
     let lsp = std::sync::Arc::new(crate::lsp::Host::new(evt_tx.clone()));
+    // And the agents' chats, which push as much as they answer.
+    let acp = std::sync::Arc::new(crate::acp::Host::new(evt_tx.clone()));
     drop(evt_tx);
 
     (
@@ -513,6 +538,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
                 tests: tests_tx,
                 watcher,
                 lsp,
+                acp,
             },
         },
         evt_rx,
@@ -670,6 +696,10 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         | Cmd::LspCancel { .. }
         | Cmd::LspApplied { .. } => {
             log::debug!("language server order arrived in a worker");
+            Vec::new()
+        }
+        Cmd::AcpStart { .. } | Cmd::AcpSend { .. } | Cmd::AcpStop { .. } => {
+            log::debug!("chat order arrived in a worker");
             Vec::new()
         }
 

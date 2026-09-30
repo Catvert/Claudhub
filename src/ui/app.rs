@@ -685,6 +685,8 @@ pub struct ClaudhubApp {
     /// together. Each is a dock panel per screen sharing one pty — see
     /// `terminal_view::Terminal`.
     pub(super) terminals: Vec<OpenTerminal>,
+    /// The chat tabs, beside the terminals — see `ui::chats`.
+    pub(super) chats: Vec<super::chats::OpenChat>,
     /// The commit message being written.
     ///
     /// An `EditorState` and not a `TextareaState`, as the three other writing
@@ -1551,6 +1553,7 @@ impl ClaudhubApp {
             opening_repos: 0,
             review: HashMap::new(),
             terminals: Vec::new(),
+            chats: Vec::new(),
             commit_input,
             base_select,
             branch_picker,
@@ -2752,6 +2755,10 @@ impl ClaudhubApp {
                 self.lsp_apply_edit(worktree, id, edit, window, cx)
             }
 
+            // — The agents' chats ———————————————————————————————————
+            Evt::AcpLine { chat, line } => self.chat_line(chat, line, cx),
+            Evt::AcpEnded { chat, reason } => self.chat_ended(chat, reason, cx),
+
             // — Databases —————————————————————————————————————————
             Evt::DbDatabases { key, databases } => self.db_databases_arrived(key, databases, cx),
             Evt::DbTables {
@@ -2786,6 +2793,7 @@ impl ClaudhubApp {
             } => self.server_hello(build, cwd, running_under_wsl, shells),
             Evt::ServerLost { message } => {
                 log::warn!("remote server lost: {message}");
+                self.chats_lost(&message, cx);
                 self.server_state = super::server::ServerState::Down(message);
                 // Whatever was under way died with it, and nothing will ever
                 // answer for it. A spinner that turns for ever says less than
@@ -2912,6 +2920,7 @@ impl ClaudhubApp {
                 self.active = None;
                 self.review.remove(&active);
                 self.close_terminals_of(&active, window, cx);
+                self.close_chats_of(&active, window, cx);
                 self.close_consoles_of(&active, window, cx);
                 // The editors of a worktree that is gone go with it, as its
                 // terminals do: the files they hold are on a disk that no
