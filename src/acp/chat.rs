@@ -299,12 +299,32 @@ impl ToolCall {
         let exit = &meta["terminal_exit"];
         if exit.is_object() {
             let terminal = self.terminal.get_or_insert_with(Terminal::default);
+            let mut code = exit["exit_code"].as_i64();
+            // **Claude's adapter says 1 for any failure**, and the real code
+            // only in the first line of the output, where Claude Code's tool
+            // result writes it (`Exit code 3`). That line is the code, not
+            // something the command printed.
+            if let Some(said) = said_exit_code(&terminal.output) {
+                code = Some(said);
+                let rest = terminal
+                    .output
+                    .split_once('\n')
+                    .map_or("", |(_, rest)| rest);
+                terminal.output = rest.to_string();
+            }
             terminal.exit = Some(Exit {
-                code: exit["exit_code"].as_i64(),
+                code,
                 signal: exit["signal"].as_str().map(str::to_string),
             });
         }
     }
+}
+
+/// The code in an `Exit code N` first line, as Claude Code's tool result
+/// opens a failed command's output.
+fn said_exit_code(output: &str) -> Option<i64> {
+    let first = output.lines().next()?;
+    first.strip_prefix("Exit code ")?.trim().parse().ok()
 }
 
 /// Drops the head of an output past what is kept, on a line when it can.
@@ -1756,6 +1776,46 @@ mod tests {
             panic!();
         };
         assert_eq!(tool.output().as_deref(), Some("all"));
+    }
+
+    /// As Claude's adapter really sends a failed command (recorded from
+    /// `claude-agent-acp` 0.84): the code in the output's first line, and
+    /// 1 in `terminal_exit`.
+    #[test]
+    fn a_failed_command_ends_with_the_code_it_really_had() {
+        let mut chat = ready();
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "b", "kind": "execute",
+                    "title": "Terminal", "rawInput": {}, "status": "pending",
+                    "_meta": { "terminal_info": { "terminal_id": "b" } } }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "b",
+                    "rawInput": { "command": "echo hi; exit 3" }, "title": "echo hi; exit 3" }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "b",
+                    "_meta": { "terminal_output_delta": { "terminal_id": "b",
+                                                          "data": "Exit code 3\nhi" } } }),
+        );
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "b", "status": "failed",
+                    "_meta": { "terminal_exit": { "terminal_id": "b", "exit_code": 1, "signal": null } } }),
+        );
+        let Entry::Tool(tool) = &chat.entries[0] else {
+            panic!();
+        };
+        assert_eq!(tool.command().as_deref(), Some("echo hi; exit 3"));
+        assert_eq!(tool.output().as_deref(), Some("hi"));
+        assert_eq!(
+            tool.terminal.as_ref().unwrap().exit.as_ref().unwrap().code,
+            Some(3)
+        );
+        assert_eq!(said_exit_code("Exit code x\n"), None);
     }
 
     #[test]
