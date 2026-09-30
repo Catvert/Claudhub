@@ -55,6 +55,9 @@ pub struct ChatView {
     pub agent: crate::acp::Agent,
     pub worktree: PathBuf,
     chat: Chat,
+    /// The session the next `start` reopens — a kept tab's, or this one's
+    /// own when its agent is restarted.
+    resume: Option<String>,
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
 }
@@ -66,6 +69,7 @@ impl ChatView {
         id: u64,
         agent: crate::acp::Agent,
         worktree: PathBuf,
+        kept: Option<crate::ui::store::SavedChat>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -83,24 +87,57 @@ impl ChatView {
             }
         })
         .detach();
-        let chat = Chat::new(worktree.to_string_lossy().into_owned());
+        let mut chat = Chat::new(worktree.to_string_lossy().into_owned());
+        let resume = kept.as_ref().and_then(|kept| kept.session.clone());
+        chat.title = kept.and_then(|kept| kept.title);
         Self {
             id,
             agent,
             worktree,
             chat,
+            resume,
             input,
             scroll: ScrollHandle::new(),
         }
     }
 
     /// The first line, once the application has asked for the process.
+    ///
+    /// A restart comes back to the conversation it had: the session the chat
+    /// had reached, or the one it was still to reopen.
     pub fn start(&mut self, cx: &mut Context<Self>) {
-        self.chat = Chat::new(self.worktree.to_string_lossy().into_owned());
+        let cwd = self.worktree.to_string_lossy().into_owned();
+        let title = self.chat.title.clone();
+        let resume = self.chat.session.clone().or(self.resume.take());
+        self.chat = match resume {
+            Some(session) => Chat::resuming(cwd, session),
+            None => Chat::new(cwd),
+        };
+        self.chat.title = title;
         let line = self.chat.start();
         self.follow();
         cx.emit(ChatEvent::Send(vec![line]));
         cx.notify();
+    }
+
+    /// Whether a turn is under way.
+    pub fn is_busy(&self) -> bool {
+        self.chat.is_busy()
+    }
+
+    /// Whether the agent waits on a permission.
+    pub fn is_asking(&self) -> bool {
+        self.chat.is_asking()
+    }
+
+    /// What a restart needs to open this chat again.
+    pub fn saved(&self, right: bool) -> crate::ui::store::SavedChat {
+        crate::ui::store::SavedChat {
+            agent: self.agent.clone(),
+            session: self.chat.session.clone().or(self.resume.clone()),
+            title: self.chat.title.clone(),
+            right,
+        }
     }
 
     /// The tab's title: the session's, or the agent's name.
@@ -453,6 +490,12 @@ impl ChatView {
                     Notice::Refused => (tr!("chat-refused"), theme.warning),
                     Notice::Cancelled => (tr!("chat-cancelled"), theme.muted_foreground),
                     Notice::Error(message) => (SharedString::from(message.clone()), theme.danger),
+                    Notice::ResumedWithoutHistory => {
+                        (tr!("chat-resumed-without-history"), theme.muted_foreground)
+                    }
+                    Notice::NotResumed(message) => {
+                        (tr!("chat-not-resumed", { reason: message }), theme.warning)
+                    }
                 };
                 div()
                     .text_xs()
@@ -840,6 +883,7 @@ fn phase_word(phase: Phase) -> SharedString {
         Phase::Launching | Phase::Connecting => tr!("chat-connecting"),
         Phase::OpeningSession => tr!("chat-opening"),
         Phase::SigningIn => tr!("chat-signing-in"),
+        Phase::Resuming => tr!("chat-resuming"),
     }
 }
 

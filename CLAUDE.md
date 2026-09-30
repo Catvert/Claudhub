@@ -391,11 +391,18 @@ cible se dit quand même (`dock_layout::target_for`).
 
 **Un chat ACP est un onglet des terminaux** (`panels::ChatPanel`, `ui::chat_view`) :
 il répond au **nom** de leur vue, donc même bandeau, même repli, même élagage
-de `layout.json` — mais aucun pty, et rien de ce qui lit un terminal (accueil,
-signal des agents, résurrection) ne le voit. Le client n'offre à l'agent **ni
-`fs/*` ni `terminal/*`** : l'agent travaille avec ses propres outils, et ce qu'il
-demande quand même est refusé, jamais laissé en suspens. La vue n'envoie rien
-elle-même : elle émet `ChatEvent::Send`, qu'on reçoit hors de la pompe.
+de `layout.json` — mais aucun pty ; sur l'accueil Focus, il est un sous-onglet
+et une colonne à côté des terminaux, et son signal (au travail, en attente
+d'une permission) rejoint le leur. Le client n'offre à l'agent **ni `fs/*` ni
+`terminal/*`** : l'agent travaille avec ses propres outils, et ce qu'il demande
+quand même est refusé, jamais laissé en suspens. La vue n'envoie rien
+elle-même : elle émet `ChatEvent::Send`, qu'on reçoit hors de la pompe ; un
+rendu lit les copies d'`OpenChat` (`label`, `doing`), jamais la vue. **Il
+survit à la fenêtre** (`SavedChat`, écrit avec les terminaux) : rouvert par
+`session/load` (l'historique rejoué), à défaut `session/resume`, à défaut une
+session neuve. Un programme introuvable est relancé par le shell de connexion
+(`$SHELL -lc`) : le `npx` de nvm n'est pas dans le `PATH` d'une fenêtre lancée
+du bureau, ni dans celui du serveur WSL.
 
 **Les terminaux survivent à la fenêtre** (`ui::revive`, `SavedTerminal`) : un
 shell ou un agent vivant revient à sa place, Claude **dans sa conversation**

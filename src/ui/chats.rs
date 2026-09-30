@@ -19,6 +19,33 @@ pub struct OpenChat {
     pub view_name: &'static str,
     /// The lane's number for it, copied so the pump never reads the view.
     pub chat: u64,
+    /// What a render asks of the chat, copied here for `OpenTerminal`'s
+    /// reason: **an entity read during a draw redraws the window at each of
+    /// its notifies**, and a chat notifies at every chunk the agent streams.
+    /// Refreshed by the application whenever the chat moves (`refresh`).
+    pub label: gpui_kit::SharedString,
+    pub doing: crate::ui::overview::Doing,
+}
+
+impl OpenChat {
+    /// What names it among the terminals of a board: its view's number, as a
+    /// terminal is named by its own — the two share the board's sub-tabs.
+    pub fn id(&self) -> u64 {
+        self.view.entity_id().as_u64()
+    }
+
+    /// Copies again what the renders read.
+    fn refresh(&mut self, cx: &gpui_kit::App) {
+        let view = self.view.read(cx);
+        self.label = view.label();
+        self.doing = if view.is_asking() {
+            crate::ui::overview::Doing::Waiting
+        } else if view.is_busy() {
+            crate::ui::overview::Doing::Working
+        } else {
+            crate::ui::overview::Doing::Rest
+        };
+    }
 }
 
 /// The next chat's number: counted for the process and never reused, so a
@@ -30,21 +57,33 @@ fn next_chat() -> u64 {
 
 impl ClaudhubApp {
     /// Opens a chat with `agent` on a worktree, as a tab of the terminal view
-    /// `placement` names.
+    /// `placement` names — a new conversation, or the one `kept` names.
     pub(super) fn open_chat(
         &mut self,
         worktree: &Path,
         agent: crate::acp::Agent,
         placement: crate::ui::settings::TerminalPlacement,
+        kept: Option<crate::ui::store::SavedChat>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let chat = next_chat();
         let view_name = crate::ui::panels::TerminalPanel::name_of(placement);
-        let view =
-            cx.new(|cx| ChatView::new(chat, agent.clone(), worktree.to_path_buf(), window, cx));
+        let view = cx.new(|cx| {
+            ChatView::new(
+                chat,
+                agent.clone(),
+                worktree.to_path_buf(),
+                kept,
+                window,
+                cx,
+            )
+        });
         cx.subscribe(&view, |this, view, event: &ChatEvent, cx| {
             let chat = view.read(cx).id;
+            // A gesture in the chat — a prompt, an answer — moves what the
+            // home screen shows of it.
+            this.chat_moved(chat, cx);
             match event {
                 ChatEvent::Send(lines) => {
                     for line in lines {
@@ -66,7 +105,7 @@ impl ClaudhubApp {
                     });
                     view.update(cx, |view, cx| view.start(cx));
                 }
-                ChatEvent::Retitled => cx.notify(),
+                ChatEvent::Retitled => {}
             }
         })
         .detach();
@@ -87,6 +126,8 @@ impl ClaudhubApp {
             panel: panel.clone(),
             view_name,
             chat,
+            label: gpui_kit::SharedString::default(),
+            doing: crate::ui::overview::Doing::Rest,
         });
         // The process first, then its first line: both go down the same lane,
         // in the order they are sent.
@@ -96,6 +137,7 @@ impl ClaudhubApp {
             agent,
         });
         view.update(cx, |view, cx| view.start(cx));
+        self.chat_moved(chat, cx);
         let id = panel.entity_id();
         self.dock_terminal(
             worktree,
@@ -108,6 +150,72 @@ impl ClaudhubApp {
         let focus = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
         window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// Opens again the chats a worktree had when the window closed, each on
+    /// its session — called once per worktree, by `revive_terminals`, whose
+    /// guard it shares.
+    pub(super) fn revive_chats(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kept = crate::ui::store::Store::global(cx)
+            .worktrees
+            .get(worktree)
+            .map(|state| state.chats.clone())
+            .unwrap_or_default();
+        let configured = crate::ui::settings::Settings::global(cx)
+            .terminal
+            .chat_agents();
+        for kept in kept {
+            // The agent of that name as the settings say it now, or as it was.
+            let agent = configured
+                .iter()
+                .find(|agent| agent.label() == kept.agent.label())
+                .cloned()
+                .unwrap_or_else(|| kept.agent.clone());
+            let placement = if kept.right {
+                crate::ui::settings::TerminalPlacement::Right
+            } else {
+                crate::ui::settings::TerminalPlacement::Bottom
+            };
+            self.open_chat(worktree, agent, placement, Some(kept), window, cx);
+        }
+    }
+
+    /// The chats as a restart would open them again, per worktree — only for
+    /// the worktrees whose kept tabs have been opened again, for the reason
+    /// `persist_terminals` gives.
+    pub(super) fn saved_chats(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> std::collections::HashMap<PathBuf, Vec<crate::ui::store::SavedChat>> {
+        let mut kept: std::collections::HashMap<_, Vec<_>> = self
+            .terminals_revived
+            .iter()
+            .map(|worktree| (worktree.clone(), Vec::new()))
+            .collect();
+        for open in &self.chats {
+            if let Some(list) = kept.get_mut(&open.worktree) {
+                let right = open.view_name == crate::ui::panels::TerminalPanel::RIGHT;
+                list.push(open.view.read(cx).saved(right));
+            }
+        }
+        kept
+    }
+
+    /// A worktree's chats, in the order they were opened.
+    pub(super) fn chats_of<'a>(&'a self, worktree: &'a Path) -> impl Iterator<Item = &'a OpenChat> {
+        self.chats
+            .iter()
+            .filter(move |chat| chat.worktree == worktree)
+    }
+
+    /// A chat by the number its board knows it by.
+    pub(super) fn chat_by_id(&self, id: u64) -> Option<&OpenChat> {
+        self.chats.iter().find(|chat| chat.id() == id)
     }
 
     /// Closes a chat: its agent, and its tab.
@@ -162,6 +270,20 @@ impl ClaudhubApp {
         if let Some(open) = self.chats.iter().find(|open| open.chat == chat) {
             open.view.update(cx, |view, cx| view.receive(&line, cx));
         }
+        self.chat_moved(chat, cx);
+    }
+
+    /// Copies again what the renders read of a chat, and redraws only when
+    /// that changed — not at every chunk the agent streams.
+    fn chat_moved(&mut self, chat: u64, cx: &mut Context<Self>) {
+        let Some(open) = self.chats.iter_mut().find(|open| open.chat == chat) else {
+            return;
+        };
+        let before = (open.label.clone(), open.doing);
+        open.refresh(cx);
+        if (open.label.clone(), open.doing) != before {
+            cx.notify();
+        }
     }
 
     /// A chat's agent is gone.
@@ -169,15 +291,18 @@ impl ClaudhubApp {
         if let Some(open) = self.chats.iter().find(|open| open.chat == chat) {
             open.view.update(cx, |view, cx| view.ended(reason, cx));
         }
+        self.chat_moved(chat, cx);
     }
 
     /// The server died, and every agent it ran with it: no `AcpEnded` will
     /// come, so each chat is told here.
     pub(super) fn chats_lost(&mut self, reason: &str, cx: &mut Context<Self>) {
-        for open in &self.chats {
+        for open in &mut self.chats {
             let reason = reason.to_string();
             open.view
                 .update(cx, |view, cx| view.ended(Some(reason), cx));
+            open.refresh(cx);
         }
+        cx.notify();
     }
 }

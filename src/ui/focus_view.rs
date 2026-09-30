@@ -1748,7 +1748,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ids = self.board_terminals(path);
-        if ids.is_empty() {
+        if ids.is_empty() && self.chats_of(path).next().is_none() {
             let worktree = path.to_path_buf();
             return v_flex()
                 .size_full()
@@ -1792,6 +1792,21 @@ impl ClaudhubApp {
                 )
             })
             .collect();
+        // The chats after the shells, one column each like them.
+        let theme = cx.theme().clone();
+        let chats: Vec<AnyElement> = self
+            .chats_of(path)
+            .map(|chat| {
+                div()
+                    .flex_1()
+                    .min_w(px(column_min))
+                    .h_full()
+                    .child(super::summary_view::chat_frame(
+                        &chat.view, chat.doing, window, &theme, cx,
+                    ))
+                    .into_any_element()
+            })
+            .collect();
         // They scroll sideways inside the view, each never under the least
         // width, and the tabs above them stay where they are.
         h_flex()
@@ -1800,6 +1815,7 @@ impl ClaudhubApp {
             .gap_2()
             .overflow_x_scroll()
             .children(tiles)
+            .children(chats)
             .into_any_element()
     }
 

@@ -113,7 +113,10 @@ impl Agent {
 
 /// The running chats, one process each, keyed by the view's chat number.
 pub struct Host {
-    chats: Mutex<HashMap<u64, Running>>,
+    /// Shared with each chat's reader, which takes its own entry out when
+    /// the agent dies: a line sent to a dead chat must be told so, not
+    /// written into a pipe nobody reads.
+    chats: Arc<Mutex<HashMap<u64, Running>>>,
     events: async_channel::Sender<Evt>,
 }
 
@@ -129,7 +132,7 @@ struct Running {
 impl Host {
     pub fn new(events: async_channel::Sender<Evt>) -> Self {
         Self {
-            chats: Mutex::new(HashMap::new()),
+            chats: Arc::new(Mutex::new(HashMap::new())),
             events,
         }
     }
@@ -137,7 +140,13 @@ impl Host {
     /// Launches an agent for a chat, replacing any process that chat had.
     pub fn start(&self, chat: u64, worktree: WorktreeId, agent: Agent) {
         self.stop(chat);
-        match launch(chat, &worktree, &agent, self.events.clone()) {
+        match launch(
+            chat,
+            &worktree,
+            &agent,
+            self.events.clone(),
+            Arc::downgrade(&self.chats),
+        ) {
             Ok(running) => {
                 self.chats.lock().unwrap().insert(chat, running);
             }
@@ -198,22 +207,28 @@ fn launch(
     worktree: &Path,
     agent: &Agent,
     events: async_channel::Sender<Evt>,
+    chats: std::sync::Weak<Mutex<HashMap<u64, Running>>>,
 ) -> anyhow::Result<Running> {
     if !agent.is_runnable() {
         anyhow::bail!("no command");
     }
-    let mut command = Command::new(&agent.command);
-    command
-        .args(&agent.args)
-        .envs(&agent.env)
-        .current_dir(worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    crate::wsl::no_console(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = match command(worktree, agent, None).spawn() {
+        Ok(child) => child,
+        // **Not found here is not not found.** The default agents run through
+        // `npx`, which lives wherever nvm, volta or fnm put it — a `PATH` the
+        // login shell builds and a window started from the desktop, or a
+        // server started by `wsl.exe --exec`, never had. The same command
+        // again, through the user's login shell, finds what a terminal would.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && cfg!(unix) => {
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|shell| !shell.is_empty())
+                .unwrap_or_else(|| "/bin/sh".into());
+            log::info!("{} not on PATH, trying through {shell} -l", agent.command);
+            command(worktree, agent, Some(&shell)).spawn()?
+        }
+        Err(e) => return Err(e.into()),
+    };
     let stdin = child.stdin.take().expect("stdin was piped");
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -279,6 +294,17 @@ fn launch(
                     let tail = tail.lock().unwrap();
                     ended_because(status, tail.iter().map(String::as_str))
                 });
+                // Out of the table — but only if the entry is still this
+                // process's: a restart may already have put the next one there.
+                if let Some(chats) = chats.upgrade() {
+                    let mut chats = chats.lock().unwrap();
+                    if chats
+                        .get(&chat)
+                        .is_some_and(|running| Arc::ptr_eq(&running.stopped, &stopped))
+                    {
+                        chats.remove(&chat);
+                    }
+                }
                 let _ = events.send_blocking(Evt::AcpEnded { chat, reason });
             })?;
     }
@@ -288,6 +314,41 @@ fn launch(
         child,
         stopped,
     })
+}
+
+/// The agent's command, run directly or through a login shell.
+///
+/// Through the shell, the program and its arguments ride as `$0` and `$@`
+/// and are never spliced into the script: nothing to quote, and nothing in an
+/// argument can be read as shell.
+fn command(worktree: &Path, agent: &Agent, login_shell: Option<&str>) -> Command {
+    let mut command = match login_shell {
+        None => {
+            let mut command = Command::new(&agent.command);
+            command.args(&agent.args);
+            command
+        }
+        Some(shell) => {
+            let mut command = Command::new(shell);
+            command
+                .args(["-lc", "exec \"$0\" \"$@\""])
+                .arg(&agent.command)
+                .args(&agent.args);
+            command
+        }
+    };
+    command
+        .envs(&agent.env)
+        .current_dir(worktree)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // A group of its own, so that ending the chat ends what the declared
+    // command started — see `kill`.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    crate::wsl::no_console(&mut command);
+    command
 }
 
 /// Waits for an agent whose stdout has closed, killing it past the grace
@@ -399,6 +460,22 @@ mod tests {
         }
     }
 
+    /// Through the login shell, an argument is an argument: quotes, spaces
+    /// and `$` arrive as they were written.
+    #[cfg(unix)]
+    #[test]
+    fn the_login_shell_passes_the_arguments_untouched() {
+        let agent = Agent {
+            command: "printf".into(),
+            args: vec!["%s|".into(), "a b".into(), "$HOME".into(), "'q'".into()],
+            ..Agent::default()
+        };
+        let output = command(&std::env::temp_dir(), &agent, Some("/bin/sh"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a b|$HOME|'q'|");
+    }
+
     #[test]
     fn a_missing_program_is_an_end_and_not_a_silence() {
         let (tx, rx) = async_channel::unbounded();
@@ -408,13 +485,18 @@ mod tests {
             ..Agent::default()
         };
         host.start(2, std::env::temp_dir(), agent);
-        assert!(matches!(
-            rx.try_recv().unwrap(),
+        // Not found directly, then through the login shell, which says so.
+        match rx.recv_blocking().unwrap() {
             Evt::AcpEnded {
                 chat: 2,
-                reason: Some(_)
-            }
-        ));
+                reason: Some(reason),
+            } => assert!(
+                reason.contains("127") || reason.contains("not found"),
+                "{reason}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // A dead chat is out of the table: a line for it is refused aloud.
         host.send(2, "{}".into());
         assert!(matches!(
             rx.try_recv().unwrap(),

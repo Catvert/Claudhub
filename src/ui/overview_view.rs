@@ -1184,7 +1184,7 @@ impl ClaudhubApp {
     /// or the guess only where none of them speaks. See
     /// `overview::worktree_doings`.
     pub(super) fn worktree_doings(&self, among: &[PathBuf]) -> super::focus_view::Doings {
-        overview::worktree_doings(
+        let mut doings = overview::worktree_doings(
             among,
             self.claude_processes.iter().filter_map(|process| {
                 Some((
@@ -1193,7 +1193,14 @@ impl ClaudhubApp {
                 ))
             }),
             |path| self.agents.get(path).map(|state| heard(&state.activity)),
-        )
+        );
+        // The chats say it themselves, and are none of `/proc`'s business.
+        for chat in &self.chats {
+            if let Some(doing) = doings.get_mut(&chat.worktree) {
+                *doing = overview::loudest([*doing, chat.doing]);
+            }
+        }
+        doings
     }
 
     /// Where an agent is at work on the plane — see `overview::at_work`.

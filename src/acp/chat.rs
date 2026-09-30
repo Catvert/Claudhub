@@ -52,6 +52,9 @@ pub enum Phase {
     OpeningSession,
     /// `authenticate` is out.
     SigningIn,
+    /// `session/load` or `session/resume` is out: an earlier conversation is
+    /// coming back.
+    Resuming,
 }
 
 /// What a notice says, for the view to translate — the core has no `tr!`.
@@ -67,6 +70,11 @@ pub enum Notice {
     Cancelled,
     /// An error the agent answered with, as it said it.
     Error(String),
+    /// The conversation continues, but the agent cannot show what was said
+    /// before (`session/resume`).
+    ResumedWithoutHistory,
+    /// The earlier conversation could not come back; this is a new one.
+    NotResumed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +193,8 @@ pub struct Usage {
 enum Pending {
     Initialize,
     NewSession,
+    /// `session/load` (`true`, the history replayed) or `session/resume`.
+    Resume(bool),
     Authenticate,
     Prompt,
     /// A mode or an option: only an error is read.
@@ -193,6 +203,8 @@ enum Pending {
 
 pub struct Chat {
     cwd: String,
+    /// An earlier session to open instead of a new one.
+    resume: Option<String>,
     next_id: u64,
     pending: HashMap<u64, Pending>,
     caps: Value,
@@ -216,6 +228,7 @@ impl Chat {
     pub fn new(cwd: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
+            resume: None,
             next_id: 1,
             pending: HashMap::new(),
             caps: Value::Null,
@@ -231,6 +244,14 @@ impl Chat {
             usage: None,
             title: None,
         }
+    }
+
+    /// A chat that reopens an earlier session of the same agent — the one a
+    /// tab had when the window closed, or before its agent was restarted.
+    pub fn resuming(cwd: impl Into<String>, session: impl Into<String>) -> Self {
+        let mut chat = Self::new(cwd);
+        chat.resume = Some(session.into());
+        chat
     }
 
     /// The first line: `initialize`, sent once the process is asked for.
@@ -346,7 +367,7 @@ impl Chat {
         if self.status != Status::AuthRequired {
             return None;
         }
-        Some(self.new_session())
+        Some(self.open_session())
     }
 
     /// Picks a legacy mode.
@@ -398,6 +419,40 @@ impl Chat {
         json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
     }
 
+    /// Whether the agent says it can do this (`agentCapabilities`): a member
+    /// present and not `false`.
+    fn can(&self, path: &[&str]) -> bool {
+        let found = path.iter().fold(&self.caps, |value, key| &value[*key]);
+        !found.is_null() && found != &Value::Bool(false)
+    }
+
+    /// The session the chat asks for: the earlier one when there is one to
+    /// come back to and the agent can bring it back, a new one otherwise.
+    fn open_session(&mut self) -> String {
+        let Some(session) = self.resume.clone() else {
+            return self.new_session();
+        };
+        let replayed = self.can(&["loadSession"]);
+        if !replayed && !self.can(&["sessionCapabilities", "resume"]) {
+            self.resume = None;
+            return self.new_session();
+        }
+        // Named before the answer: `session/load` replays the history as
+        // `session/update`s, which arrive before it and are read by session.
+        self.session = Some(session.clone());
+        self.status = Status::Starting(Phase::Resuming);
+        let method = if replayed {
+            "session/load"
+        } else {
+            "session/resume"
+        };
+        self.request(
+            Pending::Resume(replayed),
+            method,
+            json!({ "sessionId": session, "cwd": self.cwd, "mcpServers": [] }),
+        )
+    }
+
     fn new_session(&mut self) -> String {
         self.status = Status::Starting(Phase::OpeningSession);
         self.request(
@@ -432,14 +487,23 @@ impl Chat {
                         description: text(&m["description"]),
                     })
                     .collect();
-                vec![self.new_session()]
+                vec![self.open_session()]
             }
             (Pending::NewSession, Ok(result)) => {
                 self.session = result["sessionId"].as_str().map(str::to_string);
                 self.session_opened(&result);
                 Vec::new()
             }
-            (Pending::Authenticate, Ok(_)) => vec![self.new_session()],
+            (Pending::Authenticate, Ok(_)) => vec![self.open_session()],
+            (Pending::Resume(replayed), Ok(result)) => {
+                self.resume = None;
+                if !replayed {
+                    self.entries
+                        .push(Entry::Notice(Notice::ResumedWithoutHistory));
+                }
+                self.session_opened(&result);
+                Vec::new()
+            }
             (Pending::Prompt, Ok(result)) => {
                 self.status = Status::Ready;
                 self.drop_permissions();
@@ -459,11 +523,22 @@ impl Chat {
                 }
                 Vec::new()
             }
-            (Pending::NewSession | Pending::Prompt | Pending::Authenticate, Err((code, _)))
-                if code == AUTH_REQUIRED =>
-            {
+            (
+                Pending::NewSession | Pending::Resume(_) | Pending::Prompt | Pending::Authenticate,
+                Err((code, _)),
+            ) if code == AUTH_REQUIRED => {
                 self.status = Status::AuthRequired;
                 Vec::new()
+            }
+            // The session is gone — expired, deleted, another machine's: a
+            // new one rather than a dead tab, and the reason said.
+            (Pending::Resume(_), Err((_, message))) => {
+                self.resume = None;
+                self.session = None;
+                self.entries.clear();
+                self.entries
+                    .push(Entry::Notice(Notice::NotResumed(message)));
+                vec![self.new_session()]
             }
             (Pending::Initialize | Pending::NewSession, Err((_, message))) => {
                 self.status = Status::Failed(message);
@@ -1107,6 +1182,75 @@ mod tests {
         assert_eq!(
             chat.usage.as_ref().unwrap().cost,
             Some((0.25, "USD".into()))
+        );
+    }
+
+    fn initialized(chat: &mut Chat, caps: Value) -> Value {
+        let init = sent(&chat.start());
+        let answer = json!({ "jsonrpc": "2.0", "id": init["id"],
+                             "result": { "agentCapabilities": caps } });
+        sent(&chat.receive(&answer.to_string())[0])
+    }
+
+    #[test]
+    fn an_earlier_session_comes_back_with_its_history() {
+        let mut chat = Chat::resuming("/w", "old");
+        let load = initialized(&mut chat, json!({ "loadSession": true }));
+        assert_eq!(load["method"], "session/load");
+        assert_eq!(load["params"]["sessionId"], "old");
+        assert_eq!(chat.status, Status::Starting(Phase::Resuming));
+        // The replay arrives before the answer, and is ours.
+        let replay = |kind: &str, text: &str| {
+            json!({ "jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "old",
+                "update": { "sessionUpdate": kind, "content": { "type": "text", "text": text } } } })
+            .to_string()
+        };
+        chat.receive(&replay("user_message_chunk", "hello"));
+        chat.receive(&replay("agent_message_chunk", "hi"));
+        let done = json!({ "jsonrpc": "2.0", "id": load["id"], "result": {} });
+        chat.receive(&done.to_string());
+        assert!(chat.is_ready());
+        assert_eq!(chat.session.as_deref(), Some("old"));
+        assert_eq!(chat.entries[0], Entry::User("hello".into()));
+        assert_eq!(chat.entries.len(), 2);
+    }
+
+    #[test]
+    fn without_load_a_session_resumes_and_says_what_is_missing() {
+        let mut chat = Chat::resuming("/w", "old");
+        let resume = initialized(
+            &mut chat,
+            json!({ "sessionCapabilities": { "resume": {} } }),
+        );
+        assert_eq!(resume["method"], "session/resume");
+        let done = json!({ "jsonrpc": "2.0", "id": resume["id"], "result": {} });
+        chat.receive(&done.to_string());
+        assert_eq!(
+            chat.entries,
+            vec![Entry::Notice(Notice::ResumedWithoutHistory)]
+        );
+        // And an agent that can do neither opens a new one.
+        let mut chat = Chat::resuming("/w", "old");
+        let new = initialized(&mut chat, json!({ "loadSession": false }));
+        assert_eq!(new["method"], "session/new");
+        assert_eq!(chat.session, None);
+    }
+
+    #[test]
+    fn a_session_that_will_not_come_back_gives_way_to_a_new_one() {
+        let mut chat = Chat::resuming("/w", "old");
+        let load = initialized(&mut chat, json!({ "loadSession": true }));
+        let refused = json!({ "jsonrpc": "2.0", "id": load["id"],
+            "error": { "code": -32603, "message": "Session not found" } });
+        let out = chat.receive(&refused.to_string());
+        assert_eq!(sent(&out[0])["method"], "session/new");
+        assert_eq!(chat.session, None);
+        assert_eq!(
+            chat.entries,
+            vec![Entry::Notice(Notice::NotResumed(
+                "Session not found".into()
+            ))]
         );
     }
 

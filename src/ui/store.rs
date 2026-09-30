@@ -57,6 +57,8 @@ pub struct WorktreeState {
     /// The terminals that were open, in order, to open again — see
     /// `ui::revive`.
     pub terminals: Vec<SavedTerminal>,
+    /// The chat tabs that were open, in order — see `ui::chats`.
+    pub chats: Vec<SavedChat>,
     /// The main repository this checkout belongs to.
     ///
     /// It only serves the purge, and is indispensable to it: without it, an
@@ -494,6 +496,23 @@ pub struct SavedTerminal {
     /// again when the shell comes back.
     #[serde(default)]
     pub typed: Option<(String, Vec<String>)>,
+}
+
+/// A chat tab as it is kept across a restart: its agent, and the session to
+/// load back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedChat {
+    /// The agent as it was — looked up again by its name first, so an agent
+    /// edited in the settings since is the one that starts.
+    pub agent: crate::acp::Agent,
+    #[serde(default)]
+    pub session: Option<String>,
+    /// The session's title, so the tab has its name before the agent says it.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Beside the code rather than under it.
+    #[serde(default)]
+    pub right: bool,
 }
 
 /// What starts a kept terminal again.

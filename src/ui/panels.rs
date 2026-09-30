@@ -2034,6 +2034,10 @@ pub(super) fn new_chat_button(
         .small()
         .icon(crate::ui::icons::icon("message-square-plus"))
         .tooltip(tr!("chat-new"));
+    // Every agent taken out of the settings: no chat to offer.
+    if agents.is_empty() {
+        return div().into_any_element();
+    }
     if let [agent] = agents.as_slice() {
         let (app, agent) = (app.clone(), agent.clone());
         return button
@@ -2073,7 +2077,7 @@ fn open_chat(
         let Some(worktree) = app.active_path() else {
             return;
         };
-        app.open_chat(&worktree, agent, placement, window, cx);
+        app.open_chat(&worktree, agent, placement, None, window, cx);
     });
 }
 

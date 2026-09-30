@@ -105,7 +105,8 @@ impl ClaudhubApp {
         let loudest = overview::loudest(
             self.board_terminals(path)
                 .iter()
-                .filter_map(|id| at_work.terminals.get(id).copied()),
+                .filter_map(|id| at_work.terminals.get(id).copied())
+                .chain(self.chats_of(path).map(|chat| chat.doing)),
         );
         let tabs: Vec<AnyElement> = View::ALL
             .into_iter()
@@ -125,7 +126,10 @@ impl ClaudhubApp {
                         .and_then(|state| state.todo.as_ref())
                         .map(|todo| todo.tasks.len() - todo.done())
                         .filter(|open| *open > 0),
-                    View::Terminals => Some(self.board_terminals(path).len()).filter(|n| *n > 0),
+                    View::Terminals => {
+                        Some(self.board_terminals(path).len() + self.chats_of(path).count())
+                            .filter(|n| *n > 0)
+                    }
                     // The tests in red, as the last run left them.
                     View::Tests => self
                         .pest
@@ -406,6 +410,8 @@ impl ClaudhubApp {
         self.show_board_view(path, View::Home, cx);
         if let Some(view) = self.terminal(id).map(|terminal| terminal.view.clone()) {
             super::dialogs::focus_field(&view, window, cx);
+        } else if let Some(view) = self.chat_by_id(id).map(|chat| chat.view.clone()) {
+            super::dialogs::focus_field(&view, window, cx);
         }
     }
 
@@ -428,6 +434,12 @@ impl ClaudhubApp {
         let waiting: Vec<(u64, bool)> = terminals
             .iter()
             .map(|(id, _)| (*id, at_work.terminals.get(id) == Some(&Doing::Waiting)))
+            // The chats are sub-tabs too, after the shells: one waiting on a
+            // permission comes forward like a terminal waiting on an answer.
+            .chain(
+                self.chats_of(path)
+                    .map(|chat| (chat.id(), chat.doing == Doing::Waiting)),
+            )
             .collect();
         let shown = focus::shown_terminal(self.home_terminal.get(path).copied(), &waiting);
         let mut tabs: Vec<AnyElement> = Vec::new();
@@ -475,9 +487,49 @@ impl ClaudhubApp {
                 .into_any_element(),
             );
         }
+        let chats: Vec<(u64, gpui_kit::SharedString, Doing)> = self
+            .chats_of(path)
+            .map(|chat| (chat.id(), chat.label.clone(), chat.doing))
+            .collect();
+        for (id, label, doing) in chats {
+            let tint = super::theme::doing_color(doing, &theme)
+                .unwrap_or(theme.muted_foreground.opacity(0.5));
+            let (board, pressed) = (path.to_path_buf(), id);
+            tabs.push(
+                tab_pill(
+                    h_flex()
+                        .id(("focus-home-chat-tab", id as usize))
+                        .flex_none()
+                        .max_w(px(220.))
+                        .h(super::theme::bar_height(cx))
+                        .px_2(),
+                    shown == Some(id),
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.reply_to(&board, pressed, window, cx);
+                }))
+                .child(div().flex_none().size(px(7.)).rounded_full().bg(tint))
+                .child(super::icons::glyph("bot"))
+                .child(div().min_w_0().truncate().child(label))
+                .child(
+                    Button::new(("focus-home-chat-close", id as usize))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("x"))
+                        .tooltip(tr!("overview-close"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_chat(gpui_kit::EntityId::from(pressed), window, cx);
+                        })),
+                )
+                .into_any_element(),
+            );
+        }
         let worktree = path.to_path_buf();
         let every = path.to_path_buf();
         let (app, hang) = (cx.entity().downgrade(), Hang::Worktree(path.to_path_buf()));
+        let chat_button = self.home_chat_button(path, cx);
         let bar = h_flex()
             .flex_none()
             .w_full()
@@ -502,6 +554,7 @@ impl ClaudhubApp {
                         this.open_home_terminal(&worktree, window, cx);
                     })),
             )
+            .child(chat_button)
             .child(
                 Button::new("focus-home-agent-add")
                     .ghost()
@@ -522,7 +575,13 @@ impl ClaudhubApp {
                         this.show_board_view(&every, View::Terminals, cx);
                     })),
             );
+        let chat = shown.and_then(|id| self.chat_by_id(id));
         let body = match shown.and_then(|id| self.terminal(id)) {
+            // A chat under its sub-tab, framed like a terminal.
+            None if chat.is_some() => {
+                let chat = chat.expect("matched just above");
+                chat_frame(&chat.view, chat.doing, window, &theme, cx)
+            }
             // Bare: its name is its sub-tab's, and a window round a
             // terminal that fills the column had nothing to fold or move.
             Some(terminal) => {
@@ -591,6 +650,77 @@ impl ClaudhubApp {
             .child(bar)
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
+    }
+
+    /// The button that opens a chat from a board's home, beside its `+`: a
+    /// click with one agent, a menu with several — see
+    /// `panels::new_chat_button`.
+    fn home_chat_button(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let agents = super::settings::Settings::global(cx).terminal.chat_agents();
+        if agents.is_empty() {
+            return div().into_any_element();
+        }
+        let button = Button::new("focus-home-chat")
+            .ghost()
+            .xsmall()
+            .icon(icon("message-square-plus"))
+            .tooltip(tr!("chat-new"));
+        let app = cx.entity().downgrade();
+        let worktree = path.to_path_buf();
+        if let [agent] = agents.as_slice() {
+            let agent = agent.clone();
+            return button
+                .on_click(move |_, window, cx| {
+                    let (worktree, agent) = (worktree.clone(), agent.clone());
+                    let _ = app.update(cx, |this, cx| {
+                        this.open_home_chat(&worktree, agent, window, cx)
+                    });
+                })
+                .into_any_element();
+        }
+        button
+            .dropdown_menu(move |menu, _, _| {
+                agents.iter().fold(menu, |menu, agent| {
+                    let (app, worktree, agent) = (app.clone(), worktree.clone(), agent.clone());
+                    menu.item(
+                        gpui_kit::component::menu::PopupMenuItem::new(
+                            gpui_kit::SharedString::from(agent.label().to_string()),
+                        )
+                        .icon(icon("bot"))
+                        .on_click(move |_, window, cx| {
+                            let (worktree, agent) = (worktree.clone(), agent.clone());
+                            let _ = app.update(cx, |this, cx| {
+                                this.open_home_chat(&worktree, agent, window, cx)
+                            });
+                        }),
+                    )
+                })
+            })
+            .into_any_element()
+    }
+
+    /// Opens a chat from the home and shows it under its sub-tab, the keys in
+    /// it — the same path as `open_home_terminal`. Its tab in the editor is
+    /// where the settings put terminals.
+    pub(super) fn open_home_chat(
+        &mut self,
+        worktree: &Path,
+        agent: crate::acp::Agent,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placement = super::settings::Settings::global(cx).terminal.placement;
+        self.open_chat(worktree, agent, placement, None, window, cx);
+        let Some(open) = self.chats.last() else {
+            return;
+        };
+        let (id, view) = (open.id(), open.view.clone());
+        self.home_terminal.insert(worktree.to_path_buf(), id);
+        if !matches!(self.board_view(worktree, cx), View::Home | View::Terminals) {
+            self.show_board_view(worktree, View::Home, cx);
+        }
+        super::dialogs::focus_field(&view, window, cx);
+        cx.notify();
     }
 
     /// Opens a shell from the home and shows it there, the keys in it: under
@@ -1504,4 +1634,39 @@ impl ClaudhubApp {
             cx,
         ))
     }
+}
+
+/// A chat framed as a terminal is on the boards: rounded, bordered, and
+/// outlined by what its agent is doing. **Cached**, for the terminals' reason:
+/// the chat notifies at every chunk, and only it must redraw.
+pub(super) fn chat_frame(
+    view: &gpui_kit::Entity<super::chat_view::ChatView>,
+    doing: Doing,
+    window: &gpui_kit::Window,
+    theme: &gpui_kit::component::Theme,
+    cx: &gpui_kit::App,
+) -> AnyElement {
+    let focused = view.focus_handle(cx).contains_focused(window, cx);
+    div()
+        .relative()
+        .size_full()
+        .child(
+            v_flex()
+                .size_full()
+                .rounded(theme.radius_lg)
+                .overflow_hidden()
+                .bg(theme.background)
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    v_flex().flex_1().min_h_0().child(
+                        view.clone()
+                            .cached(gpui_kit::StyleRefinement::default().size_full()),
+                    ),
+                ),
+        )
+        .child(super::overview_view::tile_outline(
+            doing, focused, 1., theme,
+        ))
+        .into_any_element()
 }

@@ -518,7 +518,123 @@ fn shell_item(shells: Shared) -> SettingItem {
     .description(tr!("settings-shell-help"))
 }
 
-/// The state of one row of the profiles table, kept from one render to the next.
+/// A row of a profiles table: a name, a command line and an environment.
+///
+/// Two lists have that shape — the terminal's agent profiles and the chat
+/// agents — and one table serves both: the same three fields, the same keyed
+/// state, the same stale-index guard.
+trait Profile: Default + Clone + 'static {
+    fn name(&self) -> String;
+    fn set_name(&mut self, name: String);
+    fn command_line(&self) -> String;
+    /// The line is split honouring quotes: a path containing a space must not
+    /// become two arguments.
+    fn set_command_line(&mut self, line: &str);
+    fn env_line(&self) -> String;
+    fn set_env_line(&mut self, line: &str);
+}
+
+impl Profile for settings::AgentProfile {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+    fn command_line(&self) -> String {
+        settings::AgentProfile::command_line(self)
+    }
+    fn set_command_line(&mut self, line: &str) {
+        let mut parts = settings::split_command(line).into_iter();
+        self.command = parts.next().unwrap_or_default();
+        self.args = parts.collect();
+    }
+    fn env_line(&self) -> String {
+        settings::AgentProfile::env_line(self)
+    }
+    fn set_env_line(&mut self, line: &str) {
+        settings::AgentProfile::set_env_line(self, line)
+    }
+}
+
+impl Profile for crate::acp::Agent {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+    fn command_line(&self) -> String {
+        crate::cmdline::join_command(
+            std::iter::once(self.command.as_str()).chain(self.args.iter().map(String::as_str)),
+        )
+    }
+    fn set_command_line(&mut self, line: &str) {
+        let mut parts = crate::cmdline::split_command(line).into_iter();
+        self.command = parts.next().unwrap_or_default();
+        self.args = parts.collect();
+    }
+    fn env_line(&self) -> String {
+        crate::cmdline::join_command(self.env.iter().map(|(key, value)| format!("{key}={value}")))
+    }
+    fn set_env_line(&mut self, line: &str) {
+        self.env = crate::cmdline::split_command(line)
+            .into_iter()
+            .filter_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+            })
+            .collect();
+    }
+}
+
+/// Which list a profiles table edits, and how its rows are keyed.
+struct Profiles<P: Profile> {
+    /// Prefix of the rows' state keys — two tables must not share one.
+    key: &'static str,
+    list: fn(&Settings) -> &Vec<P>,
+    list_mut: fn(&mut Settings) -> &mut Vec<P>,
+}
+
+// By hand: a derive would ask `P: Copy`, and a profile is not.
+impl<P: Profile> Clone for Profiles<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Profile> Copy for Profiles<P> {}
+
+impl<P: Profile> Profiles<P> {
+    /// Changes a profile in place, if the index still exists.
+    ///
+    /// The index may be one frame stale: a subscription set up for row 2
+    /// outlives row 2's disappearance, and writing out of bounds would panic
+    /// in the middle of a render.
+    fn edit(self, index: usize, cx: &mut App, edit: impl FnOnce(&mut P)) {
+        Settings::update_global(cx, |s| {
+            if let Some(profile) = (self.list_mut)(s).get_mut(index) {
+                edit(profile);
+            }
+        });
+    }
+}
+
+/// The terminal's agent profiles.
+const AGENT_PROFILES: Profiles<settings::AgentProfile> = Profiles {
+    key: "claudhub-agent",
+    list: |s| &s.terminal.agents,
+    list_mut: |s| &mut s.terminal.agents,
+};
+
+/// The agents a chat tab speaks to over ACP.
+const CHAT_AGENTS: Profiles<crate::acp::Agent> = Profiles {
+    key: "claudhub-chat-agent",
+    list: |s| &s.terminal.chat_agents,
+    list_mut: |s| &mut s.terminal.chat_agents,
+};
+
+/// The state of one row of a profiles table, kept from one render to the next.
 ///
 /// The three subscriptions live inside it: dropped, they would be cut and the
 /// fields would stop writing into the settings on the next frame.
@@ -529,7 +645,7 @@ struct AgentField {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The agent profiles table.
+/// A profiles table.
 ///
 /// A bespoke field because there is nothing like it in gpui-component's form:
 /// these are rows added and removed, with three inputs each.
@@ -540,49 +656,69 @@ struct AgentField {
 /// would write into the settings what we thought we had deleted. Renaming a
 /// profile, on the other hand, does not change the count — so the fields keep
 /// their cursor while typing.
-fn agents_item() -> SettingItem {
+fn profiles_item<P: Profile>(
+    profiles: Profiles<P>,
+    title: SharedString,
+    help: SharedString,
+    add: SharedString,
+) -> SettingItem {
     SettingItem::new(
-        tr!("settings-agents"),
+        title,
         SettingField::render(move |_, window, cx| {
-            let profiles = Settings::global(cx).terminal.agents.clone();
-            let count = profiles.len();
-            let rows: Vec<_> = profiles
+            let list = (profiles.list)(Settings::global(cx)).clone();
+            let count = list.len();
+            let rows: Vec<_> = list
                 .iter()
                 .enumerate()
-                .map(|(index, profile)| agent_row(index, count, profile, window, cx))
+                .map(|(index, profile)| profile_row(profiles, index, count, profile, window, cx))
                 .collect();
             v_flex().w(px(460.)).gap_1().children(rows).child(
                 h_flex().child(
-                    Button::new("add-agent")
+                    Button::new(SharedString::from(format!("{}-add", profiles.key)))
                         .outline()
                         .small()
                         .icon(icon("plus"))
-                        .label(tr!("settings-agent-add"))
-                        .on_click(|_, _window, cx| {
+                        .label(add.clone())
+                        .on_click(move |_, _window, cx| {
                             Settings::update_global(cx, |s| {
-                                s.terminal.agents.push(settings::AgentProfile::default())
+                                (profiles.list_mut)(s).push(P::default())
                             });
                         }),
                 ),
             )
         }),
     )
-    .description(tr!("settings-agents-help"))
+    .description(help)
 }
 
-fn agent_row(
+fn agents_item() -> SettingItem {
+    profiles_item(
+        AGENT_PROFILES,
+        tr!("settings-agents"),
+        tr!("settings-agents-help"),
+        tr!("settings-agent-add"),
+    )
+}
+
+fn chat_agents_item() -> SettingItem {
+    profiles_item(
+        CHAT_AGENTS,
+        tr!("settings-chat-agents"),
+        tr!("settings-chat-agents-help"),
+        tr!("settings-chat-agent-add"),
+    )
+}
+
+fn profile_row<P: Profile>(
+    profiles: Profiles<P>,
     index: usize,
     count: usize,
-    profile: &settings::AgentProfile,
+    profile: &P,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let key = format!("claudhub-agent-{count}-{index}");
-    let (name, command, env) = (
-        profile.name.clone(),
-        profile.command_line(),
-        profile.env_line(),
-    );
+    let key = format!("{}-{count}-{index}", profiles.key);
+    let (name, command, env) = (profile.name(), profile.command_line(), profile.env_line());
     let state = window.use_keyed_state(SharedString::from(key), cx, move |window, cx| {
         let name_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -607,7 +743,7 @@ fn agent_row(
                         return;
                     }
                     let value = input.read(cx).value().to_string();
-                    edit_agent(index, cx, |profile| profile.name = value);
+                    profiles.edit(index, cx, |profile| profile.set_name(value));
                 },
             ),
             cx.subscribe(
@@ -617,13 +753,7 @@ fn agent_row(
                         return;
                     }
                     let value = input.read(cx).value().to_string();
-                    edit_agent(index, cx, |profile| {
-                        // The line is split honouring quotes: a path containing
-                        // a space must not become two arguments.
-                        let mut parts = settings::split_command(&value).into_iter();
-                        profile.command = parts.next().unwrap_or_default();
-                        profile.args = parts.collect();
-                    });
+                    profiles.edit(index, cx, |profile| profile.set_command_line(&value));
                 },
             ),
             cx.subscribe(
@@ -633,7 +763,7 @@ fn agent_row(
                         return;
                     }
                     let value = input.read(cx).value().to_string();
-                    edit_agent(index, cx, |profile| profile.set_env_line(&value));
+                    profiles.edit(index, cx, |profile| profile.set_env_line(&value));
                 },
             ),
         ];
@@ -653,18 +783,22 @@ fn agent_row(
         .child(div().flex_1().child(Input::new(&command).small()))
         .child(div().w(px(130.)).child(Input::new(&env).small()))
         .child(
-            Button::new(("remove-agent", index))
-                .ghost()
-                .small()
-                .icon(icon("trash-2"))
-                .tooltip(tr!("settings-agent-remove"))
-                .on_click(move |_, _window, cx| {
-                    Settings::update_global(cx, |s| {
-                        if index < s.terminal.agents.len() {
-                            s.terminal.agents.remove(index);
-                        }
-                    });
-                }),
+            Button::new((
+                SharedString::from(format!("{}-remove", profiles.key)),
+                index,
+            ))
+            .ghost()
+            .small()
+            .icon(icon("trash-2"))
+            .tooltip(tr!("settings-agent-remove"))
+            .on_click(move |_, _window, cx| {
+                Settings::update_global(cx, |s| {
+                    let list = (profiles.list_mut)(s);
+                    if index < list.len() {
+                        list.remove(index);
+                    }
+                });
+            }),
         )
 }
 
@@ -699,19 +833,6 @@ fn default_agent_item() -> SettingItem {
         }),
     )
     .description(tr!("settings-default-agent-help"))
-}
-
-/// Changes a profile in place, if the index still exists.
-///
-/// The index may be one frame stale: a subscription set up for row 2 outlives
-/// row 2's disappearance, and writing out of bounds would panic in the middle of
-/// a render.
-fn edit_agent(index: usize, cx: &mut App, edit: impl FnOnce(&mut settings::AgentProfile)) {
-    Settings::update_global(cx, |s| {
-        if let Some(profile) = s.terminal.agents.get_mut(index) {
-            edit(profile);
-        }
-    });
 }
 
 /// The registry's palettes, light ones and dark ones apart.
@@ -871,6 +992,7 @@ fn terminal_page(environment: &Environment) -> SettingPage {
                 .item(shell_item(environment.shells.clone()))
                 .item(agents_item())
                 .item(default_agent_item())
+                .item(chat_agents_item())
                 .item(
                     SettingItem::new(
                         tr!("settings-agent-hooks"),

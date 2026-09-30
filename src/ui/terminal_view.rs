@@ -2866,6 +2866,9 @@ impl ClaudhubApp {
                         .insert(crate::ui::overview::Node::Terminal(id), offset);
                 }
             }
+            // And its chats, after its shells: the tabs come back in the order
+            // the bar had them — shells first — near enough.
+            self.revive_chats(worktree, window, cx);
         }
     }
 
@@ -2933,16 +2936,23 @@ impl ClaudhubApp {
                     .map(|(program, args, _)| (program.clone(), args.clone())),
             });
         }
+        // The chat tabs ride along: the same worktrees, the same write.
+        let mut chats = self.saved_chats(cx);
         crate::ui::store::Store::update_global_if(cx, |store| {
             let mut changed = false;
             for (worktree, list) in kept {
+                let chats = chats.remove(&worktree).unwrap_or_default();
                 let present = store.worktrees.contains_key(&worktree);
-                if !present && list.is_empty() {
+                if !present && list.is_empty() && chats.is_empty() {
                     continue;
                 }
                 let entry = store.worktrees.entry(worktree).or_default();
                 if entry.terminals != list {
                     entry.terminals = list;
+                    changed = true;
+                }
+                if entry.chats != chats {
+                    entry.chats = chats;
                     changed = true;
                 }
             }
