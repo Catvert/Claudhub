@@ -1258,9 +1258,7 @@ impl ChatView {
                         .unwrap_or_default()
                         .into()
                 };
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx).placeholder(SharedString::from(placeholder))
-                });
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
                 (field.key.clone(), input)
             })
             .collect();
