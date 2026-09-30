@@ -395,7 +395,11 @@ de `layout.json` — mais aucun pty ; sur l'accueil Focus, il est un sous-onglet
 et une colonne à côté des terminaux, et son signal (au travail, en attente
 d'une permission) rejoint le leur. Le client n'offre à l'agent **ni `fs/*` ni
 `terminal/*`** : l'agent travaille avec ses propres outils, et ce qu'il demande
-quand même est refusé, jamais laissé en suspens. La vue n'envoie rien
+quand même est refusé, jamais laissé en suspens. Il annonce en revanche les
+**formulaires** (`elicitation.form`) — sans eux, l'adaptateur Claude **retire
+`AskUserQuestion`** et Claude pose ses questions en texte — et la **sortie des
+commandes** sur leur appel (`_meta.terminal_output`, l'extension de Zed), qui
+n'arrive qu'à la fin de la commande : c'est le SDK de Claude qui la retient. La vue n'envoie rien
 elle-même : elle émet `ChatEvent::Send`, qu'on reçoit hors de la pompe ; un
 rendu lit les copies d'`OpenChat` (`label`, `doing`), jamais la vue. **Il
 survit à la fenêtre** (`SavedChat`, écrit avec les terminaux) : rouvert par

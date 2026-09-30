@@ -1,5 +1,10 @@
 {
   "chat-new": "New chat with an agent",
+  "chat-form-answer": "Answer",
+  "chat-form-other": "Other",
+  "chat-form-other-help": "Your own answer, or a note on the option chosen (optional)",
+  "chat-form-skip": "Skip",
+  "chat-form-skip-help": "The agent is told you skipped, and goes on",
   "chat-exit-code": "exit %{code}",
   "chat-exit-ended": "ended",
   "chat-exit-failed": "failed",

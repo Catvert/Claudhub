@@ -32,6 +32,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
@@ -49,8 +50,8 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::acp::chat::{
-    command_matches, mention_at_end, mentioned_files, Chat, Choice, ConfigOption, Entry, Notice,
-    OptionKind, Phase, Status, ToolCall, ToolContent,
+    command_matches, mention_at_end, mentioned_files, Answer, Chat, Choice, ConfigOption, Entry,
+    Field, FieldKind, Notice, OptionKind, Phase, Status, ToolCall, ToolContent,
 };
 use crate::tr;
 use crate::ui::icons::icon;
@@ -152,6 +153,8 @@ pub struct ChatView {
     files_asked: bool,
     /// The select whose picker is open, and the picker.
     picker: Option<(String, Entity<OptionPicker>)>,
+    /// What the user has given the form the agent waits on so far.
+    form: Option<FormState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -202,6 +205,7 @@ impl ChatView {
             files: Rc::new(Vec::new()),
             files_asked: false,
             picker: None,
+            form: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -1213,6 +1217,312 @@ impl ChatView {
     }
 }
 
+/// What the user has given a form so far.
+///
+/// Its text fields are entities, built once when the form arrives — in the
+/// render, the one place that has the window a field is created with, and
+/// kept: a field built again at every frame loses what is typed into it.
+struct FormState {
+    id: String,
+    picks: std::collections::HashMap<String, Vec<String>>,
+    toggles: std::collections::HashMap<String, bool>,
+    inputs: std::collections::HashMap<String, Entity<InputState>>,
+}
+
+impl ChatView {
+    /// Builds the form's state when a form arrives, drops it when it goes.
+    fn follow_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &self.chat.form else {
+            self.form = None;
+            return;
+        };
+        if self
+            .form
+            .as_ref()
+            .is_some_and(|state| state.id == form.id())
+        {
+            return;
+        }
+        let inputs = form
+            .fields
+            .iter()
+            .filter(|field| matches!(field.kind, FieldKind::Text | FieldKind::Number { .. }))
+            .map(|field| {
+                let placeholder: SharedString = if is_other(field) {
+                    tr!("chat-form-other-help")
+                } else {
+                    field
+                        .description
+                        .clone()
+                        .or(field.title.clone())
+                        .unwrap_or_default()
+                        .into()
+                };
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder(SharedString::from(placeholder))
+                });
+                (field.key.clone(), input)
+            })
+            .collect();
+        self.form = Some(FormState {
+            id: form.id(),
+            picks: Default::default(),
+            toggles: Default::default(),
+            inputs,
+        });
+    }
+
+    fn pick(&mut self, field: &Field, value: &str, cx: &mut Context<Self>) {
+        let Some(state) = self.form.as_mut() else {
+            return;
+        };
+        let picks = state.picks.entry(field.key.clone()).or_default();
+        match field.kind {
+            FieldKind::Many(_) => {
+                if let Some(at) = picks.iter().position(|pick| pick == value) {
+                    picks.remove(at);
+                } else {
+                    picks.push(value.to_string());
+                }
+            }
+            _ => {
+                // A second press on the same option takes it back: nothing is
+                // required, and skipping one question must stay possible.
+                if picks.first().map(String::as_str) == Some(value) {
+                    picks.clear();
+                } else {
+                    *picks = vec![value.to_string()];
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn answer_form(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &self.form else {
+            return;
+        };
+        let mut answers = std::collections::HashMap::new();
+        for (key, picks) in &state.picks {
+            answers.insert(key.clone(), Answer::Picks(picks.clone()));
+        }
+        for (key, on) in &state.toggles {
+            answers.insert(key.clone(), Answer::Boolean(*on));
+        }
+        for (key, input) in &state.inputs {
+            answers.insert(
+                key.clone(),
+                Answer::Text(input.read(cx).value().to_string()),
+            );
+        }
+        let line = self.chat.answer_form(&answers);
+        self.form = None;
+        self.send(line.into_iter().collect(), cx);
+    }
+
+    fn decline_form(&mut self, cx: &mut Context<Self>) {
+        let line = self.chat.decline_form();
+        self.form = None;
+        self.send(line.into_iter().collect(), cx);
+    }
+
+    /// The form the agent waits on — Claude's questions — above the
+    /// composer, framed in the colour of what waits on a hand.
+    fn render_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let form = self.chat.form.as_ref()?;
+        let state = self.form.as_ref()?;
+        let theme = cx.theme().clone();
+        let fields: Vec<AnyElement> = form
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(ix, field)| self.render_field(ix, field, state, cx))
+            .collect();
+        Some(
+            v_flex()
+                .flex_none()
+                .mx_2()
+                .mt_2()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.warning.opacity(0.7))
+                .bg(theme.background)
+                .child(
+                    v_flex()
+                        .id("chat-form")
+                        .max_h(px(420.))
+                        .overflow_y_scroll()
+                        .p_3()
+                        .gap_3()
+                        .when(!form.message.is_empty(), |el| {
+                            el.child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_start()
+                                    .text_sm()
+                                    .child(icon("info").xsmall().text_color(theme.warning))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .child(SharedString::from(form.message.clone())),
+                                    ),
+                            )
+                        })
+                        .children(fields),
+                )
+                .child(
+                    h_flex()
+                        .justify_end()
+                        .gap_1()
+                        .px_3()
+                        .pb_2()
+                        .child(
+                            Button::new("chat-form-skip")
+                                .ghost()
+                                .small()
+                                .label(tr!("chat-form-skip"))
+                                .tooltip(tr!("chat-form-skip-help"))
+                                .on_click(cx.listener(|this, _, _, cx| this.decline_form(cx))),
+                        )
+                        .child(
+                            Button::new("chat-form-answer")
+                                .primary()
+                                .small()
+                                .label(tr!("chat-form-answer"))
+                                .on_click(cx.listener(|this, _, _, cx| this.answer_form(cx))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_field(
+        &self,
+        ix: usize,
+        field: &Field,
+        state: &FormState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let title: Option<SharedString> = if is_other(field) {
+            Some(tr!("chat-form-other"))
+        } else {
+            field.title.clone().map(SharedString::from)
+        };
+        let head = v_flex()
+            .gap_0p5()
+            .children(title.map(|title| {
+                div()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(title)
+            }))
+            .children(
+                field
+                    .description
+                    .clone()
+                    // A text field says its description as its placeholder.
+                    .filter(|_| !matches!(field.kind, FieldKind::Text | FieldKind::Number { .. }))
+                    .map(|description| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(description))
+                    }),
+            );
+        let body: AnyElement = match &field.kind {
+            FieldKind::One(choices) | FieldKind::Many(choices) => {
+                let many = matches!(field.kind, FieldKind::Many(_));
+                let picked = state.picks.get(&field.key).cloned().unwrap_or_default();
+                v_flex()
+                    .gap_1()
+                    .children(choices.iter().enumerate().map(|(n, choice)| {
+                        let on = picked.contains(&choice.value);
+                        let glyph = match (many, on) {
+                            (true, true) => "square-check",
+                            (true, false) => "square",
+                            (false, true) => "circle-dot",
+                            (false, false) => "circle",
+                        };
+                        let (field, value) = (field.clone(), choice.value.clone());
+                        h_flex()
+                            .id(("chat-form-choice", ix * 64 + n))
+                            .items_start()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(if on { theme.primary } else { theme.border })
+                            .when(on, |el| el.bg(theme.list_active))
+                            .hover(|el| el.bg(theme.list_hover))
+                            .cursor_pointer()
+                            .child(icon(glyph).xsmall().mt_0p5().text_color(if on {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground
+                            }))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .child(SharedString::from(choice.title.clone())),
+                                    )
+                                    .children(choice.description.clone().map(|description| {
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(SharedString::from(description))
+                                    })),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pick(&field, &value, cx);
+                            }))
+                    }))
+                    .into_any_element()
+            }
+            FieldKind::Text | FieldKind::Number { .. } => match state.inputs.get(&field.key) {
+                Some(input) => Input::new(input).small().into_any_element(),
+                None => div().into_any_element(),
+            },
+            FieldKind::Boolean => {
+                let on = state.toggles.get(&field.key).copied().unwrap_or(false);
+                let key = field.key.clone();
+                Checkbox::new(("chat-form-toggle", ix))
+                    .checked(on)
+                    .label(SharedString::from(
+                        field.title.clone().unwrap_or_else(|| field.key.clone()),
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(state) = this.form.as_mut() {
+                            let toggle = state.toggles.entry(key.clone()).or_default();
+                            *toggle = !*toggle;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .gap_1()
+            .when(!matches!(field.kind, FieldKind::Boolean), |el| {
+                el.child(head)
+            })
+            .child(body)
+            .into_any_element()
+    }
+}
+
+/// The free-text companion Claude's adapter puts after each question of an
+/// `AskUserQuestion` (`question_<n>_custom`, titled in English): said in the
+/// window's words.
+fn is_other(field: &Field) -> bool {
+    field.key.ends_with("_custom") && field.title.as_deref() == Some("Other")
+}
+
 impl Focusable for ChatView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.input.focus_handle(cx)
@@ -1220,13 +1530,15 @@ impl Focusable for ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        self.follow_form(window, cx);
         v_flex()
             .size_full()
             .bg(theme.background)
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
+            .children(self.render_form(cx))
             .children(self.render_plan(cx))
             .children(self.render_working(cx))
             .child(self.render_composer(cx))

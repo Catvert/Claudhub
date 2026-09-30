@@ -1,5 +1,10 @@
 {
   "chat-new": "Nouveau chat avec un agent",
+  "chat-form-answer": "Répondre",
+  "chat-form-other": "Autre",
+  "chat-form-other-help": "Votre propre réponse, ou une note sur l'option choisie (facultatif)",
+  "chat-form-skip": "Passer",
+  "chat-form-skip-help": "L'agent apprend que vous avez passé, et continue",
   "chat-exit-code": "code de sortie %{code}",
   "chat-exit-ended": "terminé",
   "chat-exit-failed": "échoué",

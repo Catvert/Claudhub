@@ -436,6 +436,8 @@ pub struct Chat {
     pub title: Option<String>,
     /// The earlier conversations, once asked for (`list_sessions`).
     pub sessions: Option<Vec<SessionSummary>>,
+    /// The form the agent waits on (`elicitation/create`) — see [`Form`].
+    pub form: Option<Form>,
 }
 
 impl Chat {
@@ -459,6 +461,7 @@ impl Chat {
             usage: None,
             title: None,
             sessions: None,
+            form: None,
         }
     }
 
@@ -488,9 +491,28 @@ impl Chat {
 
     /// Whether a permission question is waiting on the user.
     pub fn is_asking(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Tool(tool) if tool.permission.is_some()))
+        self.form.is_some()
+            || self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Tool(tool) if tool.permission.is_some()))
+    }
+
+    /// The user filled the form in: `accept`, with what the fields hold.
+    pub fn answer_form(&mut self, answers: &HashMap<String, Answer>) -> Option<String> {
+        let form = self.form.take()?;
+        let content = form.content(answers);
+        Some(response(
+            form.request,
+            Ok(json!({ "action": "accept", "content": content })),
+        ))
+    }
+
+    /// The user skipped the form: `decline` — the agent is told so and goes
+    /// on, where `cancel` would stop the tool call.
+    pub fn decline_form(&mut self) -> Option<String> {
+        let form = self.form.take()?;
+        Some(response(form.request, Ok(json!({ "action": "decline" }))))
     }
 
     /// One line from the agent; returns the lines to write back.
@@ -881,6 +903,9 @@ impl Chat {
     // — What the agent asks of us ————————————————————————————————————
 
     fn asked(&mut self, id: Value, method: &str, params: &Value) -> Vec<String> {
+        if method == "elicitation/create" {
+            return self.form_asked(id, params);
+        }
         if method != "session/request_permission" {
             // Nothing else was offered at `initialize`; an answer is owed all
             // the same, or the agent waits for ever.
@@ -915,9 +940,35 @@ impl Chat {
         }
     }
 
+    /// A form the agent asks to be filled. One at a time: the agent waits on
+    /// it, and a second one while the first is open is refused rather than
+    /// hidden behind it.
+    fn form_asked(&mut self, id: Value, params: &Value) -> Vec<String> {
+        if params["mode"].as_str().is_some_and(|mode| mode != "form") {
+            return vec![response(id, Ok(json!({ "action": "decline" })))];
+        }
+        if self.form.is_some() {
+            return vec![response(id, Ok(json!({ "action": "decline" })))];
+        }
+        match Form::parse(id.clone(), params) {
+            Some(form) => {
+                self.form = Some(form);
+                Vec::new()
+            }
+            // Nothing this view can show: declined, which the agent reads as
+            // "skipped" and goes on.
+            None => vec![response(id, Ok(json!({ "action": "decline" })))],
+        }
+    }
+
     /// The open questions, answered `cancelled`.
     fn cancel_permissions(&mut self) -> Vec<String> {
-        let mut lines = Vec::new();
+        let mut lines: Vec<String> = self
+            .form
+            .take()
+            .map(|form| response(form.request, Ok(json!({ "action": "cancel" }))))
+            .into_iter()
+            .collect();
         for entry in &mut self.entries {
             if let Entry::Tool(tool) = entry {
                 if let Some(permission) = tool.permission.take() {
@@ -933,6 +984,7 @@ impl Chat {
 
     /// The open questions, forgotten: the turn they belonged to is over.
     fn drop_permissions(&mut self) {
+        self.form = None;
         for entry in &mut self.entries {
             if let Entry::Tool(tool) = entry {
                 tool.permission = None;
@@ -1078,7 +1130,11 @@ fn initialize_params() -> Value {
             "terminal": false,
             // A command's output reported on its call, in pieces — see
             // `Terminal`.
-            "_meta": { "terminal_output": true, "terminal_output_delta": true }
+            "_meta": { "terminal_output": true, "terminal_output_delta": true },
+            // Forms: what makes Claude's `AskUserQuestion` available at all —
+            // without it the adapter takes the tool away, and the questions
+            // come back as text to answer "by letter". See `Form`.
+            "elicitation": { "form": {} }
         },
         "clientInfo": {
             "name": "claudhub",
@@ -1222,6 +1278,183 @@ fn parse_plan(entries: &Value) -> Vec<PlanEntry> {
             status: text(&e["status"]),
         })
         .collect()
+}
+
+/// A form the agent waits on (`elicitation/create`, form mode): a message
+/// and fields described by a flat JSON Schema.
+///
+/// **Claude's `AskUserQuestion` arrives this way** — each question a select
+/// (`oneOf` of titled options, or an array of `anyOf` for several picks),
+/// followed by an optional free-text field of its own, the CLI's "Other" —
+/// and so does anything else the agent asks through its MCP servers. The
+/// shapes read here are the ones the protocol names; a field of another shape
+/// is left out, and a form left with none is declined.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Form {
+    /// The agent's request id, echoed on the answer.
+    request: Value,
+    pub message: String,
+    pub fields: Vec<Field>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    /// The property's key — what the answer is filed under.
+    pub key: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub kind: FieldKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldKind {
+    /// One of these.
+    One(Vec<FieldChoice>),
+    /// Any of these.
+    Many(Vec<FieldChoice>),
+    Text,
+    Boolean,
+    /// A number — `integer` when the schema says so.
+    Number {
+        integer: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldChoice {
+    /// What is sent back.
+    pub value: String,
+    /// What is shown.
+    pub title: String,
+    pub description: Option<String>,
+}
+
+/// What the user gave a field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    Picks(Vec<String>),
+    Text(String),
+    Boolean(bool),
+}
+
+impl Form {
+    /// What tells this form from the next one: the agent's request id.
+    pub fn id(&self) -> String {
+        self.request.to_string()
+    }
+
+    fn parse(request: Value, params: &Value) -> Option<Self> {
+        let schema = &params["requestedSchema"];
+        let fields: Vec<Field> = schema["properties"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, property)| {
+                Some(Field {
+                    key: key.clone(),
+                    title: property["title"].as_str().map(str::to_string),
+                    description: property["description"].as_str().map(str::to_string),
+                    kind: field_kind(property)?,
+                })
+            })
+            .collect();
+        if fields.is_empty() {
+            return None;
+        }
+        Some(Self {
+            request,
+            message: text(&params["message"]),
+            fields,
+        })
+    }
+
+    /// The answer's `content`: each field that was given something, in the
+    /// type its schema asks for. An empty text, a number that does not read,
+    /// no pick: left out, which is what "optional" means.
+    pub fn content(&self, answers: &HashMap<String, Answer>) -> Value {
+        let mut content = serde_json::Map::new();
+        for field in &self.fields {
+            let Some(answer) = answers.get(&field.key) else {
+                continue;
+            };
+            let value = match (&field.kind, answer) {
+                (FieldKind::One(_), Answer::Picks(picks)) => picks.first().map(|pick| json!(pick)),
+                (FieldKind::Many(_), Answer::Picks(picks)) if !picks.is_empty() => {
+                    Some(json!(picks))
+                }
+                (FieldKind::Text, Answer::Text(value)) if !value.trim().is_empty() => {
+                    Some(json!(value.trim()))
+                }
+                (FieldKind::Boolean, Answer::Boolean(value)) => Some(json!(value)),
+                (FieldKind::Number { integer: true }, Answer::Text(value)) => {
+                    value.trim().parse::<i64>().ok().map(|n| json!(n))
+                }
+                (FieldKind::Number { integer: false }, Answer::Text(value)) => {
+                    value.trim().parse::<f64>().ok().map(|n| json!(n))
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                content.insert(field.key.clone(), value);
+            }
+        }
+        Value::Object(content)
+    }
+}
+
+/// A property's kind, from the few shapes the protocol names.
+fn field_kind(property: &Value) -> Option<FieldKind> {
+    match property["type"].as_str()? {
+        "string" => Some(match choices(property) {
+            Some(choices) => FieldKind::One(choices),
+            None => FieldKind::Text,
+        }),
+        "array" => choices(&property["items"]).map(FieldKind::Many),
+        "boolean" => Some(FieldKind::Boolean),
+        "number" => Some(FieldKind::Number { integer: false }),
+        "integer" => Some(FieldKind::Number { integer: true }),
+        _ => None,
+    }
+}
+
+/// A select's options: titled (`oneOf` / `anyOf` of `const` and `title`), or
+/// a bare `enum` with its optional `enumNames`.
+fn choices(schema: &Value) -> Option<Vec<FieldChoice>> {
+    let titled = schema["oneOf"].as_array().or(schema["anyOf"].as_array());
+    if let Some(options) = titled {
+        let choices: Vec<FieldChoice> = options
+            .iter()
+            .filter_map(|option| {
+                let value = option["const"].as_str()?.to_string();
+                Some(FieldChoice {
+                    title: option["title"].as_str().unwrap_or(&value).to_string(),
+                    description: option["description"].as_str().map(str::to_string),
+                    value,
+                })
+            })
+            .collect();
+        return (!choices.is_empty()).then_some(choices);
+    }
+    let values = schema["enum"].as_array()?;
+    let names = schema["enumNames"].as_array();
+    let choices: Vec<FieldChoice> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, value)| {
+            let value = value.as_str()?.to_string();
+            let title = names
+                .and_then(|names| names.get(ix))
+                .and_then(Value::as_str)
+                .unwrap_or(&value)
+                .to_string();
+            Some(FieldChoice {
+                value,
+                title,
+                description: None,
+            })
+        })
+        .collect();
+    (!choices.is_empty()).then_some(choices)
 }
 
 /// The slash commands the composer offers for what is typed: a `/` and a
@@ -1860,6 +2093,115 @@ mod tests {
         keep_tail(&mut long);
         assert!(long.len() <= OUTPUT_KEPT);
         assert!(long.ends_with("last line"));
+    }
+
+    /// As Claude's adapter really builds an `AskUserQuestion` form
+    /// (`askUserQuestionsToCreateRequest`, claude-agent-acp 0.84).
+    fn ask_user_question() -> Value {
+        json!({
+            "jsonrpc": "2.0", "id": 21, "method": "elicitation/create",
+            "params": {
+                "mode": "form", "sessionId": "s1", "toolCallId": "toolu_1",
+                "message": "Please answer the following questions.",
+                "requestedSchema": { "type": "object", "properties": {
+                    "question_0": { "type": "string", "title": "Next", "description": "What now?",
+                        "oneOf": [
+                            { "const": "Merge", "title": "Merge", "description": "Run just ci, then merge" },
+                            { "const": "Review", "title": "Review" } ] },
+                    "question_0_custom": { "type": "string", "title": "Other",
+                        "description": "Type your own answer (optional)." },
+                    "question_1": { "type": "array", "title": "Checks",
+                        "items": { "anyOf": [ { "const": "fmt", "title": "fmt" },
+                                              { "const": "clippy", "title": "clippy" } ] } },
+                    "ignored": { "type": "object" }
+                } }
+            }
+        })
+    }
+
+    #[test]
+    fn claude_asks_its_questions_as_a_form() {
+        let init = super::initialize_params();
+        assert!(init["clientCapabilities"]["elicitation"]["form"].is_object());
+        let mut chat = ready();
+        chat.prompt("what next?").unwrap();
+        assert!(chat.receive(&ask_user_question().to_string()).is_empty());
+        assert!(chat.is_asking());
+        let form = chat.form.clone().unwrap();
+        assert_eq!(form.fields.len(), 3);
+        assert_eq!(form.fields[0].key, "question_0");
+        match &form.fields[0].kind {
+            FieldKind::One(choices) => {
+                assert_eq!(
+                    choices[0].description.as_deref(),
+                    Some("Run just ci, then merge")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(form.fields[1].kind, FieldKind::Text);
+        assert!(matches!(form.fields[2].kind, FieldKind::Many(_)));
+        // A second form while the first is open is declined, not hidden.
+        let second = sent(&chat.receive(&ask_user_question().to_string())[0]);
+        assert_eq!(second["result"]["action"], "decline");
+        let answers = HashMap::from([
+            (
+                "question_0".to_string(),
+                Answer::Picks(vec!["Merge".into()]),
+            ),
+            ("question_0_custom".to_string(), Answer::Text("  ".into())),
+            (
+                "question_1".to_string(),
+                Answer::Picks(vec!["fmt".into(), "clippy".into()]),
+            ),
+        ]);
+        let line = sent(&chat.answer_form(&answers).unwrap());
+        assert_eq!(line["id"], 21);
+        assert_eq!(line["result"]["action"], "accept");
+        assert_eq!(
+            line["result"]["content"],
+            json!({ "question_0": "Merge", "question_1": ["fmt", "clippy"] })
+        );
+        assert!(!chat.is_asking());
+    }
+
+    #[test]
+    fn a_form_is_skipped_declined_or_stopped_with_its_turn() {
+        let mut chat = ready();
+        chat.prompt("x").unwrap();
+        chat.receive(&ask_user_question().to_string());
+        let line = sent(&chat.decline_form().unwrap());
+        assert_eq!(line["result"]["action"], "decline");
+        chat.receive(&ask_user_question().to_string());
+        let lines: Vec<Value> = chat.cancel().iter().map(|l| sent(l)).collect();
+        assert_eq!(lines[0]["result"]["action"], "cancel");
+        // A form with nothing this view can show is declined at once.
+        let odd = json!({ "jsonrpc": "2.0", "id": 5, "method": "elicitation/create",
+            "params": { "mode": "form", "message": "?", "requestedSchema": { "type": "object",
+                "properties": { "x": { "type": "object" } } } } });
+        let line = sent(&chat.receive(&odd.to_string())[0]);
+        assert_eq!(line["result"]["action"], "decline");
+        // And numbers read as numbers, enums as choices.
+        let form = Form::parse(
+            json!(1),
+            &json!({ "message": "m", "requestedSchema": {
+            "properties": {
+                "n": { "type": "integer" },
+                "e": { "type": "string", "enum": ["a", "b"], "enumNames": ["A"] } } } }),
+        )
+        .unwrap();
+        let content = form.content(&HashMap::from([
+            ("n".to_string(), Answer::Text(" 42 ".into())),
+            ("e".to_string(), Answer::Picks(vec!["b".into()])),
+        ]));
+        assert_eq!(content, json!({ "n": 42, "e": "b" }));
+        match &form.fields.iter().find(|f| f.key == "e").unwrap().kind {
+            FieldKind::One(choices) => {
+                assert_eq!(choices[0].title, "A");
+                assert_eq!(choices[1].title, "b");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
