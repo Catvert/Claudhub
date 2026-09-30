@@ -1,5 +1,10 @@
 {
   "chat-new": "New chat with an agent",
+  "chat-exit-code": "exit %{code}",
+  "chat-exit-ended": "ended",
+  "chat-exit-failed": "failed",
+  "chat-output-more": "… %{count} lines above — show all",
+  "chat-output-waiting": "running…",
   "chat-new-title": "New chat · %{agent}",
   "chat-new-menu": "New chat",
   "chat-new-with": "New chat with %{agent}",

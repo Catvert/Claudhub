@@ -190,8 +190,165 @@ pub struct ToolCall {
     /// What the tool was called with — shown when the call says nothing
     /// else, a command line or a pattern being the whole of what it did.
     pub raw_input: Value,
+    /// The command's terminal, when the agent reports one — see
+    /// [`Terminal`].
+    pub terminal: Option<Terminal>,
     pub permission: Option<Permission>,
     pub expanded: bool,
+}
+
+/// A command's output, as the agent reports it on its tool call.
+///
+/// **Zed's extension, not the protocol's `terminal/*`.** An agent that runs
+/// its commands itself — Claude's adapter never asks the client to — reports
+/// them in the call's `_meta`: `terminal_info` opens the terminal,
+/// `terminal_output` (whole) or `terminal_output_delta` (a piece to append)
+/// carry the output, `terminal_exit` the end. Offered at `initialize`
+/// (`clientCapabilities._meta`); an agent that does not know it sends the
+/// output as a fenced block of the call's content, which [`ToolCall::output`]
+/// reads the same way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Terminal {
+    /// Escape sequences taken out as it arrives: the view paints plain text,
+    /// and stripping at every frame would be paid for every visible row.
+    pub output: String,
+    pub exit: Option<Exit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exit {
+    pub code: Option<i64>,
+    pub signal: Option<String>,
+}
+
+impl Exit {
+    /// A code of zero, and no signal.
+    pub fn succeeded(&self) -> bool {
+        self.code == Some(0) && self.signal.is_none()
+    }
+}
+
+/// How much of a command's output is kept: its tail. A build's log runs to
+/// megabytes, and what one reads of it in a chat is where it ended.
+const OUTPUT_KEPT: usize = 256 * 1024;
+
+impl ToolCall {
+    /// The command line the call ran, from what it was called with: a string,
+    /// or an argv — `bash -lc <script>` read as its script.
+    pub fn command(&self) -> Option<String> {
+        match &self.raw_input["command"] {
+            Value::String(line) if !line.trim().is_empty() => Some(line.clone()),
+            Value::Array(argv) => {
+                let argv: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+                match argv.as_slice() {
+                    [shell, flag, script]
+                        if shell.ends_with("sh")
+                            && flag.starts_with('-')
+                            && flag.ends_with('c') =>
+                    {
+                        Some(script.to_string())
+                    }
+                    [] => None,
+                    argv => Some(argv.join(" ")),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether this call ran a command — the card then shows its output.
+    pub fn is_command(&self) -> bool {
+        self.terminal.is_some() || self.kind == "execute"
+    }
+
+    /// What the command printed: the terminal's, or — from an agent without
+    /// the extension — the call's text content, its fence taken off.
+    pub fn output(&self) -> Option<String> {
+        if let Some(terminal) = &self.terminal {
+            return Some(terminal.output.clone());
+        }
+        if self.kind != "execute" {
+            return None;
+        }
+        let texts: Vec<String> = self
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ToolContent::Text(text) => Some(unfence(text)),
+                ToolContent::Diff { .. } => None,
+            })
+            .collect();
+        (!texts.is_empty()).then(|| crate::text::strip_ansi(&texts.join("\n")))
+    }
+
+    /// Reads what `_meta` says of the call's terminal.
+    fn read_terminal(&mut self, meta: &Value) {
+        if meta["terminal_info"].is_object() && self.terminal.is_none() {
+            self.terminal = Some(Terminal::default());
+        }
+        if let Some(data) = meta["terminal_output"]["data"].as_str() {
+            let terminal = self.terminal.get_or_insert_with(Terminal::default);
+            terminal.output = crate::text::strip_ansi(data);
+            keep_tail(&mut terminal.output);
+        }
+        if let Some(data) = meta["terminal_output_delta"]["data"].as_str() {
+            let terminal = self.terminal.get_or_insert_with(Terminal::default);
+            terminal.output.push_str(&crate::text::strip_ansi(data));
+            keep_tail(&mut terminal.output);
+        }
+        let exit = &meta["terminal_exit"];
+        if exit.is_object() {
+            let terminal = self.terminal.get_or_insert_with(Terminal::default);
+            terminal.exit = Some(Exit {
+                code: exit["exit_code"].as_i64(),
+                signal: exit["signal"].as_str().map(str::to_string),
+            });
+        }
+    }
+}
+
+/// Drops the head of an output past what is kept, on a line when it can.
+fn keep_tail(output: &mut String) {
+    if output.len() <= OUTPUT_KEPT {
+        return;
+    }
+    let mut cut = output.len() - OUTPUT_KEPT;
+    while !output.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let cut = output[cut..].find('\n').map_or(cut, |line| cut + line + 1);
+    output.drain(..cut);
+}
+
+/// A fenced block's body; any other text as it is.
+fn unfence(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return text.to_string();
+    };
+    let body = rest.split_once('\n').map_or("", |(_, body)| body);
+    body.strip_suffix("```")
+        .unwrap_or(body)
+        .trim_end_matches('\n')
+        .to_string()
+}
+
+/// The last `lines` lines of a text, and how many came before them.
+pub fn tail(text: &str, lines: usize) -> (&str, usize) {
+    let text = text.trim_end_matches('\n');
+    let total = if text.is_empty() {
+        0
+    } else {
+        text.matches('\n').count() + 1
+    };
+    if total <= lines {
+        return (text, 0);
+    }
+    let mut start = text.len();
+    for _ in 0..lines {
+        start = text[..start].rfind('\n').unwrap_or(0);
+    }
+    (&text[start + 1..], total - lines)
 }
 
 // One per line of the conversation, walked in order: boxing the tool call
@@ -871,6 +1028,7 @@ impl Chat {
             if !update["rawInput"].is_null() {
                 tool.raw_input = update["rawInput"].clone();
             }
+            tool.read_terminal(&update["_meta"]);
             return;
         }
         self.entries.push(Entry::Tool(ToolCall {
@@ -880,10 +1038,14 @@ impl Chat {
             content: content.unwrap_or_default(),
             locations: locations.unwrap_or_default(),
             raw_input: update["rawInput"].clone(),
+            terminal: None,
             permission: None,
             expanded: false,
             id,
         }));
+        if let Some(Entry::Tool(tool)) = self.entries.last_mut() {
+            tool.read_terminal(&update["_meta"]);
+        }
     }
 }
 
@@ -893,7 +1055,10 @@ fn initialize_params() -> Value {
         "protocolVersion": PROTOCOL_VERSION,
         "clientCapabilities": {
             "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false
+            "terminal": false,
+            // A command's output reported on its call, in pieces — see
+            // `Terminal`.
+            "_meta": { "terminal_output": true, "terminal_output_delta": true }
         },
         "clientInfo": {
             "name": "claudhub",
@@ -1547,6 +1712,94 @@ mod tests {
         let lines = chat.new_chat();
         assert_eq!(sent(lines.last().unwrap())["method"], "session/new");
         assert_eq!(chat.session, None);
+    }
+
+    #[test]
+    fn a_command_reports_its_terminal_on_its_call() {
+        let mut chat = ready();
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "t9", "title": "cargo test",
+                    "kind": "execute", "status": "in_progress",
+                    "rawInput": { "command": "cargo test", "description": "Run the tests" },
+                    "_meta": { "terminal_info": { "terminal_id": "t9" } } }),
+        );
+        for piece in ["running 3 tests\n", "\u{1b}[32mok\u{1b}[0m\n"] {
+            update(
+                &mut chat,
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t9",
+                        "_meta": { "terminal_output_delta": { "terminal_id": "t9", "data": piece } } }),
+            );
+        }
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t9", "status": "completed",
+                    "content": [{ "type": "terminal", "terminalId": "t9" }],
+                    "_meta": { "terminal_exit": { "terminal_id": "t9", "exit_code": 101, "signal": null } } }),
+        );
+        let Entry::Tool(tool) = &chat.entries[0] else {
+            panic!("{:?}", chat.entries);
+        };
+        assert_eq!(tool.command().as_deref(), Some("cargo test"));
+        assert!(tool.is_command());
+        assert_eq!(tool.output().as_deref(), Some("running 3 tests\nok\n"));
+        let exit = tool.terminal.as_ref().unwrap().exit.clone().unwrap();
+        assert_eq!(exit.code, Some(101));
+        assert!(!exit.succeeded());
+        // The whole output replaces what was there.
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t9",
+                    "_meta": { "terminal_output": { "terminal_id": "t9", "data": "all" } } }),
+        );
+        let Entry::Tool(tool) = &chat.entries[0] else {
+            panic!();
+        };
+        assert_eq!(tool.output().as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn without_the_extension_the_output_is_the_fenced_content() {
+        let mut chat = ready();
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute",
+                    "rawInput": { "command": ["bash", "-lc", "ls -la"] },
+                    "content": [{ "type": "content",
+                                  "content": { "type": "text", "text": "```console\na\nb\n```" } }] }),
+        );
+        let Entry::Tool(tool) = &chat.entries[0] else {
+            panic!();
+        };
+        assert_eq!(tool.command().as_deref(), Some("ls -la"));
+        assert_eq!(tool.output().as_deref(), Some("a\nb"));
+        // A read is no command.
+        update(
+            &mut chat,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "kind": "read",
+                    "content": [{ "type": "content", "content": { "type": "text", "text": "x" } }] }),
+        );
+        let Entry::Tool(tool) = &chat.entries[1] else {
+            panic!();
+        };
+        assert_eq!(tool.output(), None);
+        let init = super::initialize_params();
+        assert_eq!(
+            init["clientCapabilities"]["_meta"]["terminal_output_delta"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_tail_says_how_much_it_left_out() {
+        assert_eq!(tail("a\nb\nc\nd\n", 2), ("c\nd", 2));
+        assert_eq!(tail("a\nb", 5), ("a\nb", 0));
+        assert_eq!(tail("", 3), ("", 0));
+        let mut long = "x".repeat(OUTPUT_KEPT) + "\nlast line";
+        long.insert_str(0, "first\n");
+        keep_tail(&mut long);
+        assert!(long.len() <= OUTPUT_KEPT);
+        assert!(long.ends_with("last line"));
     }
 
     #[test]

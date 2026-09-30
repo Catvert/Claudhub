@@ -1380,6 +1380,13 @@ fn render_tool(
     };
     let asking = tool.permission.is_some();
     let expanded = tool.expanded || asking;
+    // A command shows what it printed, folded or not: that is the half of
+    // it one opens the card for.
+    let terminal = tool
+        .is_command()
+        .then(|| render_terminal(ix, tool, expanded, view, theme));
+    // Its text content is its output, already shown above.
+    let output_in_content = tool.is_command() && tool.terminal.is_none();
     let mut body: Vec<AnyElement> = Vec::new();
     if expanded {
         let mono = theme.mono_font_family.clone();
@@ -1392,6 +1399,9 @@ fn render_tool(
                 .into_any_element()
         }));
         for (n, content) in tool.content.iter().enumerate() {
+            if output_in_content && matches!(content, ToolContent::Text(_)) {
+                continue;
+            }
             body.push(match content {
                 ToolContent::Text(text) => div()
                     .text_xs()
@@ -1411,7 +1421,7 @@ fn render_tool(
         }
         // A call that says nothing else is read by what it was called with:
         // a command line, a pattern.
-        if tool.content.is_empty() && !tool.raw_input.is_null() {
+        if tool.content.is_empty() && !tool.raw_input.is_null() && !tool.is_command() {
             let raw = serde_json::to_string_pretty(&tool.raw_input).unwrap_or_default();
             body.push(code_box(&raw.chars().take(3000).collect::<String>(), theme));
         }
@@ -1477,9 +1487,112 @@ fn render_tool(
                     let _ = view.update(cx, |this, cx| this.toggle(ix, cx));
                 }),
         )
+        .children(terminal)
         .when(!body.is_empty(), |el| {
             el.child(v_flex().gap_1().px_2().pb_2().children(body))
         })
+        .into_any_element()
+}
+
+/// How many lines of a command's output a folded card shows.
+const OUTPUT_FOLDED: usize = 8;
+
+/// How many an unfolded one keeps, in a box that scrolls.
+const OUTPUT_UNFOLDED: usize = 2000;
+
+/// A command's terminal on its card: the line it ran, the tail of what it
+/// printed — all of it, scrolling, once the card is open —, and how it ended.
+fn render_terminal(
+    ix: usize,
+    tool: &ToolCall,
+    expanded: bool,
+    view: &WeakEntity<ChatView>,
+    theme: &gpui_kit::component::Theme,
+) -> AnyElement {
+    let mono = theme.mono_font_family.clone();
+    let output = tool.output().unwrap_or_default();
+    let (shown, hidden) = crate::acp::chat::tail(
+        &output,
+        if expanded {
+            OUTPUT_UNFOLDED
+        } else {
+            OUTPUT_FOLDED
+        },
+    );
+    let running = matches!(tool.status.as_str(), "pending" | "in_progress");
+    let exit = tool
+        .terminal
+        .as_ref()
+        .and_then(|terminal| terminal.exit.clone());
+    let ended: Option<(SharedString, Hsla)> = match (&exit, tool.status.as_str()) {
+        (Some(exit), _) => Some(match (exit.code, &exit.signal) {
+            (Some(code), _) => (
+                tr!("chat-exit-code", { code: code }),
+                if exit.succeeded() {
+                    theme.success
+                } else {
+                    theme.danger
+                },
+            ),
+            (None, Some(signal)) => (SharedString::from(signal.clone()), theme.danger),
+            (None, None) => (tr!("chat-exit-ended"), theme.muted_foreground),
+        }),
+        (None, "failed") => Some((tr!("chat-exit-failed"), theme.danger)),
+        _ => None,
+    };
+    let unfold = view.clone();
+    v_flex()
+        .mx_2()
+        .mb_2()
+        .rounded(theme.radius)
+        .bg(theme.muted_foreground.opacity(0.08))
+        .px_2()
+        .py_1()
+        .gap_0p5()
+        .text_xs()
+        .font_family(mono)
+        .children(tool.command().map(|command| {
+            div()
+                .text_color(theme.foreground)
+                .child(SharedString::from(format!("$ {command}")))
+        }))
+        .when(hidden > 0 && !expanded, |el| {
+            el.child(
+                div()
+                    .id(("chat-output-more", ix))
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|el| el.text_color(theme.foreground))
+                    .child(tr!("chat-output-more", { count: hidden }))
+                    .on_click(move |_, _, cx| {
+                        let _ = unfold.update(cx, |this, cx| this.toggle(ix, cx));
+                    }),
+            )
+        })
+        .when(!shown.is_empty(), |el| {
+            let text = div()
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(shown.to_string()));
+            if expanded {
+                el.child(
+                    div()
+                        .id(("chat-output", ix))
+                        .max_h(px(360.))
+                        .overflow_y_scroll()
+                        .child(text),
+                )
+            } else {
+                el.child(text)
+            }
+        })
+        .when(shown.is_empty() && running, |el| {
+            el.child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(tr!("chat-output-waiting")),
+            )
+        })
+        .children(ended.map(|(word, color)| div().text_color(color).child(word)))
         .into_any_element()
 }
 
