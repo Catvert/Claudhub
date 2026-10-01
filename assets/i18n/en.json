@@ -1223,5 +1223,14 @@
   "generate-diagram-placeholder": "What it should show — “the login flow”…",
   "generate-no-agent": "No agent profile is set.",
   "generate-note-running": "✦ Note in progress…",
-  "generate-diagram-running": "✦ Diagram in progress…"
+  "generate-diagram-running": "✦ Diagram in progress…",
+  "diff-show-drawing": "Show the drawing",
+  "diff-show-source": "Show the source",
+  "sides-before": "Before",
+  "sides-after": "After",
+  "sides-added": "Added",
+  "sides-deleted": "Deleted",
+  "sides-binary": "Binary",
+  "sides-no-preview": "No preview for this format",
+  "sides-too-big": "Over %{mb} MB: too heavy to show here"
 }

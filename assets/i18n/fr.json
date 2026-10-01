@@ -1223,5 +1223,14 @@
   "generate-diagram-placeholder": "Ce qu'il doit montrer — « le flux de connexion »…",
   "generate-no-agent": "Aucun profil d'agent n'est réglé.",
   "generate-note-running": "✦ Note en cours…",
-  "generate-diagram-running": "✦ Diagramme en cours…"
+  "generate-diagram-running": "✦ Diagramme en cours…",
+  "diff-show-drawing": "Voir le dessin",
+  "diff-show-source": "Voir la source",
+  "sides-before": "Avant",
+  "sides-after": "Après",
+  "sides-added": "Ajouté",
+  "sides-deleted": "Supprimé",
+  "sides-binary": "Binaire",
+  "sides-no-preview": "Pas d'aperçu pour ce format",
+  "sides-too-big": "Plus de %{mb} Mo : trop lourde pour être montrée ici"
 }

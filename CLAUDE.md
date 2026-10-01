@@ -162,6 +162,8 @@ src/
     review.rs / diff_view.rs / refine.rs / highlight.rs / blade.rs
                      la revue, le diff virtualisé, les mots changés, la
                      coloration (tree-sitter, Blade)
+    sides.rs         un binaire ou une image dans la revue : les deux versions
+                     côte à côte
     history_view.rs  l'historique et son graphe peint
     branches.rs / branch_picker.rs  le sélecteur de branches et ses gestes
     worktrees.rs / worktree_picker.rs  le sélecteur de worktrees
@@ -618,6 +620,11 @@ continuent de la lire. Une période se lit en commits du premier parent de HEAD
 (`DiffRange::Dates`) ; finie aujourd'hui, elle reste ouverte. « Depuis le
 dernier tag » est un choix et non un tag (`DiffRange::LastTag`) : le worker le
 résout à chaque liste, et un tag posé le déplace sans qu'on choisisse à nouveau.
+**Un binaire se regarde** (`git::diff::sides`, `ui::sides`) : le worker lit
+les deux versions et ne transporte **les octets que d'une image** ; le reste
+voyage décrit (signature, `files::sniff`, et taille). Les versions vont dans
+`Evt::FileDiff`, pas dans `FileDiff`, qu'un historique de lignes construit sans
+elles ; un SVG, que git diffe en texte, se dessine sur demande.
 
 **« Depuis ma dernière relecture »** (`DiffRange::Since`, `git::snapshot`) — le
 point est l'état du disque, construit dans un **index à nous**

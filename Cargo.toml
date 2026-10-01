@@ -176,6 +176,10 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 # Le JUnit d'un run Pest. Déjà dans l'arbre par une dépendance de gpui : la
 # version épinglée est celle du lock, et n'ajoute rien au vendorage.
 roxmltree = "0.21"
+# Les dimensions d'une image, lues dans son en-tête par le worker — la revue
+# compare deux versions d'une image sans les décoder. Déjà dans l'arbre par
+# gpui, à la version du lock, comme la précédente.
+imagesize = "0.14"
 anyhow = "1"
 directories = "6"
 log = "0.4"

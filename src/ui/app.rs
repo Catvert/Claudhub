@@ -1341,6 +1341,10 @@ pub struct ClaudhubApp {
     /// A reading preference and not a worktree's state: it is the same answer
     /// one wants from one selection to the next.
     pub(super) history_lines_only: bool,
+    /// An SVG in the review is drawn, both versions side by side, rather than
+    /// diffed as markup (`ui::sides`). For the window and not per file: one
+    /// switches to the drawing to go through a set of icons.
+    pub(super) diff_drawn: bool,
     /// The file lists' scrolling, **one per range**: "Review" and "Changes" are
     /// shown at the same time, and a single handle would scroll them together.
     file_scroll: HashMap<DiffRange, gpui_kit::UniformListScrollHandle>,
@@ -1786,6 +1790,7 @@ impl ClaudhubApp {
             diff_wrap_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             history_scroll: gpui_kit::UniformListScrollHandle::new(),
             history_lines_only: true,
+            diff_drawn: false,
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
             motions: HashMap::new(),
@@ -2595,7 +2600,8 @@ impl ClaudhubApp {
                 range,
                 path,
                 diff,
-            } => self.file_diff_arrived(worktree, range, path, diff, cx),
+                sides,
+            } => self.file_diff_arrived(worktree, range, path, diff, sides, cx),
             Evt::UnstagedDiff {
                 worktree,
                 path,
@@ -3237,6 +3243,7 @@ impl ClaudhubApp {
         range: DiffRange,
         path: PathBuf,
         diff: crate::git::FileDiff,
+        sides: Option<crate::git::diff::Sides>,
         cx: &mut Context<Self>,
     ) {
         // The theme is read before the mutable borrow of the state: the
@@ -3253,7 +3260,8 @@ impl ClaudhubApp {
             // branch review is two diffs, and the first answer to arrive after
             // a click in the other list was painted under it.
             if state.selected.as_deref() == Some(path.as_path()) && state.range == range {
-                let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
+                let rendered =
+                    std::rc::Rc::new(Rendered::new(&path, diff, &theme).with_sides(sides));
                 // `open_file` empties the diff: an answer landing on nothing is
                 // a file being opened, one landing on a diff is the same file
                 // re-read after a write, which must stay where the eye is.

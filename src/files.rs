@@ -151,6 +151,141 @@ pub fn read_image(worktree: &Path, path: &Path) -> Result<Image> {
     Ok(Image { kind, bytes })
 }
 
+/// What a file the diff cannot show as lines turns out to be.
+///
+/// **Read off its first bytes, not its name**: the review only asks once git
+/// has said "binary", and what it wants then is what the file *is* — a
+/// `fixture.bin` that is a ZIP, a `.dat` that is SQLite. The list is what a
+/// software project commits besides its code: pictures, documents, archives,
+/// fonts, databases, compiled things, media. Nothing here is decoded beyond
+/// its signature; a format we do not know falls back on the extension in the
+/// view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Format {
+    Picture(Picture),
+    Avif,
+    Pdf,
+    Zip,
+    Gzip,
+    Xz,
+    Bzip2,
+    Zstd,
+    SevenZip,
+    Rar,
+    Tar,
+    Sqlite,
+    Woff,
+    Woff2,
+    TrueType,
+    OpenType,
+    Elf,
+    Exe,
+    MachO,
+    Wasm,
+    JavaClass,
+    Mp3,
+    Mp4,
+    Matroska,
+    Ogg,
+    Flac,
+    Wav,
+}
+
+impl Format {
+    /// The name a developer knows it by — the same in both languages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Picture(picture) => picture.label(),
+            Self::Avif => "AVIF",
+            Self::Pdf => "PDF",
+            Self::Zip => "ZIP",
+            Self::Gzip => "gzip",
+            Self::Xz => "xz",
+            Self::Bzip2 => "bzip2",
+            Self::Zstd => "zstd",
+            Self::SevenZip => "7z",
+            Self::Rar => "RAR",
+            Self::Tar => "tar",
+            Self::Sqlite => "SQLite",
+            Self::Woff => "WOFF",
+            Self::Woff2 => "WOFF2",
+            Self::TrueType => "TrueType",
+            Self::OpenType => "OpenType",
+            Self::Elf => "ELF",
+            Self::Exe => "PE (Windows)",
+            Self::MachO => "Mach-O",
+            Self::Wasm => "WebAssembly",
+            Self::JavaClass => "Java class",
+            Self::Mp3 => "MP3",
+            Self::Mp4 => "MP4",
+            Self::Matroska => "Matroska / WebM",
+            Self::Ogg => "Ogg",
+            Self::Flac => "FLAC",
+            Self::Wav => "WAV",
+        }
+    }
+}
+
+/// How many leading bytes `sniff` may look at: `tar` writes its magic at 257.
+pub const SNIFF_BYTES: usize = 264;
+
+/// The format a file's first bytes announce, if they announce one we know.
+///
+/// SVG is not in it, and cannot be: it is text, and its first bytes are an
+/// XML prologue or a comment as often as `<svg`. The name answers for it
+/// (`picture_of`).
+pub fn sniff(head: &[u8]) -> Option<Format> {
+    let starts = |magic: &[u8]| head.starts_with(magic);
+    let at = |offset: usize, magic: &[u8]| {
+        head.get(offset..)
+            .is_some_and(|rest| rest.starts_with(magic))
+    };
+    Some(match () {
+        _ if starts(b"\x89PNG\r\n\x1a\n") => Format::Picture(Picture::Png),
+        _ if starts(b"\xff\xd8\xff") => Format::Picture(Picture::Jpeg),
+        _ if starts(b"GIF87a") || starts(b"GIF89a") => Format::Picture(Picture::Gif),
+        _ if starts(b"RIFF") && at(8, b"WEBP") => Format::Picture(Picture::Webp),
+        _ if starts(b"RIFF") && at(8, b"WAVE") => Format::Wav,
+        _ if starts(b"BM") && head.len() >= 14 => Format::Picture(Picture::Bmp),
+        _ if starts(b"\0\0\x01\0") => Format::Picture(Picture::Ico),
+        _ if starts(b"II*\0") || starts(b"MM\0*") => Format::Picture(Picture::Tiff),
+        // An ISO media file says what it holds after `ftyp`: a still picture
+        // and a film share the container.
+        _ if at(4, b"ftypavif") || at(4, b"ftypavis") => Format::Avif,
+        _ if at(4, b"ftyp") => Format::Mp4,
+        _ if starts(b"%PDF-") => Format::Pdf,
+        // An empty archive and a spanned one start differently from the rest.
+        _ if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") || starts(b"PK\x07\x08") => Format::Zip,
+        _ if starts(b"\x1f\x8b") => Format::Gzip,
+        _ if starts(b"\xfd7zXZ\0") => Format::Xz,
+        _ if starts(b"BZh") => Format::Bzip2,
+        _ if starts(b"\x28\xb5\x2f\xfd") => Format::Zstd,
+        _ if starts(b"7z\xbc\xaf\x27\x1c") => Format::SevenZip,
+        _ if starts(b"Rar!\x1a\x07") => Format::Rar,
+        _ if at(257, b"ustar") => Format::Tar,
+        _ if starts(b"SQLite format 3\0") => Format::Sqlite,
+        _ if starts(b"wOFF") => Format::Woff,
+        _ if starts(b"wOF2") => Format::Woff2,
+        _ if starts(b"\0\x01\0\0") || starts(b"true") => Format::TrueType,
+        _ if starts(b"OTTO") => Format::OpenType,
+        _ if starts(b"\x7fELF") => Format::Elf,
+        _ if starts(b"MZ") => Format::Exe,
+        _ if starts(b"\xcf\xfa\xed\xfe") || starts(b"\xce\xfa\xed\xfe") => Format::MachO,
+        _ if starts(b"\0asm") => Format::Wasm,
+        // `CAFEBABE` is also a universal Mach-O; a class file's version
+        // follows, which no universal binary has that many architectures for.
+        _ if starts(b"\xca\xfe\xba\xbe") && head.get(7).is_some_and(|major| *major >= 45) => {
+            Format::JavaClass
+        }
+        _ if starts(b"\xca\xfe\xba\xbe") => Format::MachO,
+        _ if starts(b"ID3") || starts(b"\xff\xfb") || starts(b"\xff\xf3") => Format::Mp3,
+        _ if starts(b"\x1a\x45\xdf\xa3") => Format::Matroska,
+        _ if starts(b"OggS") => Format::Ogg,
+        _ if starts(b"fLaC") => Format::Flac,
+        _ => return None,
+    })
+}
+
 /// Reads a file from the worktree for editing.
 pub fn read(worktree: &Path, path: &Path) -> Result<Content> {
     let full = worktree.join(path);
@@ -903,6 +1038,41 @@ mod tests {
         // No extension at all, and an extension that only looks like one.
         assert_eq!(picture_of(Path::new("Makefile")), None);
         assert_eq!(picture_of(Path::new("archive.png.gz")), None);
+    }
+
+    /// The bytes decide, whatever the name says.
+    #[test]
+    fn a_format_is_read_off_its_signature() {
+        assert_eq!(
+            sniff(b"\x89PNG\r\n\x1a\n\0\0"),
+            Some(Format::Picture(Picture::Png))
+        );
+        assert_eq!(
+            sniff(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some(Format::Picture(Picture::Webp))
+        );
+        // The same container, two families.
+        assert_eq!(sniff(b"RIFF\0\0\0\0WAVEfmt "), Some(Format::Wav));
+        assert_eq!(sniff(b"\0\0\0\x1cftypavif"), Some(Format::Avif));
+        assert_eq!(sniff(b"\0\0\0\x18ftypisom"), Some(Format::Mp4));
+        assert_eq!(sniff(b"%PDF-1.7\n"), Some(Format::Pdf));
+        assert_eq!(sniff(b"PK\x03\x04\x14\0"), Some(Format::Zip));
+        assert_eq!(sniff(b"SQLite format 3\0"), Some(Format::Sqlite));
+        assert_eq!(sniff(b"wOF2\0\x01"), Some(Format::Woff2));
+        assert_eq!(sniff(b"\x7fELF\x02\x01"), Some(Format::Elf));
+        // `CAFEBABE`: a class file says its version, a universal binary its
+        // handful of architectures.
+        assert_eq!(
+            sniff(b"\xca\xfe\xba\xbe\0\0\0\x41"),
+            Some(Format::JavaClass)
+        );
+        assert_eq!(sniff(b"\xca\xfe\xba\xbe\0\0\0\x02"), Some(Format::MachO));
+        let mut tar = vec![0u8; SNIFF_BYTES];
+        tar[257..262].copy_from_slice(b"ustar");
+        assert_eq!(sniff(&tar), Some(Format::Tar));
+        // Text, and an SVG among it: the name answers for that one.
+        assert_eq!(sniff(b"<svg xmlns="), None);
+        assert_eq!(sniff(b""), None);
     }
 
     #[test]

@@ -1611,12 +1611,31 @@ fn file_diff(
         )
     };
     match result {
-        Ok(diff) => vec![Evt::FileDiff {
-            worktree,
-            range,
-            path,
-            diff,
-        }],
+        Ok(diff) => {
+            // Read only where lines say nothing — or, for an SVG, where they
+            // say it as markup: the view paints both versions instead.
+            let sides = (diff.binary || crate::files::picture_of(&path).is_some())
+                .then(|| {
+                    diff::sides(
+                        &worktree,
+                        &range,
+                        tree.as_deref(),
+                        &path,
+                        original.as_deref(),
+                        untracked,
+                    )
+                    .map_err(|e| log::warn!("reading both versions of {}: {e:#}", path.display()))
+                    .ok()
+                })
+                .flatten();
+            vec![Evt::FileDiff {
+                worktree,
+                range,
+                path,
+                diff,
+                sides,
+            }]
+        }
         Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
     }
 }

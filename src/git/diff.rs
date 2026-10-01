@@ -411,6 +411,160 @@ pub fn staged_text(dir: &Path) -> Result<String> {
     git(dir, &args)
 }
 
+/// One version of a file the review looks at rather than reads: a binary, or
+/// a picture.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Version {
+    pub size: u64,
+    /// What its first bytes say it is — or, for an SVG, its name.
+    pub format: Option<crate::files::Format>,
+    /// Width and height, for a picture whose header says them.
+    pub dimensions: Option<(u32, u32)>,
+    /// The bytes, undecoded — **for a picture only**, and under
+    /// `files::MAX_IMAGE_BYTES`. Anything else is described, not shown: its
+    /// bytes would cross into WSL for a card that prints its size.
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// The two versions a diff compares, each absent where the file was not: an
+/// added file has no old side, a deleted one no new side.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Sides {
+    pub old: Option<Version>,
+    pub new: Option<Version>,
+}
+
+impl Range {
+    /// The two revisions a file is read at: the old side's, and the new
+    /// side's — `None` for the disk.
+    ///
+    /// The diff's own revisions, except for `Branch`: `base...HEAD` is a
+    /// notation of `git diff` that `rev:path` does not read, and its old side
+    /// is the divergence point, which is what it stands for.
+    fn sides(&self, dir: &Path, tree: Option<&str>) -> Result<(String, Option<String>)> {
+        if let Self::Branch { base } = self {
+            return Ok((
+                git(dir, &["merge-base", base, "HEAD"])?,
+                Some("HEAD".to_string()),
+            ));
+        }
+        let mut revisions = self.resolve(dir, tree)?.into_iter();
+        let old = revisions.next().unwrap_or_else(|| EMPTY_TREE.to_string());
+        Ok((old, revisions.next()))
+    }
+}
+
+/// Both versions of a file, for the review to show what git calls binary — or
+/// to paint an SVG it diffs as text.
+///
+/// `untracked` is `LoadFileDiff`'s: no old side to look for. Whatever cannot be
+/// read is a side that is absent, not an error: the text diff has already
+/// said what it could, and this only adds to it.
+pub fn sides(
+    dir: &Path,
+    range: &Range,
+    tree: Option<&str>,
+    path: &Path,
+    original: Option<&Path>,
+    untracked: bool,
+) -> Result<Sides> {
+    // The repository that owns the file, as `file_against` reads it: a file
+    // of a submodule is a blob of the submodule.
+    let (owner, local) = if matches!(range, Range::Working) {
+        super::repo::file_repository(dir, path)
+    } else {
+        (dir.to_path_buf(), path.to_path_buf())
+    };
+    let before = original
+        .map(|original| match range {
+            Range::Working => super::repo::file_repository(dir, original).1,
+            _ => original.to_path_buf(),
+        })
+        .unwrap_or_else(|| local.clone());
+    let (old, new) = range.sides(&owner, tree)?;
+    let picture = crate::files::picture_of(path);
+    Ok(Sides {
+        old: (!untracked)
+            .then(|| blob_version(&owner, &old, &before, picture))
+            .flatten(),
+        new: match new {
+            Some(new) => blob_version(&owner, &new, &local, picture),
+            None => disk_version(&owner.join(&local), picture),
+        },
+    })
+}
+
+/// A version kept in git: `rev:path`, absent when the revision does not hold
+/// the path.
+fn blob_version(
+    dir: &Path,
+    revision: &str,
+    path: &Path,
+    picture: Option<crate::files::Picture>,
+) -> Option<Version> {
+    let spec = format!("{revision}:{}", path.to_string_lossy());
+    let size: u64 = super::git_opt(dir, &["cat-file", "-s", &spec])?
+        .parse()
+        .ok()?;
+    // Past the ceiling, nothing is read: a hundred-megabyte asset is said to
+    // be one, and that is all a review needs of it.
+    let bytes = (size <= crate::files::MAX_IMAGE_BYTES)
+        .then(|| super::git_bytes(dir, &["cat-file", "blob", &spec]).ok())
+        .flatten();
+    Some(version(size, bytes, picture))
+}
+
+/// The version on disk, for the working range.
+fn disk_version(full: &Path, picture: Option<crate::files::Picture>) -> Option<Version> {
+    use std::io::Read;
+    let size = std::fs::metadata(full).ok()?.len();
+    let bytes = if size <= crate::files::MAX_IMAGE_BYTES {
+        std::fs::read(full).ok()
+    } else {
+        // Too big to show, never too big to recognise: the signature is in
+        // the first bytes.
+        let mut head = Vec::new();
+        std::fs::File::open(full)
+            .and_then(|file| {
+                file.take(crate::files::SNIFF_BYTES as u64)
+                    .read_to_end(&mut head)
+            })
+            .ok()
+            .map(|_| head)
+    };
+    Some(version(size, bytes, picture))
+}
+
+/// What is kept of a version once read: the bytes go on only when they are a
+/// picture whole.
+fn version(size: u64, bytes: Option<Vec<u8>>, named: Option<crate::files::Picture>) -> Version {
+    use crate::files::Format;
+    let format = bytes
+        .as_deref()
+        .and_then(crate::files::sniff)
+        .or(named.map(Format::Picture));
+    let whole = bytes.filter(|bytes| bytes.len() as u64 == size);
+    let shown = match format {
+        Some(Format::Picture(_)) => whole,
+        _ => None,
+    };
+    let dimensions = shown
+        .as_deref()
+        .and_then(|bytes| imagesize::blob_size(bytes).ok())
+        .and_then(|size| {
+            Some((
+                u32::try_from(size.width).ok()?,
+                u32::try_from(size.height).ok()?,
+            ))
+        });
+    Version {
+        size,
+        format,
+        dimensions,
+        bytes: shown,
+    }
+}
+
 /// An untracked file's diff: git does not know it, so `diff` alone returns
 /// empty output. `--no-index` against `/dev/null` produces the same format as
 /// for other files, which avoids a second display path.
@@ -823,6 +977,90 @@ index 1234567..89abcde 100644
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The start of a PNG of the given size: enough for its signature and for
+    /// the header that says its dimensions.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        bytes.extend(width.to_be_bytes());
+        bytes.extend(height.to_be_bytes());
+        bytes.extend([8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    /// Both versions of a picture come back whole, with their dimensions,
+    /// whichever range reads them — and a side the file was not on is absent.
+    #[test]
+    fn both_versions_of_a_picture_are_read() {
+        let dir = scratch("sides");
+        std::fs::write(dir.join("logo.png"), png(2, 3)).unwrap();
+        sh(&dir, &["add", "logo.png"]);
+        sh(&dir, &["commit", "-q", "-m", "first"]);
+        sh(&dir, &["branch", "base"]);
+        let first = sh(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        let path = Path::new("logo.png");
+        let dims = |side: &Option<Version>| side.as_ref().and_then(|side| side.dimensions);
+
+        // On disk against HEAD.
+        std::fs::write(dir.join("logo.png"), png(4, 5)).unwrap();
+        let working = sides(&dir, &Range::Working, None, path, None, false).unwrap();
+        assert_eq!(
+            (dims(&working.old), dims(&working.new)),
+            (Some((2, 3)), Some((4, 5)))
+        );
+        let new = working.new.unwrap();
+        assert_eq!(new.bytes.as_deref(), Some(png(4, 5).as_slice()));
+        assert_eq!(
+            new.format,
+            Some(crate::files::Format::Picture(crate::files::Picture::Png))
+        );
+
+        // A root commit: nothing before it.
+        let root = Range::Commit {
+            id: first,
+            parent: None,
+        };
+        let created = sides(&dir, &root, None, path, None, false).unwrap();
+        assert!(created.old.is_none());
+        assert_eq!(dims(&created.new), Some((2, 3)));
+
+        // A branch: from the divergence point, not from the base's tip.
+        sh(&dir, &["commit", "-q", "-am", "bigger"]);
+        sh(&dir, &["checkout", "-q", "base"]);
+        std::fs::write(dir.join("logo.png"), png(9, 9)).unwrap();
+        sh(&dir, &["commit", "-q", "-am", "elsewhere"]);
+        sh(&dir, &["checkout", "-q", "-"]);
+        let branch = Range::Branch {
+            base: "base".into(),
+        };
+        let reviewed = sides(&dir, &branch, None, path, None, false).unwrap();
+        assert_eq!(
+            (dims(&reviewed.old), dims(&reviewed.new)),
+            (Some((2, 3)), Some((4, 5)))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Anything but a picture is described and not carried: its format and
+    /// its size, never its bytes.
+    #[test]
+    fn a_binary_that_is_not_a_picture_travels_without_its_bytes() {
+        let dir = scratch("sides-zip");
+        std::fs::write(dir.join("README"), "x\n").unwrap();
+        sh(&dir, &["add", "README"]);
+        sh(&dir, &["commit", "-q", "-m", "first"]);
+        let zip = b"PK\x03\x04\x14\0\0\0\0\0";
+        std::fs::write(dir.join("fixture.bin"), zip).unwrap();
+
+        let path = Path::new("fixture.bin");
+        let read = sides(&dir, &Range::Working, None, path, None, true).unwrap();
+        assert!(read.old.is_none(), "untracked: nothing to look for before");
+        let new = read.new.unwrap();
+        assert_eq!(new.format, Some(crate::files::Format::Zip));
+        assert_eq!(new.size, zip.len() as u64);
+        assert!(new.bytes.is_none() && new.dimensions.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A hunk of a CRLF file is staged: its lines keep the `\r` git wrote, the

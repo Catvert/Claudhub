@@ -1072,6 +1072,7 @@ dependencies = [
  "env_logger",
  "futures",
  "gpui-kit",
+ "imagesize 0.14.0",
  "interprocess",
  "keyring",
  "libc",

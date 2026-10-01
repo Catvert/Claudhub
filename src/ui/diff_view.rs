@@ -115,6 +115,10 @@ pub struct Rendered {
     /// What the palette lays over the highlighting, kept between frames for
     /// the palette it was laid with — see `Painted`.
     painted: std::cell::RefCell<Option<Rc<Painted>>>,
+    /// Both versions of a binary or a picture, to look at where the lines say
+    /// nothing — see `ui::sides`. Given after the fact (`with_sides`): a patch
+    /// read off a line history has none.
+    pub sides: Option<crate::ui::sides::Shown>,
 }
 
 /// The wrapped list's sizes, and the three things they depend on.
@@ -178,12 +182,20 @@ impl Rendered {
             split,
             wrap_sizes: std::cell::RefCell::new(None),
             painted: std::cell::RefCell::new(None),
+            sides: None,
             rows,
             file,
         };
         rendered.blocks = [(false, false), (false, true), (true, false), (true, true)]
             .map(|(split, whole_file)| rendered.find_blocks(split, whole_file));
         rendered
+    }
+
+    /// The two versions, the pictures among them decoded once here: a
+    /// `gpui_kit::Image` digests its bytes, and a render runs every frame.
+    pub fn with_sides(mut self, sides: Option<crate::git::diff::Sides>) -> Self {
+        self.sides = sides.map(crate::ui::sides::Shown::new);
+        self
     }
 
     /// The sizes of the wrapped list, from the cache.
@@ -1695,8 +1707,21 @@ impl ClaudhubApp {
         let line_height = line_height(font_size);
 
         let position = self.diff_file_position(&path, cx);
-        let header =
-            self.render_diff_header(&path, position, split, wrap, whole_file, mono.clone(), cx);
+        // Offered only once both versions are here to draw: before that, the
+        // button would switch to nothing.
+        let drawable = crate::ui::sides::drawable(&path)
+            && diff.as_ref().is_some_and(|diff| diff.sides.is_some());
+        let drawn = drawable.then_some(self.diff_drawn);
+        let header = self.render_diff_header(
+            &path,
+            position,
+            split,
+            wrap,
+            whole_file,
+            drawn,
+            mono.clone(),
+            cx,
+        );
 
         let Some(diff) = diff else {
             return v_flex()
@@ -1706,6 +1731,20 @@ impl ClaudhubApp {
                 .child(hint(tr!("review-loading"), cx))
                 .into_any_element();
         };
+        // What lines cannot say — a binary — or what the reviewer asked to see
+        // drawn: both versions, side by side, in place of the hunks.
+        if let Some(sides) = diff
+            .sides
+            .as_ref()
+            .filter(|_| diff.file.binary || drawn == Some(true))
+        {
+            return v_flex()
+                .size_full()
+                .children(self.render_commit_block(cx))
+                .child(header)
+                .child(crate::ui::sides::render(sides, &path, cx))
+                .into_any_element();
+        }
         if diff.file.binary {
             return v_flex()
                 .size_full()
@@ -1927,6 +1966,9 @@ impl ClaudhubApp {
         split: bool,
         wrap: bool,
         whole_file: bool,
+        // `Some` for a file that can be drawn as well as read — an SVG —, and
+        // whether it is drawn.
+        drawn: Option<bool>,
         mono: SharedString,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -2028,6 +2070,24 @@ impl ClaudhubApp {
                     .flex_shrink_0()
                     .gap_1()
                     .items_center()
+                    .when_some(drawn, |el, drawn| {
+                        el.child(
+                            Button::new("diff-drawn")
+                                .ghost()
+                                .small()
+                                .selected(drawn)
+                                .icon(icon("image"))
+                                .tooltip(if drawn {
+                                    tr!("diff-show-source")
+                                } else {
+                                    tr!("diff-show-drawing")
+                                })
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.diff_drawn = !this.diff_drawn;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("diff-whole-file")
                             .ghost()

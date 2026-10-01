@@ -72,6 +72,7 @@ mod settings;
 mod settings_view;
 mod shortcuts;
 mod shortcuts_view;
+mod sides;
 mod sql_history;
 mod sql_history_view;
 mod stashes;
