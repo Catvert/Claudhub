@@ -435,8 +435,11 @@ comprise, et a deux vues (`HomeMode`, retenu dans la session) : le **Focus**
 (`ui::focus_view`, par défaut) et le **Plan** (`ui::overview_view`, disposé par
 `ui::overview`, pur). Une **barre latérale** commune liste tous les projets
 ouverts et leurs worktrees ; ce qu'on y choisit est ce que les deux vues
-montrent. Un clic montre un worktree seul et le rend regardé (`active`, celui
-de toute la fenêtre), `Ctrl`+clic l'ajoute à côté (`focus::shown_worktrees`).
+montrent. **L'ordre est celui que la main donne** (glisser un nom de projet,
+ou un worktree parmi ceux de son projet) : retenu par `Repos` et appliqué à
+l'arrivée des listes, il est celui du rail, du plan et de `Ctrl+1`… Un clic
+montre un worktree seul et le rend regardé (`active`, celui de toute la
+fenêtre), `Ctrl`+clic l'ajoute à côté (`focus::shown_worktrees`).
 Chaque ligne porte le signal du plus pressant de ses agents sur son bord gauche
 (`edge_signal`, `worktree_doing`, `overview::loudest`). La barre se replie en
 rail d'initiales. Les boutons de la fenêtre ne sont peints que là où c'est à

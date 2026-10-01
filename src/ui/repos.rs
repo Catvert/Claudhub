@@ -6,6 +6,7 @@
 //! nothing can build outside a window. It is the same split as
 //! `notes.rs` / `notes_view.rs`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::git::{Branch, Worktree};
@@ -41,6 +42,22 @@ pub struct UnavailableRepo {
 pub struct Repos {
     open: Vec<RepoState>,
     missing: Vec<UnavailableRepo>,
+    /// The order the hand gave the home screen's sidebar — projects, and
+    /// each one's worktrees by main checkout. **Kept here and applied as the
+    /// lists arrive**, not at the sidebar's render: everything that walks the
+    /// list — the rail, the plane, `Ctrl+1` to `Ctrl+9` — reads the same
+    /// order, and the repositories answer in whatever order their workers
+    /// finish.
+    order: Order,
+}
+
+/// See `Repos::order`. What it does not name comes after what it does, in the
+/// order it came: a new worktree at the foot of its project, a project opened
+/// for the first time at the foot of the list.
+#[derive(Default)]
+struct Order {
+    projects: Vec<PathBuf>,
+    worktrees: BTreeMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl Repos {
@@ -84,7 +101,57 @@ impl Repos {
             branches: Vec::new(),
             integration: None,
         });
+        self.arrange();
         true
+    }
+
+    /// The order a past session left, given before any repository opens.
+    pub fn set_order(
+        &mut self,
+        projects: Vec<PathBuf>,
+        worktrees: BTreeMap<PathBuf, Vec<PathBuf>>,
+    ) {
+        self.order = Order {
+            projects,
+            worktrees,
+        };
+        self.arrange();
+    }
+
+    /// The projects, then each one's worktrees, in the order kept.
+    fn arrange(&mut self) {
+        arrange(&mut self.open, &self.order.projects, |repo| &repo.main);
+        for repo in &mut self.open {
+            if let Some(order) = self.order.worktrees.get(&repo.main) {
+                arrange(&mut repo.worktrees, order, |worktree| &worktree.path);
+            }
+        }
+    }
+
+    /// A project dropped on another: it takes that one's place. The order
+    /// to keep, `None` when nothing moved.
+    pub fn move_project(&mut self, from: &Path, to: &Path) -> Option<Vec<PathBuf>> {
+        let shown: Vec<PathBuf> = self.open.iter().map(|repo| repo.main.clone()).collect();
+        let order = moved(&self.order.projects, &shown, from, to)?;
+        self.order.projects = order.clone();
+        self.arrange();
+        Some(order)
+    }
+
+    /// A worktree dropped on another of the same project: it takes that
+    /// one's place. The project's order to keep, `None` when nothing moved —
+    /// a drop on another project's worktree among them.
+    pub fn move_worktree(&mut self, from: &Path, to: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
+        let main = self.main_of(from)?;
+        if self.main_of(to).as_deref() != Some(main.as_path()) {
+            return None;
+        }
+        let shown = self.worktree_paths(&main);
+        let kept = self.order.worktrees.get(&main).cloned().unwrap_or_default();
+        let order = moved(&kept, &shown, from, to)?;
+        self.order.worktrees.insert(main.clone(), order.clone());
+        self.arrange();
+        Some((main, order))
     }
 
     /// Closes a repository and returns the worktrees that went with it — what
@@ -109,9 +176,15 @@ impl Repos {
     }
 
     pub fn set_worktrees(&mut self, main: &Path, worktrees: Vec<Worktree>) {
+        // git has just enumerated: a worktree it no longer lists loses its
+        // place, and one made again at the same path starts at the foot.
+        if let Some(order) = self.order.worktrees.get_mut(main) {
+            order.retain(|path| worktrees.iter().any(|worktree| &worktree.path == path));
+        }
         if let Some(repo) = self.get_mut(main) {
             repo.worktrees = worktrees;
         }
+        self.arrange();
     }
 
     /// The paths of a repository's worktrees, as git has just enumerated them.
@@ -189,6 +262,41 @@ impl Repos {
             .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
             .collect()
     }
+}
+
+/// `items` in `order`: what it names in its order, the rest after, as they
+/// came — the sort is stable.
+fn arrange<T>(items: &mut [T], order: &[PathBuf], key: impl Fn(&T) -> &PathBuf) {
+    items.sort_by_key(|item| {
+        order
+            .iter()
+            .position(|path| path == key(item))
+            .unwrap_or(usize::MAX)
+    });
+}
+
+/// The order once `from` has taken `to`'s place — after it when it came from
+/// above, before it from below: where the drop was is where it lands.
+///
+/// `shown` is the list as the sidebar shows it: what has no place yet gets
+/// one where it is shown, so that the first move of all does not reshuffle
+/// the rest. What `order` names and is not shown — a project not open today —
+/// keeps its place.
+fn moved(order: &[PathBuf], shown: &[PathBuf], from: &Path, to: &Path) -> Option<Vec<PathBuf>> {
+    if from == to {
+        return None;
+    }
+    let mut order = order.to_vec();
+    for path in shown {
+        if !order.contains(path) {
+            order.push(path.clone());
+        }
+    }
+    let at = order.iter().position(|path| path == from)?;
+    let target = order.iter().position(|path| path == to)?;
+    let item = order.remove(at);
+    order.insert(target, item);
+    Some(order)
 }
 
 #[cfg(test)]
@@ -339,5 +447,104 @@ mod tests {
         // An unknown repository is not a reason to panic, only nothing to do.
         repos.set_worktrees(Path::new("/p/gone"), Vec::new());
         assert!(repos.worktree_paths(Path::new("/p/gone")).is_empty());
+    }
+
+    fn paths(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn a_dropped_entry_takes_the_place_of_the_one_under_it() {
+        let shown = paths(&["/a", "/b", "/c"]);
+        // Down: after the target. Up: before it.
+        assert_eq!(
+            moved(&[], &shown, Path::new("/a"), Path::new("/c")),
+            Some(paths(&["/b", "/c", "/a"]))
+        );
+        assert_eq!(
+            moved(&[], &shown, Path::new("/c"), Path::new("/a")),
+            Some(paths(&["/c", "/a", "/b"]))
+        );
+        assert_eq!(moved(&[], &shown, Path::new("/b"), Path::new("/b")), None);
+        assert_eq!(moved(&[], &shown, Path::new("/z"), Path::new("/b")), None);
+    }
+
+    #[test]
+    fn a_place_kept_for_what_is_not_open_survives_a_move() {
+        // `/gone` is not open today: the move goes round it, and it is still
+        // between `/a` and `/b` when it comes back.
+        let order = paths(&["/a", "/gone", "/b"]);
+        let shown = paths(&["/a", "/b", "/new"]);
+        assert_eq!(
+            moved(&order, &shown, Path::new("/new"), Path::new("/b")),
+            Some(paths(&["/a", "/gone", "/new", "/b"]))
+        );
+    }
+
+    #[test]
+    fn projects_open_in_the_order_kept_whatever_order_they_answer_in() {
+        let mut repos = Repos::default();
+        repos.set_order(paths(&["/p/api", "/p/site"]), BTreeMap::new());
+        repos.open(PathBuf::from("/p/new"), "new".into(), Vec::new());
+        repos.open(PathBuf::from("/p/site"), "site".into(), Vec::new());
+        repos.open(PathBuf::from("/p/api"), "api".into(), Vec::new());
+        let mains: Vec<&Path> = repos.iter().map(|repo| repo.main.as_path()).collect();
+        // What the order does not name comes after, as it came.
+        assert_eq!(mains, ["/p/api", "/p/site", "/p/new"].map(Path::new));
+    }
+
+    #[test]
+    fn a_moved_worktree_stays_moved_when_git_lists_again() {
+        let mut repos = repos();
+        let (main, order) = repos
+            .move_worktree(Path::new("/p/site-fix"), Path::new("/p/site"))
+            .unwrap();
+        assert_eq!(main, PathBuf::from("/p/site"));
+        assert_eq!(order, paths(&["/p/site-fix", "/p/site"]));
+        // The shortcuts follow the sidebar.
+        assert_eq!(
+            repos.worktrees_in_order(),
+            paths(&["/p/site-fix", "/p/site", "/p/api"])
+        );
+        // git lists in its own order, and a new worktree appears: the hand's
+        // order holds, the newcomer at the foot.
+        repos.set_worktrees(
+            Path::new("/p/site"),
+            vec![
+                worktree("/p/site", Some("main")),
+                worktree("/p/site-new", Some("new")),
+                worktree("/p/site-fix", Some("fix")),
+            ],
+        );
+        assert_eq!(
+            repos.worktree_paths(Path::new("/p/site")),
+            paths(&["/p/site-fix", "/p/site", "/p/site-new"])
+        );
+    }
+
+    #[test]
+    fn a_worktree_does_not_move_into_another_project() {
+        let mut repos = repos();
+        assert_eq!(
+            repos.move_worktree(Path::new("/p/site-fix"), Path::new("/p/api")),
+            None
+        );
+        assert_eq!(
+            repos.worktrees_in_order(),
+            paths(&["/p/site", "/p/site-fix", "/p/api"])
+        );
+    }
+
+    #[test]
+    fn a_moved_project_carries_its_worktrees() {
+        let mut repos = repos();
+        assert_eq!(
+            repos.move_project(Path::new("/p/api"), Path::new("/p/site")),
+            Some(paths(&["/p/api", "/p/site"]))
+        );
+        assert_eq!(
+            repos.worktrees_in_order(),
+            paths(&["/p/api", "/p/site", "/p/site-fix"])
+        );
     }
 }

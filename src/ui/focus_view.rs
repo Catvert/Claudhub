@@ -293,7 +293,8 @@ impl ClaudhubApp {
         }
         let theme = cx.theme().clone();
         let mut rows: Vec<AnyElement> = Vec::new();
-        for repo in self.repos.iter() {
+        let drop_colour = theme.drag_border;
+        for (rank, repo) in self.repos.iter().enumerate() {
             let main = repo.main.clone();
             let folded = self.focus_folded.contains(&main);
             let worktrees = live_worktrees(repo);
@@ -307,7 +308,12 @@ impl ClaudhubApp {
                         .filter_map(|path| doings.get(path).copied()),
                 )
             });
-            let (fold, pick) = (main.clone(), main.clone());
+            let (fold, pick, landing) = (main.clone(), main.clone(), main.clone());
+            let dragged = DraggedProject {
+                main: main.clone(),
+                rank,
+                name: SharedString::from(repo.name.to_uppercase()),
+            };
             // A project is a heading, not a row: small capitals in the muted
             // tone, so that the worktrees under it are what the eye reads.
             // Its `+` shows under the pointer only — five of them, one a
@@ -323,6 +329,14 @@ impl ClaudhubApp {
                     .pb_1()
                     .gap_0p5()
                     .items_center()
+                    // A project dropped on another's heading takes its place,
+                    // its worktrees with it.
+                    .drag_over::<DraggedProject>(move |style, dragged, _, _| {
+                        drop_line(style, dragged.rank, rank, drop_colour)
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedProject, _, cx| {
+                        this.project_dropped(&dragged.main, &landing, cx);
+                    }))
                     // The chevron folds; the name shows the whole project.
                     .child(
                         Button::new(SharedString::from(format!(
@@ -370,6 +384,11 @@ impl ClaudhubApp {
                                     this.focus_project_clicked(&pick, event, window, cx);
                                 },
                             ))
+                            // The name is what one picks the project up by.
+                            .on_drag(dragged, |dragged, _, _, cx| {
+                                let dragged = dragged.clone();
+                                cx.new(|_| dragged)
+                            })
                             .child(
                                 div()
                                     .flex_1()
@@ -409,11 +428,11 @@ impl ClaudhubApp {
                     )
                     .into_any_element(),
             );
-            for path in worktrees {
+            for (rank, path) in worktrees.into_iter().enumerate() {
                 if folded && !shown.contains(&path) {
                     continue;
                 }
-                rows.push(self.render_focus_row(&path, shown, doings, cx));
+                rows.push(self.render_focus_row(&path, rank, shown, doings, cx));
             }
         }
         let list = v_flex()
@@ -743,8 +762,8 @@ impl ClaudhubApp {
                         .into_any_element(),
                 );
             }
-            for path in live_worktrees(repo) {
-                pills.push(self.render_focus_pill(&path, shown, doings, cx));
+            for (rank, path) in live_worktrees(repo).into_iter().enumerate() {
+                pills.push(self.render_focus_pill(&path, rank, shown, doings, cx));
             }
         }
         let list = v_flex()
@@ -814,6 +833,7 @@ impl ClaudhubApp {
     fn render_focus_pill(
         &self,
         path: &Path,
+        rank: usize,
         shown: &[PathBuf],
         doings: &Doings,
         cx: &mut Context<Self>,
@@ -832,7 +852,7 @@ impl ClaudhubApp {
         let lit = shown.iter().any(|shown| shown == path);
         let own = self.active.as_deref() == Some(path);
         let open = path.to_path_buf();
-        div()
+        let pill = div()
             .id(SharedString::from(format!("focus-pill-{}", path.display())))
             .relative()
             .flex_none()
@@ -867,7 +887,13 @@ impl ClaudhubApp {
             )
             .child(SharedString::from(focus::initials(&label)))
             .children(edge_signal(doings.get(path), 7., &theme))
-            .context_menu(self.worktree_context_menu(path, cx))
+            .on_drag(self.dragged_worktree(path, rank), |dragged, _, _, cx| {
+                let dragged = dragged.clone();
+                cx.new(|_| dragged)
+            })
+            .context_menu(self.worktree_context_menu(path, cx));
+        self.worktree_landing(pill, path, rank, cx)
+            .flex_none()
             .into_any_element()
     }
 
@@ -880,6 +906,7 @@ impl ClaudhubApp {
     fn render_focus_row(
         &self,
         path: &Path,
+        rank: usize,
         shown: &[PathBuf],
         doings: &Doings,
         cx: &mut Context<Self>,
@@ -906,7 +933,7 @@ impl ClaudhubApp {
         let terminals = self.terminals_of(path).count();
         let open = path.to_path_buf();
         let volume = summary.map(|summary| super::topbar::volume_short(summary, cx));
-        h_flex()
+        let row = h_flex()
             .id(SharedString::from(format!("focus-row-{}", path.display())))
             .relative()
             .w_full()
@@ -981,8 +1008,70 @@ impl ClaudhubApp {
                     .children(volume),
             )
             .children(outline_of(doings.get(path), &theme))
-            .context_menu(self.worktree_context_menu(path, cx))
+            .on_drag(self.dragged_worktree(path, rank), |dragged, _, _, cx| {
+                let dragged = dragged.clone();
+                cx.new(|_| dragged)
+            })
+            .context_menu(self.worktree_context_menu(path, cx));
+        self.worktree_landing(row, path, rank, cx)
+            .w_full()
             .into_any_element()
+    }
+
+    /// A worktree of the sidebar or its rail, as the hand picks it up.
+    fn dragged_worktree(&self, path: &Path, rank: usize) -> DraggedWorktree {
+        DraggedWorktree {
+            main: self.main_of(path).unwrap_or_default(),
+            path: path.to_path_buf(),
+            rank,
+            name: self.project_label(path).1,
+        }
+    }
+
+    /// Where a worktree of the same project lands: in the place of `path`.
+    /// The entry is wrapped rather than given the line itself — a row's
+    /// left edge is its selection, and the drop's colour would take it.
+    fn worktree_landing(
+        &self,
+        entry: impl IntoElement,
+        path: &Path,
+        rank: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let main = self.main_of(path).unwrap_or_default();
+        let colour = cx.theme().drag_border;
+        let landing = path.to_path_buf();
+        div()
+            .drag_over::<DraggedWorktree>(move |style, dragged, _, _| {
+                if dragged.main == main {
+                    drop_line(style, dragged.rank, rank, colour)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedWorktree, _, cx| {
+                this.worktree_dropped(&dragged.path, &landing, cx);
+            }))
+            .child(entry)
+    }
+
+    /// A project dropped on another's heading: it takes that one's place,
+    /// for the next session too.
+    fn project_dropped(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        if let Some(order) = self.repos.move_project(from, to) {
+            super::store::Store::update_global(cx, |store| store.session.focus_order = order);
+            cx.notify();
+        }
+    }
+
+    /// A worktree dropped on another of its project: the same.
+    fn worktree_dropped(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        if let Some((main, order)) = self.repos.move_worktree(from, to) {
+            super::store::Store::update_global(cx, |store| {
+                store.repos.entry(main).or_default().focus_order = order;
+            });
+            cx.notify();
+        }
     }
 
     // — The board ——————————————————————————————————————————————————
@@ -2043,4 +2132,69 @@ fn held(child: impl IntoElement) -> gpui_kit::Div {
             cx.stop_propagation()
         })
         .child(child)
+}
+
+/// A project of the sidebar picked up by its name: what a drop reads, and
+/// the ghost that follows the pointer — the platform draws nothing for a
+/// drag of ours, and one with nothing under the hand reads as a click that
+/// did not take.
+#[derive(Clone)]
+struct DraggedProject {
+    main: PathBuf,
+    /// Its place in the list as it was picked up: which way the drop line
+    /// faces (`drop_line`).
+    rank: usize,
+    name: SharedString,
+}
+
+/// A worktree of the sidebar or its rail picked up — see `DraggedProject`.
+/// It only lands among its project's own.
+#[derive(Clone)]
+struct DraggedWorktree {
+    main: PathBuf,
+    path: PathBuf,
+    rank: usize,
+    name: SharedString,
+}
+
+impl gpui_kit::Render for DraggedProject {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ghost(self.name.clone(), cx)
+    }
+}
+
+impl gpui_kit::Render for DraggedWorktree {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ghost(self.name.clone(), cx)
+    }
+}
+
+/// What follows the pointer: the name, in a small card.
+fn ghost(name: SharedString, cx: &gpui_kit::App) -> gpui_kit::Div {
+    let theme = cx.theme();
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded(theme.radius)
+        .bg(theme.popover)
+        .border_1()
+        .border_color(theme.border)
+        .text_xs()
+        .child(name)
+}
+
+/// Where a drop would land, said before the hand lets go: a line on the side
+/// the entry will take — below the one under the hand when it comes from
+/// above, above it from below (`repos::moved`). Nothing on the entry itself.
+fn drop_line(
+    style: gpui_kit::StyleRefinement,
+    from: usize,
+    to: usize,
+    colour: gpui_kit::Hsla,
+) -> gpui_kit::StyleRefinement {
+    match from.cmp(&to) {
+        std::cmp::Ordering::Less => style.border_b_2().border_color(colour),
+        std::cmp::Ordering::Greater => style.border_t_2().border_color(colour),
+        std::cmp::Ordering::Equal => style,
+    }
 }
