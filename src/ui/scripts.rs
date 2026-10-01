@@ -139,6 +139,80 @@ fn data_root() -> Option<PathBuf> {
     super::settings::config_dir().map(|dir| dir.join("scripts-data"))
 }
 
+/// One scroll area a script view drew, and its smoothing — see
+/// `install_smoothing`.
+struct Track {
+    motion: super::motion::ScrollMotion,
+    handle: gpui_kit::ScrollHandle,
+    /// Where it was when its view was last drawn: what says, when a wheel
+    /// passes, that gpui has just moved it.
+    offset: gpui_kit::Point<gpui_kit::Pixels>,
+}
+
+thread_local! {
+    /// The scroll areas of the script views, by the view and the area's
+    /// identity: two boards draw one script with the same names.
+    static TRACKS: std::cell::RefCell<HashMap<(gpui_kit::EntityId, String), Track>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Wheel smoothing for the scripts' lists and scroll areas, as Claudhub's own
+/// panels have it (`ui::motion`).
+///
+/// gpui-shell says each area as a script view draws it
+/// (`scroll_hook::observe_scroll_areas`): its transition advances there,
+/// before layout reads the offset, and where it then stands is noted. The
+/// wheel is heard **around** the view (`script_element`), after the area has
+/// jumped: the one whose offset is no longer the one noted is the one gpui
+/// moved, and its jump is replayed as a transition. Called once, at start-up.
+pub(super) fn install_smoothing() {
+    gpui_shell::scroll_hook::observe_scroll_areas(|identity, handle, axes, window, _cx| {
+        let key = (window.current_view(), format!("{identity:?}"));
+        let axes = if axes.horizontal {
+            super::motion::Axes::Both
+        } else {
+            super::motion::Axes::Vertical
+        };
+        TRACKS.with(|tracks| {
+            let mut tracks = tracks.borrow_mut();
+            let track = tracks.entry(key).or_insert_with(|| Track {
+                motion: super::motion::ScrollMotion::new(axes),
+                handle: handle.clone(),
+                offset: handle.offset(),
+            });
+            track.handle = handle.clone();
+            track.motion.advance(handle, window);
+            track.offset = handle.offset();
+        });
+    });
+}
+
+/// A wheel heard around script view `view`: the area gpui has just moved
+/// takes the jump over. True when the view has to be drawn again.
+fn smooth_wheel(
+    view: gpui_kit::EntityId,
+    event: &gpui_kit::ScrollWheelEvent,
+    window: &Window,
+) -> bool {
+    TRACKS.with(|tracks| {
+        let mut tracks = tracks.borrow_mut();
+        let mut moved = false;
+        for ((owner, _), track) in tracks.iter_mut() {
+            if *owner != view || track.handle.offset() == track.offset {
+                continue;
+            }
+            moved |= track.motion.on_wheel(&track.handle, event, window);
+            track.offset = track.handle.offset();
+        }
+        moved
+    })
+}
+
+/// Forgets the areas of a view that went away.
+fn forget_tracks(view: gpui_kit::EntityId) {
+    TRACKS.with(|tracks| tracks.borrow_mut().retain(|(owner, _), _| *owner != view));
+}
+
 /// The keyring service scripts' secrets are filed under, each as
 /// `<script>/<name>`.
 const SECRETS: &str = "claudhub-plugins";
@@ -403,7 +477,20 @@ impl ClaudhubApp {
             });
         }
         match (current, failed) {
-            (Some((view, _)), _) => div().size_full().child(view).into_any_element(),
+            (Some((view, _)), _) => {
+                // A non-scrolling ancestor of every area the script draws,
+                // hearing the wheel after they have: see `install_smoothing`.
+                let heard = view.clone();
+                div()
+                    .size_full()
+                    .on_scroll_wheel(move |event, window, cx| {
+                        if smooth_wheel(heard.entity_id(), event, window) {
+                            heard.update(cx, |_, cx| cx.notify());
+                        }
+                    })
+                    .child(view)
+                    .into_any_element()
+            }
             (None, Some(why)) => script_notice(why.into(), cx),
             (None, None) => div().size_full().into_any_element(),
         }
@@ -422,9 +509,13 @@ impl ClaudhubApp {
         match result {
             Ok(view) => {
                 self.scripts.failed.remove(&key);
-                self.scripts
+                let replaced = self
+                    .scripts
                     .mounted
                     .insert(key, Mounted { view, stamp, hosts });
+                if let Some(replaced) = replaced {
+                    forget_tracks(replaced.view.entity_id());
+                }
             }
             Err(error) => {
                 let why = format!("{error:#}");
@@ -598,9 +689,13 @@ impl ClaudhubApp {
 
     /// Forgets the views of a worktree that went away.
     pub(super) fn drop_scripts_of(&mut self, path: &Path) {
-        self.scripts
-            .mounted
-            .retain(|(worktree, _), _| worktree != path);
+        self.scripts.mounted.retain(|(worktree, _), mounted| {
+            let kept = worktree != path;
+            if !kept {
+                forget_tracks(mounted.view.entity_id());
+            }
+            kept
+        });
         self.scripts
             .failed
             .retain(|(worktree, _), _| worktree != path);

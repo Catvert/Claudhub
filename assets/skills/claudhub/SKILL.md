@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 6 -->
+<!-- claudhub-skill-version: 7 -->
 
 # Claudhub
 
@@ -232,8 +232,17 @@ export default class Example extends View {
   or use `send_to_agent`.
 - `$CLAUDHUB_SCRIPTS/sentry` is a complete example: settings in storage,
   its token in the keyring, `fetch` to Sentry's API, a list and a detail.
-- Keep `render` cheap — it runs on every refresh. Split a large view into
-  small helper functions; do not animate.
+- Keep `render` cheap — it runs on every refresh. **A long list is
+  virtual**: `v_virtual_list(id, count, height, (i) => key, (range) =>
+  rows)` from `gpui-base`, `.size_full()`, with `Scrollbar.vertical(id)
+  .absolute().inset_0()` beside it in a `.relative()` parent. Rows hold no
+  handler: `.on_item_click((key, cx) => …)` on the list. Give every row the
+  same explicit `.h(height)`; `sizes()` gives Claudhub's (`row`, `line`).
+  Code in a virtual list is one `CodeLine` per row. Claudhub smooths the
+  wheel of every list and scroll area. Do not animate.
+- **Colour**: `cx.theme().colors` has no warning, info or success tone;
+  `palette()` gives Claudhub's as `#rrggbb` — append two hex digits for a
+  tint (`palette().danger + "26"`).
 - `$CLAUDHUB_SCRIPTS/home-columns` and `$CLAUDHUB_SCRIPTS/dashboard` are
   examples written at first launch: a home rearranged from the cards, and a
   tab built from the module's data.

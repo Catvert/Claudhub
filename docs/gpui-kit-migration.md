@@ -69,6 +69,7 @@ multi-cursor rendering (0.6.1).
 | `Settings::on_select` | `src/ui/settings_view.rs`: remember the selected settings page |
 | `ResizeHandle::reach` | the dock skin: grab the divider in the gutter beside a dock |
 | `MessageScrollerState::list_state` | `src/ui/chat_view.rs`: the transcript's wheel eased (`scroll::wheel_capture`) rather than let jump |
+| `gpui_shell::scroll_hook::observe_scroll_areas` (on `claudhub-v0.7.0-gpui-fast` only, with `gpui-shell` itself) | `src/ui/scripts.rs`: the scripts' lists and scroll areas get Claudhub's wheel smoothing |
 
 The fork also preserves behavior without a new call site: dock card geometry
 and spacing, resize targets across panel gutters, split sizes surviving layout

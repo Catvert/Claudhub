@@ -184,6 +184,7 @@ pub fn run(
         // layer it builds on, which `gpui_kit::init` set up already and which
         // this leaves as it is. Before the keymap takes its snapshot.
         gpui_shell::init(cx);
+        scripts::install_smoothing();
         app::Frame::register(cx);
         highlight::register_languages();
         install_fonts(cx);

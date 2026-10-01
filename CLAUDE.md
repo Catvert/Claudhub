@@ -537,6 +537,11 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   vue qui ne l'a pas lue garde sa mise en page et ses cartes périmées.
   Après chaque lot d'événements, les vues sont rafraîchies (`ScriptView::refresh`,
   le script retourne).
+- **La molette d'un script est lissée comme la nôtre** : le Shell signale
+  chaque zone défilante et chaque liste virtuelle qu'une vue dessine
+  (`scroll_hook`, un ajout du fork), son mouvement y avance ; la molette est
+  entendue **autour** de la vue, et la zone dont l'offset a bougé depuis est
+  celle que gpui vient de faire sauter.
 - **Pas de `ShellRoot`** : la racine de la fenêtre est celle de Kit, et les
   deux veulent l'être. Dialogues, toasts et tooltips d'un script ne
   s'affichent pas ; `notify()` passe par nos bulles.
@@ -556,8 +561,10 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   supprimé, il reste tel quel. `sentry` est le portillon
   d'acceptation : un panneau entier, réglages, jeton et requêtes compris.
 - **Ce que Claudhub prête** (`ui::script_kit`) : des pièces peintes par
-  nous — `CodeBlock` (coloration mise en cache : un composant est rebâti à
-  chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se **nomme** — et des
+  nous — `CodeBlock` et `CodeLine` (coloration mise en cache : un composant
+  est rebâti à chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se
+  **nomme** ; `sizes()` (nos hauteurs, pour une liste virtuelle) et
+  `palette()` (les tons que `cx.theme().colors` n'a pas) — et des
   gestes : `locate`/`open_file` (seul un fichier que `locate` trouve s'ouvre,
   le chemin venant de données reçues), `ask_agent` (le dialogue de relecture),
   `relative_time`.
@@ -630,7 +637,8 @@ l'accueil relit les projets affichés toutes les deux secondes ; la main n'y
 **Le fork de GPUI Kit** : seuls `gpui-base` et `gpui-component` sont patchés
 (`Cargo.toml`), la façade `gpui-kit` vient de crates.io ; `gpui-shell`, que
 Kit ne publie pas, est pris dans le fork **au même `rev`**, avec le patch
-`rquickjs` que le workspace de Kit pose à sa racine. **GPUI vient de
+`rquickjs` que le workspace de Kit pose à sa racine ; il porte un ajout à
+nous, `scroll_hook`. **GPUI vient de
 gpui-fast** (mode retenu) : les crates `compat/` de ce dépôt portent les noms et
 la version des `gpui-pre` que Kit épingle ; le fork est donc épinglé sur sa
 branche `claudhub-v0.7.0-gpui-fast`, qui suit l'API de gpui-fast — un correctif

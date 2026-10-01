@@ -46,6 +46,12 @@ export interface CodeLine { line: number; text: string; }
  * `CodeBlock.new("id", { path: "app/Http/Kernel.php", lines, mark: 42 })`.
  */
 export const CodeBlock: HostComponent;
+/**
+ * One line of an excerpt, for a virtual list of one-line rows: the whole
+ * excerpt is given — it is coloured as one, and cached — and `index` says
+ * which of its lines this row is: `CodeLine.new("id", { path, lines, index, mark })`.
+ */
+export const CodeLine: HostComponent;
 /** One of Claudhub's icons: `Icon.new("id", { name: "circle-x", size: "xsmall" | "small" | "medium" | "large", tone })`. */
 export const Icon: HostComponent;
 /** A word in a tinted pill: `Badge.new("id", { text: "error", tone: "danger" })`. */
@@ -61,6 +67,20 @@ export function open_file(path: string, line?: number): void;
 export function ask_agent(text: string): void;
 /** An ISO 8601 instant as the interface says one: "3 min ago", or a local date. */
 export function relative_time(iso: string): string;
+/**
+ * Claudhub's heights, in pixels, for a virtual list to be told exactly:
+ * `row` is a list row's, `line` a line of code's.
+ */
+export function sizes(): { row: number; line: number };
+/**
+ * Claudhub's palette, as `#rrggbb` — what `cx.theme().colors` lacks: the
+ * tones a state is told by. Append two digits for a tint: `palette().danger + "26"`.
+ */
+export function palette(): {
+  danger: string; warning: string; info: string; success: string; primary: string;
+  foreground: string; muted: string; muted_foreground: string; background: string;
+  secondary: string; accent: string; border: string; list_hover: string; list_active: string; ring: string;
+};
 "#;
 
 /// Adds the pieces and the gestures to the module of the board of `path`.
@@ -72,6 +92,7 @@ pub(super) fn lend(
 ) -> HostModule {
     module
         .component("CodeBlock", code_block)
+        .component("CodeLine", code_line)
         .component("Icon", |args, _, cx| {
             let props = args.props();
             let Some(name) = text(props, "name").filter(|name| shipped(name)) else {
@@ -186,6 +207,47 @@ pub(super) fn lend(
                 })
             }
         })
+        .function("sizes", |_| {
+            gpui_shell::with_current_app(|cx| {
+                let line = code_line_height(cx);
+                gpui_shell::HostObject::new()
+                    .field(
+                        "row",
+                        f64::from(f32::from(crate::ui::theme::row_height(cx))),
+                    )
+                    .field("line", f64::from(f32::from(line)))
+                    .into()
+            })
+            .ok_or_else(crate::ui::scripts::unreachable)
+        })
+        .function("palette", |_| {
+            gpui_shell::with_current_app(|cx| {
+                let theme = cx.theme();
+                [
+                    ("danger", theme.danger),
+                    ("warning", theme.warning),
+                    ("info", theme.info),
+                    ("success", theme.success),
+                    ("primary", theme.primary),
+                    ("foreground", theme.foreground),
+                    ("muted", theme.muted),
+                    ("muted_foreground", theme.muted_foreground),
+                    ("background", theme.background),
+                    ("secondary", theme.secondary),
+                    ("accent", theme.accent),
+                    ("border", theme.border),
+                    ("list_hover", theme.list_hover),
+                    ("list_active", theme.list_active),
+                    ("ring", theme.ring),
+                ]
+                .into_iter()
+                .fold(gpui_shell::HostObject::new(), |object, (name, colour)| {
+                    object.field(name, hex(colour))
+                })
+                .into()
+            })
+            .ok_or_else(crate::ui::scripts::unreachable)
+        })
         .function("relative_time", |arguments| {
             Ok(HostValue::from(crate::ui::sentry::when(
                 arguments.string(0)?,
@@ -204,6 +266,18 @@ impl ClaudhubApp {
         }
         .locate(|candidate| known.contains(candidate))
     }
+}
+
+/// A colour as `#rrggbb`, its opacity left to whoever tints it.
+fn hex(colour: Hsla) -> String {
+    let rgba = gpui_kit::Rgba::from(colour);
+    let byte = |channel: f32| (channel.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        byte(rgba.r),
+        byte(rgba.g),
+        byte(rgba.b)
+    )
 }
 
 /// A text property, when it is one.
@@ -303,6 +377,94 @@ fn coloured(language: &'static str, source: &str, cx: &App) -> Rc<DocumentHighli
     })
 }
 
+/// The size code is drawn at, and the height of its lines: the diffs'.
+fn code_size(cx: &App) -> gpui_kit::Pixels {
+    px(super::settings::Settings::global(cx).diff_font_size)
+}
+
+fn code_line_height(cx: &App) -> gpui_kit::Pixels {
+    crate::ui::diff_view::line_height(code_size(cx))
+}
+
+/// One painted line of an excerpt: its number in the gutter, its text
+/// coloured, its ground marked when it is the line that matters.
+fn painted_line(
+    number: usize,
+    text: SharedString,
+    styles: Option<&[(std::ops::Range<usize>, gpui_kit::HighlightStyle)]>,
+    marked: bool,
+    cx: &App,
+) -> gpui_kit::Div {
+    let theme = cx.theme();
+    let painted = match styles {
+        Some(styles) if !styles.is_empty() => gpui_kit::StyledText::new(text)
+            .with_highlights(styles.to_vec())
+            .into_any_element(),
+        _ => div().child(text).into_any_element(),
+    };
+    h_flex()
+        .h(code_line_height(cx))
+        .w_full()
+        .gap_2()
+        .items_center()
+        .font_family(theme.mono_font_family.clone())
+        .text_size(code_size(cx))
+        .bg(if marked {
+            theme.warning.opacity(0.15)
+        } else {
+            theme.secondary
+        })
+        .child(
+            div()
+                .w(px(48.))
+                .flex_none()
+                .text_right()
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(number.to_string())),
+        )
+        .child(div().whitespace_nowrap().child(painted))
+}
+
+/// An excerpt's colouring, by the language its path names.
+fn colouring(
+    props: &HostValue,
+    lines: &[(usize, SharedString)],
+    cx: &App,
+) -> Option<Rc<DocumentHighlights>> {
+    let path = text(props, "path").unwrap_or_default();
+    let source: String = lines
+        .iter()
+        .map(|(_, text)| text.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::ui::highlight::language_for_path(Path::new(path))
+        .map(|language| coloured(language, &source, cx))
+}
+
+/// The `CodeLine` component.
+fn code_line(
+    args: gpui_shell::ComponentArgs<'_>,
+    _window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> AnyElement {
+    let props = args.props();
+    let lines = lines_of(props);
+    let index = number(props, "index").unwrap_or(0.).max(0.) as usize;
+    let Some((number_at, text_at)) = lines.get(index).cloned() else {
+        return div().h(code_line_height(cx)).into_any_element();
+    };
+    let mark = number(props, "mark").map(|line| line.max(0.) as usize);
+    let styles = colouring(props, &lines, cx);
+    painted_line(
+        number_at,
+        text_at,
+        styles.as_ref().map(|styles| styles.line(index)),
+        mark == Some(number_at),
+        cx,
+    )
+    .into_any_element()
+}
+
 /// The `CodeBlock` component.
 fn code_block(
     args: gpui_shell::ComponentArgs<'_>,
@@ -312,53 +474,24 @@ fn code_block(
     let props = args.props();
     let lines = lines_of(props);
     let mark = number(props, "mark").map(|line| line.max(0.) as usize);
-    let path = text(props, "path").unwrap_or_default();
-    let source: String = lines
-        .iter()
-        .map(|(_, text)| text.as_ref())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let styles = crate::ui::highlight::language_for_path(Path::new(path))
-        .map(|language| coloured(language, &source, cx));
-    let code = px(super::settings::Settings::global(cx).diff_font_size);
-    let height = crate::ui::diff_view::line_height(code);
-    let theme = cx.theme();
-    let (mono, muted) = (theme.mono_font_family.clone(), theme.muted_foreground);
-    let (ground, marked) = (theme.secondary, theme.warning.opacity(0.15));
+    let styles = colouring(props, &lines, cx);
+    let rows: Vec<gpui_kit::Div> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, (number, text))| {
+            painted_line(
+                number,
+                text,
+                styles.as_ref().map(|styles| styles.line(index)),
+                mark == Some(number),
+                cx,
+            )
+        })
+        .collect();
     v_flex()
         .w_full()
-        .rounded(theme.radius)
+        .rounded(cx.theme().radius)
         .overflow_hidden()
-        .bg(ground)
-        .font_family(mono)
-        .text_size(code)
-        .children(
-            lines
-                .into_iter()
-                .enumerate()
-                .map(|(index, (number, text))| {
-                    let painted = match styles.as_ref().map(|styles| styles.line(index)) {
-                        Some(styles) if !styles.is_empty() => gpui_kit::StyledText::new(text)
-                            .with_highlights(styles.to_vec())
-                            .into_any_element(),
-                        _ => div().child(text).into_any_element(),
-                    };
-                    h_flex()
-                        .h(height)
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .when(mark == Some(number), |row| row.bg(marked))
-                        .child(
-                            div()
-                                .w(px(48.))
-                                .flex_none()
-                                .text_right()
-                                .text_color(muted)
-                                .child(SharedString::from(number.to_string())),
-                        )
-                        .child(div().whitespace_nowrap().child(painted))
-                }),
-        )
+        .children(rows)
         .into_any_element()
 }
