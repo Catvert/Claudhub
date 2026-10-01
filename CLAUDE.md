@@ -153,6 +153,7 @@ src/
     focus_view.rs    la barre latérale des worktrees, les tableaux et leurs vues
     scripts.rs       les scripts lancés : runtime gpui-shell, module `claudhub`,
                      montage, rechargement
+    plugins_view.rs  l'écran Plugins : la liste, l'aperçu, l'agent qui écrit
     summary_view.rs  les onglets d'un tableau, et son Accueil
     pr_view.rs       l'onglet PR : le formulaire, ou la PR, ses vérifications,
                      ses fils de revue et ses gestes
@@ -543,6 +544,13 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   relu hors du thread toutes les demi-secondes ; une sauvegarde cassée laisse
   la vue qui marchait, et l'erreur part en bulle. Les exemples
   (`assets/scripts/`) ne sont écrits qu'à la création du dossier.
+- **L'écran Plugins** (`ui::plugins_view`), ouvert du pied de la barre
+  latérale à la place des tableaux : la liste, l'aperçu du script choisi sur
+  un worktree qu'on choisit, et un agent lancé **dans le dossier des
+  scripts** avec sa consigne (`scripts::editing_prompt`), jamais rouvert au
+  démarrage. L'agent apprend si une sauvegarde a marché par `.status.md`
+  (`scripts::STATUS`), que nous réécrivons : c'est l'aperçu qui charge le
+  script choisi, donc ce qu'il dit est ce que l'utilisateur voit.
 
 **Les nœuds de l'accueil sont des fichiers** (`crate::canvas`,
 `ui::canvas_view`) : un Markdown à en-tête plat par nœud, dans

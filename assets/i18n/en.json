@@ -1233,5 +1233,18 @@
   "settings-script-home": "home",
   "settings-script-tab": "tab",
   "settings-scripts-help": "Each folder holding a claudhub.json is a script: a home, or one more tab on the boards. A change to its files reloads it.",
-  "settings-scripts-open": "Open the folder"
+  "settings-scripts-open": "Open the folder",
+  "plugins-title": "Plugins",
+  "plugins-empty": "No script yet: create one with +, or ask the agent.",
+  "plugins-new": "New script",
+  "plugins-new-tab": "A tab for the boards",
+  "plugins-new-home": "A home for the boards",
+  "plugins-no-worktree": "No worktree to draw it on",
+  "plugins-open-entry": "Open its entry with the system's editor",
+  "plugins-preview": "Preview",
+  "plugins-select": "Select a script to see it drawn on a worktree.",
+  "plugins-agent": "Plugins agent",
+  "plugins-agent-help": "An agent started in the scripts' folder, told how they are written: ask it for a tab, a card, a whole home. Each save reloads the preview.",
+  "plugins-agent-start": "Start the agent",
+  "plugins-agent-none": "No agent profile is configured in the terminal settings."
 }

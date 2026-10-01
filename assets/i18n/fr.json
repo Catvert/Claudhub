@@ -1233,5 +1233,18 @@
   "settings-script-home": "accueil",
   "settings-script-tab": "onglet",
   "settings-scripts-help": "Chaque dossier qui contient un claudhub.json est un script : un accueil, ou un onglet de plus sur les tableaux. Une modification de ses fichiers le recharge.",
-  "settings-scripts-open": "Ouvrir le dossier"
+  "settings-scripts-open": "Ouvrir le dossier",
+  "plugins-title": "Plugins",
+  "plugins-empty": "Aucun script pour l’instant : créez-en un avec +, ou demandez à l’agent.",
+  "plugins-new": "Nouveau script",
+  "plugins-new-tab": "Un onglet pour les tableaux",
+  "plugins-new-home": "Un accueil pour les tableaux",
+  "plugins-no-worktree": "Aucun worktree où l’afficher",
+  "plugins-open-entry": "Ouvrir son point d’entrée avec l’éditeur du système",
+  "plugins-preview": "Aperçu",
+  "plugins-select": "Choisissez un script pour le voir dessiné sur un worktree.",
+  "plugins-agent": "Agent des plugins",
+  "plugins-agent-help": "Un agent lancé dans le dossier des scripts, qui sait comment ils s’écrivent : demandez-lui un onglet, une carte, tout un accueil. Chaque sauvegarde recharge l’aperçu.",
+  "plugins-agent-start": "Lancer l’agent",
+  "plugins-agent-none": "Aucun profil d’agent n’est configuré dans les réglages du terminal."
 }

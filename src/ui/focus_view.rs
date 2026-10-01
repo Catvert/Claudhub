@@ -96,6 +96,8 @@ impl ClaudhubApp {
         let gap = window.rem_size() * 0.75;
         let sidebar = self.render_focus_sidebar(shown, &frame.doings, cx);
         let main: AnyElement = match self.overview_zoomed.clone() {
+            // The Plugins screen takes the place of the boards.
+            _ if self.scripts.screen.open => self.render_plugins(&frame.live, window, cx),
             // A maximised node fills the middle, the sidebar staying: it is
             // how one goes elsewhere.
             Some(node) => v_flex()
@@ -234,6 +236,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_plugins(cx);
         let beside = event.modifiers().secondary();
         if event.click_count() >= 2 {
             // The second press of a `Ctrl` double click has nothing more to
@@ -292,6 +295,8 @@ impl ClaudhubApp {
         if self.focus_rail {
             return self.render_focus_rail(shown, doings, cx);
         }
+        // While the Plugins screen is open, no worktree reads as on show.
+        let shown = if self.scripts.screen.open { &[] } else { shown };
         let theme = cx.theme().clone();
         let mut rows: Vec<AnyElement> = Vec::new();
         for repo in self.repos.iter() {
@@ -476,6 +481,7 @@ impl ClaudhubApp {
             .gap_1p5()
             .border_t_1()
             .border_color(theme.border)
+            .child(self.plugins_entry(false, cx))
             .child(self.view_segments(false, cx).w_full())
             .child(
                 h_flex()
@@ -765,6 +771,7 @@ impl ClaudhubApp {
             .items_center()
             .border_t_1()
             .border_color(theme.border)
+            .child(self.plugins_entry(true, cx))
             .child(self.view_segments(true, cx))
             .children(self.render_hidden_menu(true, cx))
             .child(self.open_repo_button(cx))

@@ -193,6 +193,146 @@ pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// The file, at the scripts' root, where Claudhub says how each script
+/// fared: the agent that edits them reads it after a save rather than ask.
+/// Hidden, so that the reading of the folder passes it by.
+pub const STATUS: &str = ".status.md";
+
+/// How a script fared, as far as the boards and the Plugins screen know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fared {
+    /// Mounted from its current sources, somewhere.
+    Loaded,
+    /// Its current sources did not mount: why.
+    Failed(String),
+    /// Not shown since its sources last changed.
+    NotShown,
+}
+
+/// The text of [`STATUS`]: each script and how it fared, the folders that
+/// are not scripts and why, and what the Plugins screen has selected.
+pub fn status_text(
+    scripts: &[(&Script, Fared)],
+    broken: &[(String, String)],
+    selected: Option<&str>,
+    preview: Option<&str>,
+) -> String {
+    let mut out = String::from(
+        "# Claudhub scripts — status\n\n\
+         Rewritten by Claudhub whenever a script loads, fails or changes. \
+         A script is loaded only where it is shown: select it in the Plugins \
+         screen to have it loaded and its errors reported here.\n\n",
+    );
+    match selected {
+        Some(id) => out.push_str(&format!("Selected in the Plugins screen: `{id}`")),
+        None => out.push_str("Nothing selected in the Plugins screen"),
+    }
+    if let Some(preview) = preview {
+        out.push_str(&format!(", previewed on the worktree `{preview}`"));
+    }
+    out.push_str(".\n");
+    for (script, fared) in scripts {
+        let kind = match script.kind {
+            Kind::Tab => "tab",
+            Kind::Home => "home",
+        };
+        out.push_str(&format!(
+            "\n## `{}` ({kind}) — {}\n",
+            script.id, script.title
+        ));
+        match fared {
+            Fared::Loaded => out.push_str("\nLoaded.\n"),
+            Fared::NotShown => out.push_str("\nNot shown since its last change.\n"),
+            Fared::Failed(why) => {
+                out.push_str("\n**Failed to load:**\n\n```\n");
+                out.push_str(why.trim_end());
+                out.push_str("\n```\n");
+            }
+        }
+    }
+    for (id, why) in broken {
+        out.push_str(&format!("\n## `{id}` — not a script\n\n{why}\n"));
+    }
+    out
+}
+
+/// The first free folder name under `root` for a new script: `base`, then
+/// `base-2`, `base-3`…
+pub fn free_id(root: &Path, base: &str) -> String {
+    (1..)
+        .map(|n| match n {
+            1 => base.to_string(),
+            n => format!("{base}-{n}"),
+        })
+        .find(|id| !root.join(id).exists())
+        .expect("an unbounded range has a free name")
+}
+
+/// The files of a new script of `kind`: a manifest and an entry that draws
+/// something, to be changed.
+pub fn skeleton(kind: Kind) -> [(&'static str, String); 2] {
+    let (kind_name, title_fr, title_en, body) = match kind {
+        Kind::Tab => (
+            "tab",
+            "Nouvel onglet",
+            "New tab",
+            "v_flex()\n      .size_full()\n      .gap(12)\n      .p(12)\n      \
+             .child(div().text_size(16).font_semibold().child(tree.name))\n      \
+             .child(div().text_size(12).text_color(colors.muted_foreground).child(tree.branch ?? \"\"))",
+        ),
+        Kind::Home => (
+            "home",
+            "Nouvel accueil",
+            "New home",
+            "h_flex()\n      .size_full()\n      .gap(12)\n      \
+             .child(v_flex().flex_1().min_w_0().gap(12).overflow_y_scrollbar()\n        \
+             .child(BranchCard.new(\"branch\"))\n        .child(ChangesCard.new(\"changes\")))\n      \
+             .child(v_flex().flex_1().min_w_0().child(Terminals.new(\"terminals\")))",
+        ),
+    };
+    let manifest = format!(
+        "{{\n  \"title\": {{ \"fr\": \"{title_fr}\", \"en\": \"{title_en}\" }},\n  \
+         \"kind\": \"{kind_name}\",\n  \"icon\": \"layout-dashboard\"\n}}\n"
+    );
+    let entry = format!(
+        "// A Claudhub script — see the `Scripts` section of the claudhub skill,\n\
+         // and `gpui-kit.d.ts` beside this file for every signature.\n\n\
+         import {{ View, div }} from \"gpui-kit\";\n\
+         import {{ h_flex, v_flex }} from \"gpui-base\";\n\
+         import {{ worktree, BranchCard, ChangesCard, Terminals }} from \"claudhub\";\n\n\
+         export default class Script extends View {{\n  \
+         render(cx) {{\n    \
+         const colors = cx.theme().colors;\n    \
+         const tree = worktree();\n    \
+         return {body};\n  \
+         }}\n\
+         }}\n"
+    );
+    [(MANIFEST, manifest), (DEFAULT_ENTRY, entry)]
+}
+
+/// What the agent of the Plugins screen is told before anything: where it
+/// is, what it may touch, and how it learns whether a save worked.
+pub fn editing_prompt(root: &Path, selected: Option<&str>) -> String {
+    let root = root.display();
+    let selected = selected
+        .map(|id| {
+            format!(" The user has the script `{id}` selected: start there unless asked otherwise.")
+        })
+        .unwrap_or_default();
+    format!(
+        "You are editing Claudhub's own interface: the scripts of its focus view, \
+         in {root} (also $CLAUDHUB_SCRIPTS). Each folder is one script — a `claudhub.json` \
+         and a JavaScript entry run by Claudhub's embedded runtime; the `Scripts` section \
+         of the claudhub skill gives the format and the `claudhub` module, and each \
+         script's `gpui-kit.d.ts` gives every signature: read them before writing code. \
+         Work only inside this folder. Claudhub reloads a script within a second of a \
+         save; after each save, wait a second and read {root}/{STATUS}, which says \
+         whether it loaded and, if not, the error — fix it before saying you are done. \
+         Never edit {STATUS} or gpui-kit.d.ts: Claudhub writes them.{selected}"
+    )
+}
+
 /// What a script's sources look like from outside: a change to one of them
 /// changes this, which is what a reload waits for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -320,6 +460,36 @@ mod tests {
     fn a_manifest_that_is_not_an_object_is_refused() {
         assert!(read("[]").is_err());
         assert!(read("not json").is_err());
+    }
+
+    #[test]
+    fn the_status_says_each_script_and_its_error() {
+        let (tab, home) = (read("{}").unwrap(), read(r#"{"kind": "home"}"#).unwrap());
+        let text = status_text(
+            &[
+                (&tab, Fared::Loaded),
+                (&home, Fared::Failed("SyntaxError: x\n".into())),
+            ],
+            &[("old".into(), "its entry `main.js` is missing".into())],
+            Some("board"),
+            Some("/w"),
+        );
+        assert!(text
+            .contains("Selected in the Plugins screen: `board`, previewed on the worktree `/w`."));
+        assert!(text.contains("## `board` (tab) — board\n\nLoaded."));
+        assert!(text.contains("**Failed to load:**\n\n```\nSyntaxError: x\n```"));
+        assert!(text.contains("## `old` — not a script"));
+    }
+
+    #[test]
+    fn a_skeleton_reads_as_a_script_of_its_kind() {
+        for kind in [Kind::Tab, Kind::Home] {
+            let [(manifest_name, manifest), (entry_name, entry)] = skeleton(kind);
+            assert_eq!((manifest_name, entry_name), (MANIFEST, DEFAULT_ENTRY));
+            let script = parse("new", Path::new("/s/new"), &manifest, "en").unwrap();
+            assert_eq!(script.kind, kind);
+            assert!(entry.contains("export default class"));
+        }
     }
 
     #[test]

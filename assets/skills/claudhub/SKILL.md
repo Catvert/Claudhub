@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 3 -->
+<!-- claudhub-skill-version: 4 -->
 
 # Claudhub
 
@@ -152,7 +152,12 @@ letters, digits, `-`, `_`, `.`. It holds:
 
 Saving any file reloads the script on every board within a second. If it
 fails to load, the previous version stays on screen and Claudhub shows the
-error in a bubble — read it, fix, save again. A `home` script is used once
+error in a bubble. **After each save, wait a second and read
+`$CLAUDHUB_SCRIPTS/.status.md`**: Claudhub rewrites it with each script's
+state — loaded, or the load error in full. A script is loaded only where it
+is shown; the user's **Plugins** screen (foot of the home screen's sidebar)
+previews the selected one, and the status names it. Never write
+`.status.md` nor `gpui-kit.d.ts` yourself. A `home` script is used once
 the user picks it in Settings → Scripts. Claudhub writes `gpui-kit.d.ts`
 beside the entry at each load: **read it** for the exact element, style and
 module signatures before writing code.

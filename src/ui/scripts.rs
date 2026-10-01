@@ -62,7 +62,7 @@ pub fn root() -> Option<PathBuf> {
 
 /// The scripts written into the folder the first time: something to see,
 /// and to change.
-const EXAMPLES: &[(&str, &str)] = &[
+pub(super) const EXAMPLES: &[(&str, &str)] = &[
     (
         "home-columns/claudhub.json",
         include_str!("../../assets/scripts/home-columns/claudhub.json"),
@@ -101,6 +101,23 @@ pub(crate) struct Scripts {
     /// What the agents of the boards on show were doing at the last render:
     /// the terminals' components and `terminals()` read it.
     pub(super) at_work: AtWork,
+    /// The Plugins screen — see `ui::plugins_view`.
+    pub(super) screen: Screen,
+    /// The last text written to the status file: written again only when it
+    /// says something else.
+    status: String,
+}
+
+/// The Plugins screen: whether it is the one shown, and what it has chosen.
+#[derive(Default)]
+pub(crate) struct Screen {
+    pub open: bool,
+    /// The script previewed and named to the agent.
+    pub selected: Option<String>,
+    /// The worktree the preview is drawn for; the one on show by default.
+    pub preview_on: Option<PathBuf>,
+    /// The terminal of the agent that edits the scripts, by its view's id.
+    pub agent: Option<u64>,
 }
 
 struct Mounted {
@@ -123,6 +140,11 @@ impl Scripts {
             .iter()
             .map(|(script, _)| script)
             .filter(move |script| script.kind == kind)
+    }
+
+    /// How many scripts were found.
+    pub fn count(&self) -> usize {
+        self.found.len()
     }
 
     /// The folders that meant to be scripts and are not, and why.
@@ -179,7 +201,103 @@ impl ClaudhubApp {
         for (id, why) in newly {
             self.announce_error(tr!("scripts-broken", { id: id, why: why }), cx);
         }
+        self.write_scripts_status(cx);
         cx.notify();
+    }
+
+    /// How each script fared: loaded from its current sources somewhere,
+    /// failed, or not shown since it changed.
+    fn fared(&self, script: &Script, stamp: Stamp) -> scripts::Fared {
+        let failed = self
+            .scripts
+            .failed
+            .iter()
+            .find(|((_, id), (at, _))| *id == script.id && *at == stamp);
+        if let Some((_, (_, why))) = failed {
+            return scripts::Fared::Failed(why.clone());
+        }
+        let loaded = self
+            .scripts
+            .mounted
+            .iter()
+            .any(|((_, id), mounted)| *id == script.id && mounted.stamp == stamp);
+        if loaded {
+            scripts::Fared::Loaded
+        } else {
+            scripts::Fared::NotShown
+        }
+    }
+
+    /// The status file the editing agent reads — see `scripts::STATUS` —,
+    /// written off the thread, and only when it says something new.
+    pub(super) fn write_scripts_status(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = root() else {
+            return;
+        };
+        let fared: Vec<(&Script, scripts::Fared)> = self
+            .scripts
+            .found
+            .iter()
+            .map(|(script, stamp)| (script, self.fared(script, *stamp)))
+            .collect();
+        let preview = self
+            .scripts
+            .screen
+            .preview_on
+            .as_ref()
+            .map(|path| path.display().to_string());
+        let text = scripts::status_text(
+            &fared,
+            &self.scripts.broken,
+            self.scripts.screen.selected.as_deref(),
+            preview.as_deref(),
+        );
+        if text == self.scripts.status || !root.is_dir() {
+            return;
+        }
+        self.scripts.status = text.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = std::fs::write(root.join(scripts::STATUS), text) {
+                    log::warn!("writing the scripts' status: {error}");
+                }
+            })
+            .detach();
+    }
+
+    /// A new script of `kind`, written off the thread under a free name,
+    /// then selected on the Plugins screen.
+    pub(super) fn create_script(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        let Some(root) = root() else {
+            return;
+        };
+        let base = match kind {
+            Kind::Tab => "new-tab",
+            Kind::Home => "new-home",
+        };
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn(async move {
+                    let id = scripts::free_id(&root, base);
+                    let dir = root.join(&id);
+                    std::fs::create_dir_all(&dir)?;
+                    for (name, content) in scripts::skeleton(kind) {
+                        std::fs::write(dir.join(name), content)?;
+                    }
+                    std::io::Result::Ok(id)
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match written {
+                Ok(id) => {
+                    app.scripts.screen.selected = Some(id);
+                    app.write_scripts_status(cx);
+                    cx.notify();
+                }
+                Err(error) => app.announce_error(SharedString::from(error.to_string()), cx),
+            });
+        })
+        .detach();
     }
 
     /// The script views run again: what they read may have changed. Called
@@ -270,7 +388,23 @@ impl ClaudhubApp {
                 self.scripts.failed.insert(key, (stamp, why));
             }
         }
+        self.write_scripts_status(cx);
         cx.notify();
+    }
+
+    /// Why the last mount of `id` on the board of `path` failed, if its
+    /// sources have not changed since.
+    pub(super) fn script_failure(&self, path: &Path, id: &str) -> Option<&str> {
+        let (_, stamp) = self
+            .scripts
+            .found
+            .iter()
+            .find(|(script, _)| script.id == id)?;
+        self.scripts
+            .failed
+            .get(&(path.to_path_buf(), id.to_string()))
+            .filter(|(at, _)| at == stamp)
+            .map(|(_, why)| why.as_str())
     }
 
     /// Forgets the views of a worktree that went away.
@@ -817,8 +951,8 @@ mod tests {
         assert_eq!(registered, declared);
     }
 
-    /// The scripts shipped as examples are found, link against the module's
-    /// declared exports and evaluate — a renamed export or a typo in an
+    /// The scripts shipped as examples, and the skeletons of a new one, are
+    /// found, link against the module's declared exports and evaluate — a renamed export or a typo in an
     /// import fails here rather than on someone's first board.
     #[test]
     fn the_shipped_scripts_load_against_the_module() {
@@ -827,6 +961,16 @@ mod tests {
         assert!(scripts::seed(&root, EXAMPLES).unwrap());
         // Seeded once: a folder that exists is the user's.
         assert!(!scripts::seed(&root, EXAMPLES).unwrap());
+        // And what « New script » writes, of either kind.
+        for (kind, base) in [(Kind::Tab, "new-tab"), (Kind::Home, "new-home")] {
+            let id = scripts::free_id(&root, base);
+            assert_eq!(id, base);
+            std::fs::create_dir_all(root.join(&id)).unwrap();
+            for (name, content) in scripts::skeleton(kind) {
+                std::fs::write(root.join(&id).join(name), content).unwrap();
+            }
+            assert_eq!(scripts::free_id(&root, base), format!("{base}-2"));
+        }
 
         let found = scripts::discover(&root, "fr");
         assert_eq!(found.broken, Vec::<(String, String)>::new());
@@ -837,7 +981,12 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            [("dashboard", Kind::Tab), ("home-columns", Kind::Home)]
+            [
+                ("dashboard", Kind::Tab),
+                ("home-columns", Kind::Home),
+                ("new-home", Kind::Home),
+                ("new-tab", Kind::Tab),
+            ]
         );
 
         gpui_shell::policy::set_default(Policy::new().with_host_module(stub()).unwrap());
