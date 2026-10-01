@@ -54,6 +54,20 @@ pub enum Range {
     /// `point` is the commit and not the ref: the ref moves with the next
     /// point, and a list filed under it would silently change meaning.
     Since { point: String },
+    /// What the checked-out line went through over a period of days: the last
+    /// commit before `from` against the last one before the day after `to`,
+    /// both read along HEAD's first parents — HEAD itself when `to` is `None`,
+    /// "up to today", which stays today the next morning.
+    ///
+    /// Days and not the commits they resolve to: the range is what the user
+    /// chose, kept and filed as such, and the commits are read again with each
+    /// list. Written `YYYY-MM-DD`; a day starts at local midnight, as git reads
+    /// it. Committed work only, like `Branch`: what lies on disk belongs to no
+    /// day yet.
+    ///
+    /// Nothing before `from` is the empty tree: a period that starts before
+    /// the first commit shows everything written since.
+    Dates { from: String, to: Option<String> },
 }
 
 impl Range {
@@ -81,6 +95,17 @@ impl Range {
             (Self::Since { point }, None) => {
                 Ok(vec![point.clone(), super::snapshot::working_tree(dir)?])
             }
+            (Self::Dates { from, to }, _) => {
+                let start = last_before(dir, from, false)?;
+                let end = match to {
+                    Some(to) => last_before(dir, to, true)?,
+                    None => Some("HEAD".to_string()),
+                };
+                Ok([start, end]
+                    .into_iter()
+                    .map(|side| side.unwrap_or_else(|| EMPTY_TREE.to_string()))
+                    .collect())
+            }
             _ => Ok(self.args()),
         }
     }
@@ -91,6 +116,8 @@ impl Range {
             // Never asked: `resolve` answers for it. Were it asked, the point
             // against the index would be the nearest honest reading.
             Self::Since { point } => vec![point.clone()],
+            // Never asked either: the days resolve to commits there.
+            Self::Dates { .. } => vec!["HEAD".into()],
             Self::Branch { base } => vec![format!("{base}...HEAD")],
             Self::Commit { id, parent } => match parent {
                 Some(parent) => vec![parent.clone(), id.clone()],
@@ -158,6 +185,38 @@ pub struct FileDiff {
     pub binary: bool,
     /// Diff truncated by git (very large file) or empty.
     pub empty: bool,
+}
+
+/// The last commit on HEAD's first-parent line from before `day` — or, with
+/// `through`, from before the day after it, so that the day itself is in.
+///
+/// The day is parsed here rather than handed over as written: `--before`
+/// reads almost anything as a date, and a store edited by hand would compare
+/// against a moment nobody chose. The time is spelled out too — git fills a
+/// bare date in with the current time of day.
+fn last_before(dir: &Path, day: &str, through: bool) -> Result<Option<String>> {
+    let parsed = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("not a day: {day:?}"))?;
+    let bound = if through {
+        parsed
+            .succ_opt()
+            .ok_or_else(|| anyhow::anyhow!("no day after {day}"))?
+    } else {
+        parsed
+    };
+    let out = git(
+        dir,
+        &[
+            "rev-list",
+            "-1",
+            "--first-parent",
+            &format!("--before={} 00:00:00", bound.format("%Y-%m-%d")),
+            "HEAD",
+            "--",
+        ],
+    )?;
+    let commit = out.trim();
+    Ok((!commit.is_empty()).then(|| commit.to_string()))
 }
 
 /// Lists the review range's files with their volume.
@@ -809,6 +868,53 @@ index 1234567..89abcde 100644
         let lines: Vec<_> = diff.hunks.iter().flat_map(|hunk| &hunk.lines).collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0].kind, DiffLineKind::Added);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A period compares the commit before its first day with the last one of
+    /// its last day; one that opens before the first commit starts from
+    /// nothing, and "up to today" is HEAD.
+    #[test]
+    fn a_period_of_days_compares_the_commits_around_it() {
+        let dir = scratch("dates");
+        let commit = |name: &str, day: &str| {
+            std::fs::write(dir.join(name), format!("{name}\n")).unwrap();
+            sh(&dir, &["add", name]);
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["commit", "-q", "-m", name])
+                .env("GIT_COMMITTER_DATE", format!("{day} 12:00:00"))
+                .env("GIT_AUTHOR_DATE", format!("{day} 12:00:00"))
+                .output()
+                .expect("git");
+            assert!(out.status.success());
+        };
+        commit("a.txt", "2026-09-01");
+        commit("b.txt", "2026-09-10");
+        commit("c.txt", "2026-09-20");
+        let listed = |from: &str, to: Option<&str>| -> Vec<String> {
+            let range = Range::Dates {
+                from: from.into(),
+                to: to.map(String::from),
+            };
+            files(&dir, &range)
+                .unwrap()
+                .into_iter()
+                .map(|file| file.path.display().to_string())
+                .collect()
+        };
+        assert_eq!(listed("2026-09-05", None), ["b.txt", "c.txt"]);
+        // The last day is in: b was committed during it.
+        assert_eq!(listed("2026-09-05", Some("2026-09-10")), ["b.txt"]);
+        assert_eq!(listed("2026-08-01", Some("2026-09-01")), ["a.txt"]);
+        assert!(listed("2026-09-11", Some("2026-09-15")).is_empty());
+        // A day that is no day is refused, not guessed.
+        let wrong = Range::Dates {
+            from: "last tuesday".into(),
+            to: None,
+        };
+        assert!(files(&dir, &wrong).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

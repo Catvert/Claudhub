@@ -1219,15 +1219,7 @@ impl ClaudhubApp {
             View::Review => self
                 .review
                 .get(path)
-                .and_then(
-                    |state| match (state.since_review, state.review_point.as_ref()) {
-                        (true, Some(_)) => Some(tr!("sheet-review-since")),
-                        _ => state
-                            .base
-                            .clone()
-                            .map(|base| tr!("sheet-review-against", { base: base })),
-                    },
-                )
+                .and_then(|state| state.review_against())
                 .map(|text| div().truncate().child(text).into_any_element()),
             View::Todo => self
                 .review

@@ -347,6 +347,13 @@ pub fn render_note(note: &Note) -> String {
             front.insert("range", "since".into());
             front.insert("point", point.clone());
         }
+        DiffRange::Dates { from, to } => {
+            front.insert("range", "dates".into());
+            front.insert("from", from.clone());
+            if let Some(to) = to {
+                front.insert("to", to.clone());
+            }
+        }
     }
     front.insert("sent", note.sent.to_string());
     front.insert("done", note.done.to_string());
@@ -389,6 +396,10 @@ pub fn parse_note(text: &str) -> Option<Note> {
         },
         Some("since") => DiffRange::Since {
             point: front.get("point")?.clone(),
+        },
+        Some("dates") => DiffRange::Dates {
+            from: front.get("from")?.clone(),
+            to: front.get("to").cloned(),
         },
         _ => DiffRange::Working,
     };
@@ -498,6 +509,8 @@ fn range_key(range: &DiffRange) -> String {
         DiffRange::Branch { base } => format!("branch {base}"),
         DiffRange::Commit { id, .. } => format!("commit {id}"),
         DiffRange::Since { point } => format!("since {point}"),
+        // `from..to`, or `from..` up to today: neither side holds a space.
+        DiffRange::Dates { from, to } => format!("dates {from}..{}", to.as_deref().unwrap_or("")),
     }
 }
 
@@ -515,6 +528,13 @@ fn range_of(key: &str) -> Option<DiffRange> {
         "since" if !rest.is_empty() => Some(DiffRange::Since {
             point: rest.to_string(),
         }),
+        "dates" => {
+            let (from, to) = rest.split_once("..")?;
+            (!from.is_empty()).then(|| DiffRange::Dates {
+                from: from.to_string(),
+                to: (!to.is_empty()).then(|| to.to_string()),
+            })
+        }
         _ => None,
     }
 }
@@ -702,6 +722,21 @@ mod tests {
         assert_eq!(parse_note(&text), Some(note));
     }
 
+    /// And one taken over a period keeps its days, the open end included.
+    #[test]
+    fn a_note_taken_over_a_period_keeps_its_days() {
+        for to in [None, Some("2026-09-07".to_string())] {
+            let note = Note {
+                range: DiffRange::Dates {
+                    from: "2026-09-01".into(),
+                    to,
+                },
+                ..note()
+            };
+            assert_eq!(parse_note(&render_note(&note)), Some(note));
+        }
+    }
+
     /// The name carries only the id and the file: a note that slips by ten lines
     /// would otherwise have a different name on every write, and the vault's
     /// links would point into the void.
@@ -793,6 +828,24 @@ mod tests {
                 },
                 path: PathBuf::from("src/relu.rs"),
                 added: 4,
+                removed: 1,
+            },
+            Reviewed {
+                range: DiffRange::Dates {
+                    from: "2026-09-01".into(),
+                    to: None,
+                },
+                path: PathBuf::from("src/depuis.rs"),
+                added: 2,
+                removed: 0,
+            },
+            Reviewed {
+                range: DiffRange::Dates {
+                    from: "2026-09-01".into(),
+                    to: Some("2026-09-07".into()),
+                },
+                path: PathBuf::from("src/semaine.rs"),
+                added: 1,
                 removed: 1,
             },
         ];
