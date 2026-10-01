@@ -12,11 +12,17 @@
 //!
 //! The first entry, once a review point has been set, is no branch: it is
 //! "since my last review" (`git::snapshot`), and it says when the point was set.
+//!
+//! **The tags and the periods are offered here too** (`Compare`): they answer
+//! the same question — from where does the review read — and they are kept
+//! apart from the base, which the pull request and the merge go on using. A
+//! tag is an entry among the branches; a period is picked in the calendar
+//! beside the selector, and while it is the one shown it heads the list.
 
 use gpui_kit::component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
 use gpui_kit::{div, prelude::*, px, App, IntoElement, SharedString, Window};
 
-use crate::git::{Branch, BranchKind};
+use crate::git::{Branch, BranchKind, DiffRange, Tag};
 use crate::tr;
 
 /// The value of the "since my last review" entry.
@@ -27,11 +33,115 @@ use crate::tr;
 /// `refs/heads/@` is a perfectly good branch.)
 pub const SINCE_REVIEW: &str = ":review";
 
+/// The prefix of a tag's value. A `:` for the reason of `SINCE_REVIEW`: no
+/// branch can be named like it, and no tag either.
+const TAG_PREFIX: &str = ":tag:";
+
+/// The value of the period's entry.
+pub const PERIOD: &str = ":period";
+
+/// What the branch review reads from when it is neither the base nor the
+/// review point.
+///
+/// **Not the base**: the base is also what the pull request targets and what
+/// the merge goes into, and a tag or a week is neither. Kept beside it, and
+/// for its reason: a choice of the user's, per worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Compare {
+    /// From a tag up to HEAD.
+    Tag(String),
+    /// A period of days, `YYYY-MM-DD`; no end is "up to today".
+    Dates { from: String, to: Option<String> },
+}
+
+impl Compare {
+    /// The range the review panel lists.
+    ///
+    /// A tag is a base like a branch — three dots, what was written since —
+    /// spelled in full: `v1` alone would be the branch if one bore the name.
+    pub fn range(&self) -> DiffRange {
+        match self {
+            Self::Tag(tag) => DiffRange::Branch {
+                base: format!("refs/tags/{tag}"),
+            },
+            Self::Dates { from, to } => DiffRange::Dates {
+                from: from.clone(),
+                to: to.clone(),
+            },
+        }
+    }
+
+    /// Its value in the selector.
+    pub fn value(&self) -> String {
+        match self {
+            Self::Tag(tag) => format!("{TAG_PREFIX}{tag}"),
+            Self::Dates { .. } => PERIOD.to_string(),
+        }
+    }
+
+    /// The tag a selector value names, if it names one.
+    pub fn tag_of(value: &str) -> Option<Self> {
+        value
+            .strip_prefix(TAG_PREFIX)
+            .filter(|tag| !tag.is_empty())
+            .map(|tag| Self::Tag(tag.to_string()))
+    }
+
+    /// The days picked in the calendar, as a period.
+    ///
+    /// An end on today or after is no end: "the last seven days" picked on
+    /// Monday still means up to now on Tuesday, and today's commits are only
+    /// HEAD's anyway. The two ends come in either order.
+    pub fn period(
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+        today: chrono::NaiveDate,
+    ) -> Self {
+        let (start, end) = (start.min(end), start.max(end));
+        Self::Dates {
+            from: start.format("%Y-%m-%d").to_string(),
+            to: (end < today).then(|| end.format("%Y-%m-%d").to_string()),
+        }
+    }
+
+    /// The words for it: what the closed selector and the boards read.
+    pub fn words(&self) -> SharedString {
+        match self {
+            Self::Tag(tag) => tr!("range-since-tag", { tag: tag }),
+            Self::Dates { from, to: None } => tr!("range-dates-since", { from: from }),
+            Self::Dates { from, to: Some(to) } if from == to => {
+                tr!("range-dates-on", { day: from })
+            }
+            Self::Dates { from, to: Some(to) } => {
+                tr!("range-dates-between", { from: from, to: to })
+            }
+        }
+    }
+}
+
+/// What an entry of the selector is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Branch,
+    /// "Since my last review", which is no branch.
+    ///
+    /// **In the base selector and not a third panel**: it answers the question
+    /// the selector asks — what the branch review compares against — and one
+    /// more panel would be one more list of the same files to keep in step.
+    Review,
+    Tag,
+    /// The period picked in the calendar, while it is the one shown.
+    Period,
+}
+
 /// A branch as the selector offers it — or, first in the list when one has
-/// been set, the review point.
+/// been set, the review point; the period when one is shown; the tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseChoice {
+    /// The value: the branch's name, or a `:` word for the rest.
     pub name: SharedString,
+    /// What is read instead of the value, for what is no branch.
+    pub label: Option<SharedString>,
     pub subject: SharedString,
     pub author: SharedString,
     pub date: SharedString,
@@ -39,12 +149,7 @@ pub struct BaseChoice {
     /// True when this is the branch checked out in the worktree being looked
     /// at: comparing it to itself would show nothing.
     pub is_head: bool,
-    /// The "since my last review" entry, which is no branch.
-    ///
-    /// **In the base selector and not a third panel**: it answers the question
-    /// the selector asks — what the branch review compares against — and one
-    /// more panel would be one more list of the same files to keep in step.
-    pub review: bool,
+    pub kind: Kind,
 }
 
 /// How long ago something was, in the words the window uses elsewhere.
@@ -88,12 +193,40 @@ impl BaseChoice {
         };
         Self {
             name: SharedString::from(SINCE_REVIEW),
+            label: Some(tr!("range-since-review")),
             subject: tr!("range-since-review-at", { when: when }),
             author: SharedString::default(),
             date: SharedString::default(),
             remote: false,
             is_head: false,
-            review: true,
+            kind: Kind::Review,
+        }
+    }
+
+    /// The period's entry.
+    pub fn period(period: &Compare) -> Self {
+        Self {
+            name: SharedString::from(PERIOD),
+            label: Some(period.words()),
+            subject: tr!("range-dates-detail"),
+            author: SharedString::default(),
+            date: SharedString::default(),
+            remote: false,
+            is_head: false,
+            kind: Kind::Period,
+        }
+    }
+
+    pub fn tag(tag: &Tag) -> Self {
+        Self {
+            name: SharedString::from(Compare::Tag(tag.name.clone()).value()),
+            label: Some(SharedString::from(tag.name.clone())),
+            subject: SharedString::from(tag.subject.clone()),
+            author: SharedString::from(tag.author.clone()),
+            date: SharedString::from(tag.date.clone()),
+            remote: false,
+            is_head: false,
+            kind: Kind::Tag,
         }
     }
 
@@ -102,12 +235,13 @@ impl BaseChoice {
     pub fn of(branch: &Branch, worktree: &std::path::Path) -> Self {
         Self {
             name: SharedString::from(branch.name.clone()),
+            label: None,
             subject: SharedString::from(branch.subject.clone()),
             author: SharedString::from(branch.author.clone()),
             date: SharedString::from(branch.date.clone()),
             remote: branch.kind == BranchKind::Remote,
             is_head: branch.is_head_in(worktree),
-            review: false,
+            kind: Kind::Branch,
         }
     }
 
@@ -133,13 +267,9 @@ impl SelectItem for BaseChoice {
     type Value = SharedString;
 
     /// What the closed selector reads, after "Base:" — the name of the base,
-    /// or for the review point the words for it: its value would say nothing.
+    /// or for the rest the words for it: its value would say nothing.
     fn title(&self) -> SharedString {
-        if self.review {
-            tr!("range-since-review")
-        } else {
-            self.name.clone()
-        }
+        self.label.clone().unwrap_or_else(|| self.name.clone())
     }
 
     fn value(&self) -> &Self::Value {
@@ -160,6 +290,9 @@ impl SelectItem for BaseChoice {
                     .gap_1()
                     .items_center()
                     .child(div().flex_1().min_w_0().truncate().child(self.title()))
+                    .when(self.kind == Kind::Tag, |el| {
+                        el.child(tag(tr!("branch-tag"), cx))
+                    })
                     .when(self.remote, |el| el.child(tag(tr!("branch-remote"), cx)))
                     .when(self.is_head, |el| el.child(tag(tr!("branch-here"), cx))),
             )
@@ -199,13 +332,62 @@ mod tests {
     fn choice(subject: &str, author: &str, date: &str) -> BaseChoice {
         BaseChoice {
             name: "dev".into(),
+            label: None,
             subject: subject.to_string().into(),
             author: author.to_string().into(),
             date: date.to_string().into(),
             remote: false,
             is_head: false,
-            review: false,
+            kind: Kind::Branch,
         }
+    }
+
+    fn day(text: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    /// A period that reaches today stays open: picked on Monday, "the last
+    /// seven days" still runs to now on Tuesday.
+    #[test]
+    fn a_period_reaching_today_has_no_end() {
+        let today = day("2026-10-01");
+        assert_eq!(
+            Compare::period(day("2026-09-25"), today, today),
+            Compare::Dates {
+                from: "2026-09-25".into(),
+                to: None
+            }
+        );
+        assert_eq!(
+            Compare::period(day("2026-09-01"), day("2026-09-07"), today),
+            Compare::Dates {
+                from: "2026-09-01".into(),
+                to: Some("2026-09-07".into())
+            }
+        );
+        // Picked backwards, read forwards.
+        assert_eq!(
+            Compare::period(day("2026-09-07"), day("2026-09-01"), today),
+            Compare::period(day("2026-09-01"), day("2026-09-07"), today)
+        );
+    }
+
+    /// A tag is compared in full, never by a name a branch could also bear,
+    /// and its value is told from a branch's.
+    #[test]
+    fn a_tag_reads_back_from_its_value_and_compares_as_a_tag() {
+        let tag = Compare::Tag("v1.2.0".into());
+        assert_eq!(Compare::tag_of(&tag.value()), Some(tag.clone()));
+        assert_eq!(
+            tag.range(),
+            DiffRange::Branch {
+                base: "refs/tags/v1.2.0".into()
+            }
+        );
+        assert_eq!(Compare::tag_of("dev"), None);
+        assert_eq!(Compare::tag_of(SINCE_REVIEW), None);
+        assert_eq!(Compare::tag_of(PERIOD), None);
+        assert_eq!(Compare::tag_of(":tag:"), None);
     }
 
     #[test]

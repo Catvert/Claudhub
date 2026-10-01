@@ -164,6 +164,8 @@ impl ClaudhubApp {
             doing: crate::ui::overview::Doing::Rest,
             last_used: std::time::Instant::now(),
         });
+        self.last_opened
+            .insert(worktree.to_path_buf(), view.entity_id().as_u64());
         // The process first, then its first line: both go down the same lane,
         // in the order they are sent.
         self.git.send(Cmd::AcpStart {

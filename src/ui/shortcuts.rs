@@ -1339,6 +1339,14 @@ pub fn toggle_terminal(
     window: &mut Window,
     cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
+    // The home draws no dock: there the gesture goes back to the terminal or
+    // chat opened last, on its board's home.
+    if this.overview {
+        if let Some(worktree) = this.active_path() {
+            this.reply_to_last(&worktree, window, cx);
+        }
+        return;
+    }
     // The same gesture as the rail's button, and it has to be the same code:
     // two answers to "show me the terminals" is one of them being wrong. Of the
     // two views, the one the setting opens into: a key names a view, and this
