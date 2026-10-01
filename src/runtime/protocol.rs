@@ -1196,6 +1196,10 @@ pub enum Evt {
         range: DiffRange,
         path: PathBuf,
         diff: FileDiff,
+        /// Both versions, for a binary or a picture (`git::diff::sides`);
+        /// `None` for a file read as lines, or one whose versions could not
+        /// be read.
+        sides: Option<crate::git::diff::Sides>,
     },
     /// The unstaged remainder of a partially staged file. It carries the
     /// path for the same reason `CommitDetail` carries its id: the selection

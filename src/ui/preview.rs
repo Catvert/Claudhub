@@ -67,7 +67,7 @@ pub(super) fn format_of(kind: files::Picture) -> gpui_kit::ImageFormat {
 
 /// What a file's size reads as under the picture. Binary units, as `ls -h`
 /// gives them.
-fn human_size(bytes: usize) -> String {
+pub(super) fn human_size(bytes: usize) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
     let mut unit = 0;

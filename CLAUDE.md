@@ -166,6 +166,8 @@ src/
     review.rs / diff_view.rs / refine.rs / highlight.rs / blade.rs
                      la revue, le diff virtualisé, les mots changés, la
                      coloration (tree-sitter, Blade)
+    sides.rs         un binaire ou une image dans la revue : les deux versions
+                     côte à côte
     history_view.rs  l'historique et son graphe peint
     branches.rs / branch_picker.rs  le sélecteur de branches et ses gestes
     worktrees.rs / worktree_picker.rs  le sélecteur de worktrees
@@ -439,8 +441,11 @@ comprise, et a deux vues (`HomeMode`, retenu dans la session) : le **Focus**
 (`ui::focus_view`, par défaut) et le **Plan** (`ui::overview_view`, disposé par
 `ui::overview`, pur). Une **barre latérale** commune liste tous les projets
 ouverts et leurs worktrees ; ce qu'on y choisit est ce que les deux vues
-montrent. Un clic montre un worktree seul et le rend regardé (`active`, celui
-de toute la fenêtre), `Ctrl`+clic l'ajoute à côté (`focus::shown_worktrees`).
+montrent. **L'ordre est celui que la main donne** (glisser un nom de projet,
+ou un worktree parmi ceux de son projet) : retenu par `Repos` et appliqué à
+l'arrivée des listes, il est celui du rail, du plan et de `Ctrl+1`… Un clic
+montre un worktree seul et le rend regardé (`active`, celui de toute la
+fenêtre), `Ctrl`+clic l'ajoute à côté (`focus::shown_worktrees`).
 Chaque ligne porte le signal du plus pressant de ses agents sur son bord gauche
 (`edge_signal`, `worktree_doing`, `overview::loudest`). La barre se replie en
 rail d'initiales. Les boutons de la fenêtre ne sont peints que là où c'est à
@@ -682,7 +687,14 @@ branche d'intégration). Elle **n'est pas enregistrée** : le magasin garde ce
 qu'on a choisi, jamais une devinette. Un **tag** ou une **période** (`base_select::Compare`)
 remplace la base dans la revue **sans la toucher** : la PR et l'intégration
 continuent de la lire. Une période se lit en commits du premier parent de HEAD
-(`DiffRange::Dates`) ; finie aujourd'hui, elle reste ouverte.
+(`DiffRange::Dates`) ; finie aujourd'hui, elle reste ouverte. « Depuis le
+dernier tag » est un choix et non un tag (`DiffRange::LastTag`) : le worker le
+résout à chaque liste, et un tag posé le déplace sans qu'on choisisse à nouveau.
+**Un binaire se regarde** (`git::diff::sides`, `ui::sides`) : le worker lit
+les deux versions et ne transporte **les octets que d'une image** ; le reste
+voyage décrit (signature, `files::sniff`, et taille). Les versions vont dans
+`Evt::FileDiff`, pas dans `FileDiff`, qu'un historique de lignes construit sans
+elles ; un SVG, que git diffe en texte, se dessine sur demande.
 
 **« Depuis ma dernière relecture »** (`DiffRange::Since`, `git::snapshot`) — le
 point est l'état du disque, construit dans un **index à nous**

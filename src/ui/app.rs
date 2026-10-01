@@ -1344,6 +1344,10 @@ pub struct ClaudhubApp {
     /// A reading preference and not a worktree's state: it is the same answer
     /// one wants from one selection to the next.
     pub(super) history_lines_only: bool,
+    /// An SVG in the review is drawn, both versions side by side, rather than
+    /// diffed as markup (`ui::sides`). For the window and not per file: one
+    /// switches to the drawing to go through a set of icons.
+    pub(super) diff_drawn: bool,
     /// The file lists' scrolling, **one per range**: "Review" and "Changes" are
     /// shown at the same time, and a single handle would scroll them together.
     file_scroll: HashMap<DiffRange, gpui_kit::UniformListScrollHandle>,
@@ -1585,7 +1589,21 @@ impl ClaudhubApp {
 
         let mut app = Self {
             git,
-            repos: crate::ui::repos::Repos::default(),
+            repos: {
+                // The sidebar's order, given before any repository answers.
+                let store = crate::ui::store::Store::global(cx);
+                let mut repos = crate::ui::repos::Repos::default();
+                repos.set_order(
+                    store.session.focus_order.clone(),
+                    store
+                        .repos
+                        .iter()
+                        .filter(|(_, repo)| !repo.focus_order.is_empty())
+                        .map(|(main, repo)| (main.clone(), repo.focus_order.clone()))
+                        .collect(),
+                );
+                repos
+            },
             server_state: super::server::ServerState::default(),
             wsl_prompt: None,
             server_wsl: false,
@@ -1776,6 +1794,7 @@ impl ClaudhubApp {
             diff_wrap_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             history_scroll: gpui_kit::UniformListScrollHandle::new(),
             history_lines_only: true,
+            diff_drawn: false,
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
             motions: HashMap::new(),
@@ -2585,7 +2604,8 @@ impl ClaudhubApp {
                 range,
                 path,
                 diff,
-            } => self.file_diff_arrived(worktree, range, path, diff, cx),
+                sides,
+            } => self.file_diff_arrived(worktree, range, path, diff, sides, cx),
             Evt::UnstagedDiff {
                 worktree,
                 path,
@@ -3227,6 +3247,7 @@ impl ClaudhubApp {
         range: DiffRange,
         path: PathBuf,
         diff: crate::git::FileDiff,
+        sides: Option<crate::git::diff::Sides>,
         cx: &mut Context<Self>,
     ) {
         // The theme is read before the mutable borrow of the state: the
@@ -3243,7 +3264,8 @@ impl ClaudhubApp {
             // branch review is two diffs, and the first answer to arrive after
             // a click in the other list was painted under it.
             if state.selected.as_deref() == Some(path.as_path()) && state.range == range {
-                let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
+                let rendered =
+                    std::rc::Rc::new(Rendered::new(&path, diff, &theme).with_sides(sides));
                 // `open_file` empties the diff: an answer landing on nothing is
                 // a file being opened, one landing on a diff is the same file
                 // re-read after a write, which must stay where the eye is.
@@ -4306,12 +4328,18 @@ impl ClaudhubApp {
             .filter(|compare| matches!(compare, Compare::Dates { .. }))
             .map(BaseChoice::period);
         // The tags after the local branches and before the remote ones: what
-        // one compares against is close by, and a remote list runs long.
-        let tags: Vec<BaseChoice> = self
+        // one compares against is close by, and a remote list runs long. The
+        // last tag heads them when there are any — or when it is the choice
+        // shown, the tags not read yet.
+        let mut tags: Vec<BaseChoice> = self
             .tags
             .get(&repo.main)
             .map(|tags| tags.list.items.iter().map(BaseChoice::tag).collect())
             .unwrap_or_default();
+        let last_chosen = state.is_some_and(|state| state.compare == Some(Compare::LastTag));
+        if !tags.is_empty() || last_chosen {
+            tags.insert(0, BaseChoice::last_tag());
+        }
         let (local, remote): (Vec<_>, Vec<_>) = repo
             .branches
             .iter()

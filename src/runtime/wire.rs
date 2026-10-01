@@ -24,7 +24,7 @@ use serde::Serialize;
 /// `Evt` or to a type they carry: the two ends are two binaries shipped
 /// together but installed separately, and a disagreement should be told at the
 /// handshake rather than as an unreadable frame on the first diff.
-pub const PROTOCOL_VERSION: u32 = 60;
+pub const PROTOCOL_VERSION: u32 = 62;
 
 /// The first frame from each end, before any `Cmd` or `Evt`.
 ///
@@ -280,6 +280,16 @@ mod tests {
             }],
             ..Default::default()
         };
+        // A picture's bytes, and a side that is absent: the added file.
+        let sides = crate::git::diff::Sides {
+            old: None,
+            new: Some(crate::git::diff::Version {
+                size: 8,
+                format: Some(crate::files::Format::Picture(crate::files::Picture::Png)),
+                dimensions: Some((16, 16)),
+                bytes: Some(b"\x89PNG\r\n\x1a\n".to_vec()),
+            }),
+        };
         let evt = Evt::FileDiff {
             worktree: PathBuf::from("/tmp/wt"),
             range: crate::git::DiffRange::Branch {
@@ -287,9 +297,17 @@ mod tests {
             },
             path: PathBuf::from("src/élan.rs"),
             diff: diff.clone(),
+            sides: Some(sides.clone()),
         };
         match roundtrip(&evt) {
-            Evt::FileDiff { diff: back, .. } => assert_eq!(back, diff),
+            Evt::FileDiff {
+                diff: back,
+                sides: back_sides,
+                ..
+            } => {
+                assert_eq!(back, diff);
+                assert_eq!(back_sides, Some(sides));
+            }
             other => panic!("wrong variant: {other:?}"),
         }
 

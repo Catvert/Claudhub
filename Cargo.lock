@@ -1192,6 +1192,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gpui-shell",
+ "imagesize 0.14.0",
  "interprocess",
  "keyring",
  "libc",
