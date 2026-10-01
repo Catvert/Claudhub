@@ -551,14 +551,24 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   (`claudhub-plugins`, `<id>/<nom>`).
 - Le dossier est relu hors du thread toutes les demi-secondes ; une
   sauvegarde cassée laisse la vue qui marchait, et l'erreur part en bulle.
-  Chaque exemple (`assets/scripts/`) n'est écrit **qu'une fois**
-  (`.examples`) : supprimé, il ne revient pas. `sentry` est le portillon
+  Un exemple (`assets/scripts/`) est écrit une fois, puis **mis à jour tant
+  qu'on n'y a pas touché** (empreinte dans `.examples`) ; modifié ou
+  supprimé, il reste tel quel. `sentry` est le portillon
   d'acceptation : un panneau entier, réglages, jeton et requêtes compris.
+- **Ce que Claudhub prête** (`ui::script_kit`) : des pièces peintes par
+  nous — `CodeBlock` (coloration mise en cache : un composant est rebâti à
+  chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se **nomme** — et des
+  gestes : `locate`/`open_file` (seul un fichier que `locate` trouve s'ouvre,
+  le chemin venant de données reçues), `ask_agent` (le dialogue de relecture),
+  `relative_time`.
 - **L'écran Plugins** (`ui::plugins_view`), ouvert du pied de la barre
   latérale à la place des tableaux : la liste, l'aperçu du script choisi sur
-  un worktree qu'on choisit, et un agent lancé **dans le dossier des
-  scripts** avec sa consigne (`scripts::editing_prompt`), jamais rouvert au
-  démarrage. L'agent apprend si une sauvegarde a marché par `.status.md`
+  un worktree qu'on choisit, et un **chat ACP** (l'agent qu'on choisit)
+  ouvert **dans le dossier des scripts**, jamais rouvert au démarrage. Une
+  session n'a pas de consigne système : elle est dans les fichiers que chaque
+  agent lit de lui-même (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`,
+  `scripts::instructions`), jamais écrits sur un fichier qui n'est pas le
+  nôtre. L'agent apprend si une sauvegarde a marché par `.status.md`
   (`scripts::STATUS`), que nous réécrivons : c'est l'aperçu qui charge le
   script choisi, donc ce qu'il dit est ce que l'utilisateur voit.
 

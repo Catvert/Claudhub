@@ -276,48 +276,112 @@ pub fn discover(root: &Path, language: &str) -> Found {
     found
 }
 
-/// The file, at the scripts' root, naming the examples already written once.
+/// The file, at the scripts' root, naming the examples written, each with
+/// the fingerprint of what was written.
 const OFFERED: &str = ".examples";
 
-/// Writes the shipped examples `root` has never been offered — `files` are
-/// `<id>/<path>` —, and says which. An example is offered once: deleted, it
-/// does not come back; a new one arrives with the version that ships it.
-pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<Vec<String>> {
-    let offered_path = root.join(OFFERED);
-    let offered = std::fs::read_to_string(&offered_path).unwrap_or_default();
-    let offered: Vec<&str> = offered.lines().map(str::trim).collect();
-    let mut written: Vec<String> = Vec::new();
+/// A fingerprint of an example's files, stable from one build to the next
+/// (FNV-1a) — `std`'s hasher may change with the compiler, and a changed
+/// fingerprint reads as an example the user edited.
+fn fingerprint<'a>(files: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for (path, content) in files {
-        let Some((id, _)) = path.split_once('/') else {
-            continue;
-        };
-        if offered.contains(&id) {
-            continue;
-        }
-        // A folder of that name already there is the user's.
-        if !written.iter().any(|done| done == id) && root.join(id).exists() {
-            continue;
-        }
-        let target = root.join(path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(target, content)?;
-        if !written.iter().any(|done| done == id) {
-            written.push(id.to_string());
+        for byte in path
+            .bytes()
+            .chain([0])
+            .chain(content.unwrap_or("\u{0}missing").bytes())
+            .chain([0])
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
     }
-    let mut ids: Vec<String> = offered.iter().map(|id| id.to_string()).collect();
+    format!("{hash:016x}")
+}
+
+/// Writes the shipped examples — `files` are `<id>/<path>` — and says
+/// which. An example is written when the folder has never had it, and
+/// **brought up to date** when what is on disk is still exactly what was
+/// written; one the user changed, or deleted, is left as it is.
+pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<Vec<String>> {
+    let offered_path = root.join(OFFERED);
+    let offered_text = std::fs::read_to_string(&offered_path).unwrap_or_default();
+    // `id fingerprint`, or a bare `id` from before fingerprints.
+    let mut offered: Vec<(String, Option<String>)> = offered_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once(' ') {
+            Some((id, print)) => (id.to_string(), Some(print.trim().to_string())),
+            None => (line.to_string(), None),
+        })
+        .collect();
+    let mut ids: Vec<&str> = Vec::new();
     for (path, _) in files {
         if let Some((id, _)) = path.split_once('/') {
-            if !ids.iter().any(|known| known == id) {
-                ids.push(id.to_string());
+            if !ids.contains(&id) {
+                ids.push(id);
             }
         }
     }
-    if ids.len() != offered.len() {
+    let mut written: Vec<String> = Vec::new();
+    for id in ids {
+        let own: Vec<(&str, &str)> = files
+            .iter()
+            .filter(|(path, _)| path.split_once('/').is_some_and(|(of, _)| of == id))
+            .map(|(path, content)| (*path, *content))
+            .collect();
+        let shipped = fingerprint(own.iter().map(|(path, content)| (*path, Some(*content))));
+        let there = root.join(id).exists();
+        let write = match offered.iter().find(|(known, _)| known == id) {
+            // Never offered: written, unless a folder of that name is the user's.
+            None => !there,
+            Some((_, recorded)) => {
+                let on_disk: Vec<(&str, Option<String>)> = own
+                    .iter()
+                    .map(|(path, _)| (*path, std::fs::read_to_string(root.join(path)).ok()))
+                    .collect();
+                let current =
+                    fingerprint(on_disk.iter().map(|(path, text)| (*path, text.as_deref())));
+                // Gone is the user's choice; changed is the user's work.
+                there
+                    && recorded.as_deref() != Some(shipped.as_str())
+                    && recorded
+                        .as_ref()
+                        .is_none_or(|recorded| *recorded == current)
+            }
+        };
+        if write {
+            for (path, content) in &own {
+                let target = root.join(path);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(target, content)?;
+            }
+            written.push(id.to_string());
+        }
+        let record = match offered.iter_mut().find(|(known, _)| known == id) {
+            Some(entry) => entry,
+            None => {
+                offered.push((id.to_string(), None));
+                offered.last_mut().expect("just pushed")
+            }
+        };
+        if write || record.1.is_none() && !there {
+            record.1 = Some(shipped);
+        }
+    }
+    let text: String = offered
+        .iter()
+        .map(|(id, print)| match print {
+            Some(print) => format!("{id} {print}\n"),
+            None => format!("{id}\n"),
+        })
+        .collect();
+    if text != offered_text {
         std::fs::create_dir_all(root)?;
-        std::fs::write(offered_path, ids.join("\n") + "\n")?;
+        std::fs::write(offered_path, text)?;
     }
     Ok(written)
 }
@@ -451,29 +515,62 @@ pub fn skeleton(kind: Kind) -> [(&'static str, String); 2] {
     [(MANIFEST, manifest), (DEFAULT_ENTRY, entry)]
 }
 
+/// The files an agent reads of itself in the folder it starts in — Claude
+/// Code's, Codex's, Gemini's —: how the Plugins screen's agent is told what
+/// it is there for, whichever it is. A chat has no system prompt to carry it.
+pub const INSTRUCTIONS: [&str; 3] = ["CLAUDE.md", "AGENTS.md", "GEMINI.md"];
+
+/// The first line of the instructions Claudhub writes: a file of one of
+/// those names without it is the user's, and is never written over.
+const INSTRUCTIONS_MARK: &str =
+    "<!-- Written by Claudhub, rewritten when the Plugins agent starts. -->";
+
+/// Whether an instructions file is one Claudhub wrote.
+pub fn is_our_instructions(text: &str) -> bool {
+    text.starts_with(INSTRUCTIONS_MARK)
+}
+
 /// What the agent of the Plugins screen is told before anything: where it
-/// is, what it may touch, and how it learns whether a save worked.
-pub fn editing_prompt(root: &Path, selected: Option<&str>) -> String {
+/// is, what it may touch, how it learns which script the user is looking at
+/// and whether a save worked.
+pub fn instructions(root: &Path) -> String {
     let root = root.display();
-    let selected = selected
-        .map(|id| {
-            format!(" The user has the script `{id}` selected: start there unless asked otherwise.")
-        })
-        .unwrap_or_default();
     format!(
-        "You are editing Claudhub's own interface: the scripts of its focus view, \
-         in {root} (also $CLAUDHUB_SCRIPTS). Each folder is one script — a `claudhub.json` \
-         and a JavaScript entry run by Claudhub's embedded runtime; the `Scripts` section \
-         of the claudhub skill gives the format and the `claudhub` module, and each \
-         script's `gpui-kit.d.ts` gives every signature: read them before writing code. \
-         Work only inside this folder. Claudhub reloads a script within a second of a \
-         save; after each save, wait a second and read {root}/{STATUS}, which says \
-         whether it loaded and, if not, the error — fix it before saying you are done. \
-         Never edit {STATUS} or gpui-kit.d.ts: Claudhub writes them. A script that \
-         needs the network declares its hosts in `permissions.network` and keeps \
-         its credentials with `set_secret`: tell the user to allow the hosts in \
-         the Plugins screen — the status lists those still waiting.{selected}"
+        "{INSTRUCTIONS_MARK}\n\n\
+         # Claudhub scripts\n\n\
+         You are editing Claudhub's own interface: the scripts of its focus view, in \
+         `{root}` (also `$CLAUDHUB_SCRIPTS`). Each folder is one script — a `claudhub.json` \
+         and a JavaScript entry run by Claudhub's embedded runtime.\n\n\
+         - The `Scripts` section of the claudhub skill gives the format and the `claudhub` \
+         module; each script's `gpui-kit.d.ts` gives every signature. Read them before \
+         writing code. `sentry/` is a complete example.\n\
+         - Work only inside this folder.\n\
+         - `{STATUS}` says which script the user has selected in the Plugins screen — start \
+         there unless asked otherwise — and how each script fared.\n\
+         - Claudhub reloads a script within a second of a save. After each save, wait a \
+         second and read `{STATUS}`: it says whether the script loaded and, if not, the \
+         error. Fix it before saying you are done.\n\
+         - Never edit `{STATUS}`, `gpui-kit.d.ts` nor this file: Claudhub writes them.\n\
+         - A script that needs the network declares its hosts in `permissions.network` and \
+         keeps its credentials with `set_secret`. Tell the user to allow the hosts in the \
+         Plugins screen — `{STATUS}` lists those still waiting.\n"
     )
+}
+
+/// Writes the instructions in `root` under each of [`INSTRUCTIONS`]' names,
+/// over a file Claudhub wrote and never over the user's.
+pub fn write_instructions(root: &Path) -> std::io::Result<()> {
+    let text = instructions(root);
+    std::fs::create_dir_all(root)?;
+    for name in INSTRUCTIONS {
+        let path = root.join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(there) if !is_our_instructions(&there) => continue,
+            Ok(there) if there == text => continue,
+            _ => std::fs::write(path, &text)?,
+        }
+    }
+    Ok(())
 }
 
 /// What a script's sources look like from outside: a change to one of them
@@ -671,6 +768,15 @@ mod tests {
         let wanted = ["a.io".to_string(), "b.io".to_string(), "a.io".to_string()];
         assert_eq!(pending_hosts(&wanted, &["b.io".to_string()]), ["a.io"]);
         assert!(pending_hosts(&wanted, &wanted).is_empty());
+    }
+
+    #[test]
+    fn the_instructions_are_ours_and_say_where_to_look() {
+        let text = instructions(Path::new("/c/scripts"));
+        assert!(is_our_instructions(&text));
+        assert!(text.contains("`/c/scripts`"));
+        assert!(text.contains(STATUS));
+        assert!(!is_our_instructions("# My own CLAUDE.md\n"));
     }
 
     #[test]

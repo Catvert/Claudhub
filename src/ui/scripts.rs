@@ -91,6 +91,10 @@ pub(super) const EXAMPLES: &[(&str, &str)] = &[
         "sentry/sentry.js",
         include_str!("../../assets/scripts/sentry/sentry.js"),
     ),
+    (
+        "sentry/texts.js",
+        include_str!("../../assets/scripts/sentry/texts.js"),
+    ),
 ];
 
 /// A board's view of one script: `(worktree, script id)`.
@@ -147,7 +151,7 @@ pub(crate) struct Screen {
     pub selected: Option<String>,
     /// The worktree the preview is drawn for; the one on show by default.
     pub preview_on: Option<PathBuf>,
-    /// The terminal of the agent that edits the scripts, by its view's id.
+    /// The chat of the agent that edits the scripts, by its view's id.
     pub agent: Option<u64>,
 }
 
@@ -935,8 +939,8 @@ fn module(
     window: Option<AnyWindowHandle>,
 ) -> HostModule {
     let id = id.to_string();
-    HostModule::new("claudhub")
-        .declarations(DECLARATIONS)
+    let module = HostModule::new("claudhub")
+        .declarations(declarations())
         .function(
             "worktree",
             read(&app, path, |this, path, _| this.script_worktree(path)),
@@ -1222,18 +1226,19 @@ fn module(
                 let at_work = this.scripts.at_work.clone();
                 this.render_terminals_view(path, &at_work, window, cx)
             }),
-        )
+        );
+    super::script_kit::lend(module, &app, path, window)
 }
 
 /// What a module function answers outside a call, which cannot happen
 /// from a script.
-fn unreachable() -> HostError {
+pub(super) fn unreachable() -> HostError {
     HostError::new("Claudhub is not reachable outside a call")
 }
 
 /// A function of the module that changes the application — or reads what
 /// it loads on demand.
-fn change(
+pub(super) fn change(
     app: &WeakEntity<ClaudhubApp>,
     act: impl FnOnce(&mut ClaudhubApp, &mut Context<ClaudhubApp>) -> HostResult,
 ) -> HostResult {
@@ -1299,6 +1304,11 @@ fn from_json(value: &serde_json::Value) -> HostValue {
     }
 }
 
+/// The module's TypeScript face: its own, then what `script_kit` lends.
+fn declarations() -> String {
+    format!("{DECLARATIONS}{}", super::script_kit::DECLARATIONS)
+}
+
 /// A tab by the name a script gives it.
 fn tab_named(name: &str) -> Result<View, HostError> {
     Ok(match name {
@@ -1338,7 +1348,7 @@ fn read(
 /// A function of the module that acts: what it does waits until the call
 /// has unwound — the script is still running, and the application may be
 /// the one that called it —, then runs with the window.
-fn later(
+pub(super) fn later(
     app: &WeakEntity<ClaudhubApp>,
     window: Option<AnyWindowHandle>,
     act: impl FnOnce(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>) + 'static,
@@ -1381,13 +1391,14 @@ mod tests {
     /// A `claudhub` module of the declared shape, whose functions answer
     /// nothing and whose components paint nothing: what linking needs.
     fn stub() -> HostModule {
-        let mut module = HostModule::new("claudhub").declarations(DECLARATIONS);
+        let declared = declarations();
+        let mut module = HostModule::new("claudhub").declarations(declared.clone());
         let name = |rest: &str| -> String {
             rest.chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect()
         };
-        for line in DECLARATIONS.lines().map(str::trim_start) {
+        for line in declared.lines().map(str::trim_start) {
             if let Some(rest) = line.strip_prefix("export function ") {
                 module = module.function(name(rest), |_| Ok(HostValue::Null));
             } else if let Some(rest) = line.strip_prefix("export const ") {
@@ -1425,12 +1436,52 @@ mod tests {
             scripts::seed(&root, EXAMPLES).unwrap(),
             ["home-columns", "dashboard", "sentry"]
         );
-        // Offered once: removed, an example does not come back.
+        // Removed, an example does not come back.
         std::fs::remove_dir_all(root.join("dashboard")).unwrap();
         assert!(scripts::seed(&root, EXAMPLES).unwrap().is_empty());
         assert!(!root.join("dashboard").exists());
-        std::fs::remove_file(root.join(".examples")).unwrap();
-        assert_eq!(scripts::seed(&root, EXAMPLES).unwrap(), ["dashboard"]);
+        // Put back by hand, to be loaded below with the others.
+        for (path, content) in EXAMPLES
+            .iter()
+            .filter(|(path, _)| path.starts_with("dashboard/"))
+        {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), content).unwrap();
+        }
+        // A newer one replaces what is still as it was written…
+        let older: Vec<(&str, &str)> = EXAMPLES
+            .iter()
+            .map(|(path, content)| match *path {
+                "sentry/main.js" => (*path, "// an older version\n"),
+                _ => (*path, *content),
+            })
+            .collect();
+        let elsewhere = root.with_extension("older");
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        scripts::seed(&elsewhere, &older).unwrap();
+        assert_eq!(scripts::seed(&elsewhere, EXAMPLES).unwrap(), ["sentry"]);
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("sentry/main.js")).unwrap(),
+            include_str!("../../assets/scripts/sentry/main.js")
+        );
+        // …and never what the user changed.
+        scripts::seed(&elsewhere, &older).unwrap();
+        std::fs::write(elsewhere.join("home-columns/main.js"), "// mine\n").unwrap();
+        let newer: Vec<(&str, &str)> = EXAMPLES
+            .iter()
+            .map(|(path, content)| match *path {
+                "home-columns/main.js" => (*path, "// newer\n"),
+                _ => (*path, *content),
+            })
+            .collect();
+        assert!(!scripts::seed(&elsewhere, &newer)
+            .unwrap()
+            .contains(&"home-columns".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("home-columns/main.js")).unwrap(),
+            "// mine\n"
+        );
+        let _ = std::fs::remove_dir_all(&elsewhere);
         // And what « New script » writes, of either kind.
         for (kind, base) in [(Kind::Tab, "new-tab"), (Kind::Home, "new-home")] {
             let id = scripts::free_id(&root, base);

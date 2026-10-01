@@ -63,6 +63,7 @@ mod review;
 mod revive;
 mod run;
 mod run_view;
+mod script_kit;
 mod scripts;
 mod scroll;
 mod search;

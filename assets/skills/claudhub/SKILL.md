@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 5 -->
+<!-- claudhub-skill-version: 6 -->
 
 # Claudhub
 
@@ -216,6 +216,17 @@ export default class Example extends View {
   keyring, per script. Declare them in `permissions.secrets`; never write a
   secret to storage, to a file or to `notify`.
 - Also: `open_url(url)` (http/https), `copy_text(text)`.
+- **Pieces Claudhub draws for you**, to match its own panels: `CodeBlock`
+  (`{path, lines: [{line, text}], mark}` — coloured by the path's language,
+  numbered, one line marked), `Icon` (`{name, size, tone}`, Claudhub's
+  Lucide set), `Badge` (`{text, tone}`), `ShareBar` (`{label, share}`).
+  Tones are names: `danger`, `warning`, `info`, `success`, `primary`,
+  `muted`, `foreground`.
+- **Gestures**: `locate(path)` brings a server's path back to a file of
+  the worktree (null when none); `open_file(path, line)` opens it in the
+  editor; `ask_agent(text)` shows a prompt in the dialog where the user
+  completes it before it goes to the agent; `relative_time(iso)` says an
+  instant as the interface does.
 - No file, process or raw socket access, and never git or shell commands:
   what a script knows of the worktree comes from the module; ask the user,
   or use `send_to_agent`.

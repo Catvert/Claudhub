@@ -825,7 +825,7 @@ pub struct PageKey {
 
 /// What `sentry::Frame::locate` asks: whether a path names a file of the
 /// worktree.
-enum KnownFiles {
+pub(super) enum KnownFiles {
     /// The disk this process sees, which is the worktree's under Linux.
     Disk(PathBuf),
     /// The explorer's list, under Windows: the worktree is a path of the
@@ -834,7 +834,7 @@ enum KnownFiles {
 }
 
 impl KnownFiles {
-    fn contains(&self, candidate: &str) -> bool {
+    pub(super) fn contains(&self, candidate: &str) -> bool {
         match self {
             Self::Disk(worktree) => crate::sentry::on_disk(worktree)(candidate),
             Self::Listed(files) => files.contains(candidate),
@@ -859,7 +859,7 @@ impl ClaudhubApp {
     /// the list arrives (`PageKey::files`). What the list leaves out — the
     /// inside of a folder git ignores whole, `vendor/` — does not open there
     /// either; under Linux, where the disk is the worktree's, it does.
-    fn known_files(&self, worktree: &std::path::Path) -> KnownFiles {
+    pub(super) fn known_files(&self, worktree: &std::path::Path) -> KnownFiles {
         if cfg!(windows) {
             let files = self
                 .explorers
@@ -1402,7 +1402,7 @@ fn sentry_row_of(
 ///
 /// A text we cannot read is shown **as it stands**: it is Sentry's own, so a
 /// format that changes is better read raw than guessed at.
-fn when(text: &str) -> String {
+pub(super) fn when(text: &str) -> String {
     let Some(at) = crate::sentry::instant_of(text) else {
         return text.to_string();
     };

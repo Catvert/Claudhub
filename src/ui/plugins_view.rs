@@ -4,14 +4,15 @@
 //! An entry at the foot of the home screen's sidebar opens it in the place
 //! of the boards. Three columns: the scripts; the one selected, drawn on a
 //! worktree one picks, its last error kept under it rather than said once
-//! in a bubble; and the agent that edits them — a terminal in the scripts'
-//! folder, told what it is there for (`scripts::editing_prompt`). The agent
+//! in a bubble; and the agent that edits them — a chat (Claude, Codex,
+//! Gemini…) in the scripts' folder, told what it is there for by the
+//! instructions files it reads of itself (`scripts::instructions`). The agent
 //! learns whether a save worked from the status file Claudhub rewrites
 //! (`scripts::STATUS`): the preview is what loads the selected script, so
 //! what it reports is what the user sees.
 //!
-//! The agent's terminal is not brought back at the next launch: its prompt
-//! names a selection that will have changed.
+//! The agent's chat is not brought back at the next launch: the scripts'
+//! folder is no worktree, and only worktrees' chats are revived.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,7 @@ use gpui_kit::component::{
     menu::{DropdownMenu as _, PopupMenuItem},
     v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _,
 };
-use gpui_kit::{div, prelude::*, px, AnyElement, Context, Focusable as _, SharedString, Window};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, SharedString, Window};
 
 use crate::scripts::Kind;
 use crate::tr;
@@ -635,108 +636,100 @@ impl ClaudhubApp {
         )
     }
 
-    /// The agent that edits the scripts: its terminal, or what starts it.
+    /// The agent that edits the scripts: its chat, or — none open — the
+    /// agents one can talk to, to pick one.
     fn plugins_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let terminal = self
+        let chat = self
             .scripts
             .screen
             .agent
-            .and_then(|id| self.terminal(id))
-            .filter(|terminal| !terminal.exited)
-            .map(|terminal| terminal.view.clone());
-        let Some(view) = terminal else {
-            return v_flex()
-                .size_full()
-                .gap_3()
-                .items_center()
-                .justify_center()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .child(
-                    div()
-                        .max_w(px(360.))
-                        .text_sm()
-                        .text_center()
-                        .text_color(theme.muted_foreground)
-                        .child(tr!("plugins-agent-help")),
-                )
-                .child(
-                    Button::new("plugins-agent-start")
-                        .primary()
+            .and_then(|id| self.chat_by_id(id))
+            .map(|chat| (chat.view.clone(), chat.doing));
+        if let Some((view, doing)) = chat {
+            return super::summary_view::chat_frame(&view, doing, window, &theme, cx);
+        }
+        let agents = super::settings::Settings::global(cx).terminal.chat_agents();
+        let offers: Vec<AnyElement> = if agents.is_empty() {
+            let app = cx.entity().downgrade();
+            vec![Button::new("plugins-chat-configure")
+                .small()
+                .ghost()
+                .icon(icon("message-square-plus"))
+                .label(tr!("chat-configure"))
+                .on_click(move |_, window, cx| super::panels::open_chat_settings(&app, window, cx))
+                .into_any_element()]
+        } else {
+            agents
+                .into_iter()
+                .enumerate()
+                .map(|(n, agent)| {
+                    Button::new(("plugins-chat-open", n))
                         .small()
-                        .icon(icon("bot"))
-                        .label(tr!("plugins-agent-start"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.start_plugins_agent(window, cx);
-                        })),
-                )
-                .into_any_element();
+                        .when(n == 0, |button| button.primary())
+                        .icon(icon("message-square-plus"))
+                        .label(tr!("chat-with", { agent: agent.label() }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.start_plugins_agent(agent.clone(), window, cx);
+                        }))
+                        .into_any_element()
+                })
+                .collect()
         };
-        let focused = view.focus_handle(cx).contains_focused(window, cx);
         v_flex()
             .size_full()
+            .gap_3()
+            .items_center()
+            .justify_center()
             .rounded(theme.radius_lg)
-            .overflow_hidden()
-            .bg(theme.background)
             .border_1()
-            .border_color(if focused { theme.ring } else { theme.border })
-            // Cached, as on the boards: see `render_tile`.
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(icon("bot").large().text_color(theme.muted_foreground))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(view.cached(gpui_kit::StyleRefinement::default().size_full())),
+                div()
+                    .max_w(px(380.))
+                    .text_sm()
+                    .text_center()
+                    .text_color(theme.muted_foreground)
+                    .child(tr!("plugins-agent-help")),
             )
+            .child(v_flex().gap_2().items_center().children(offers))
             .into_any_element()
     }
 
-    /// Starts the editing agent in the scripts' folder, told what it is
-    /// there for. The configured agent profile runs it; a Claude is let write
-    /// in the folder without asking at each file.
-    fn start_plugins_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Starts a chat with `agent` in the scripts' folder. What it is there
+    /// for is in the instructions files written beside the scripts — the
+    /// ones Claude Code, Codex and Gemini each read of themselves.
+    fn start_plugins_agent(
+        &mut self,
+        agent: crate::acp::Agent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = crate::ui::scripts::root() else {
-            return;
-        };
-        let Some(profile) = super::settings::Settings::global(cx)
-            .terminal
-            .default_profile()
-            .cloned()
-        else {
-            self.announce_error(tr!("plugins-agent-none"), cx);
             return;
         };
         // The folder is made with the examples the first time it is read;
         // an agent started before that would start nowhere.
-        if let Err(error) = crate::scripts::seed(&root, super::scripts::EXAMPLES) {
-            log::warn!("writing the example scripts: {error}");
+        let ready = crate::scripts::seed(&root, super::scripts::EXAMPLES)
+            .map(drop)
+            .and_then(|()| crate::scripts::write_instructions(&root));
+        if let Err(error) = ready {
+            log::warn!("preparing the scripts' folder: {error}");
         }
-        let prompt = crate::scripts::editing_prompt(&root, self.scripts.screen.selected.as_deref());
-        let mut launch = super::terminal_view::Launch::agent(&profile);
-        launch.label = tr!("plugins-agent");
-        if let Some((program, args)) = launch.command.as_mut() {
-            if super::revive::is_claude(program) {
-                args.extend([
-                    "--permission-mode".to_string(),
-                    "acceptEdits".to_string(),
-                    "--append-system-prompt".to_string(),
-                    prompt,
-                ]);
-            }
-        }
-        let before = self.terminals.len();
-        self.open_terminal(&root, launch, window, cx);
-        if self.terminals.len() == before {
+        self.write_scripts_status(cx);
+        let placement = super::settings::Settings::global(cx).terminal.placement;
+        let before = self.chats.len();
+        self.open_chat(&root, agent, placement, None, window, cx);
+        if self.chats.len() == before {
             return;
         }
-        let Some(opened) = self.terminals.last_mut() else {
+        let Some(open) = self.chats.last() else {
             return;
         };
-        opened.relaunch = None;
-        let view = opened.view.clone();
-        self.scripts.screen.agent = Some(view.entity_id().as_u64());
+        let (id, view) = (open.id(), open.view.clone());
+        self.scripts.screen.agent = Some(id);
         super::dialogs::focus_field(&view, window, cx);
         cx.notify();
     }
