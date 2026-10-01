@@ -2200,8 +2200,6 @@ impl ClaudhubApp {
                         for evt in batch {
                             app.handle_event(evt, window, cx);
                         }
-                        // What the scripts read may have changed with them.
-                        app.refresh_scripts(cx);
                     })
                     .is_ok();
                 if !alive {

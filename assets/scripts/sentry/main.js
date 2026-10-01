@@ -696,8 +696,23 @@ export default class Sentry extends View {
    * The page's rows, one line tall each: the context, then the trace — what
    * one came for, so nothing long goes above it —, the distribution, the
    * trail. Each is `{ key, kind, … }`; the key is what a click reports.
+   *
+   * Laid out again only when what they are made of has moved: the script
+   * runs at every change of the application, and finding a frame's file
+   * asks the disk.
    */
   rows() {
+    const folded = [...this.folded].sort().join(",");
+    const laid = this.laid;
+    if (laid && laid.event === this.event && laid.spreads === this.spreads && laid.folded === folded) {
+      return laid.rows;
+    }
+    const rows = this.layRows();
+    this.laid = { event: this.event, spreads: this.spreads, folded, rows };
+    return rows;
+  }
+
+  layRows() {
     const event = this.event;
     const rows = [];
     const section = (key, title) => rows.push({ key: `section:${key}`, kind: "section", section: key, title });

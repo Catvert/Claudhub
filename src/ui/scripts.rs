@@ -20,9 +20,11 @@
 //!   view's render, once the application's own has returned. It *reads* the
 //!   application first: what a view reads while it renders is what repaints
 //!   it when it changes.
-//! - **What the script reads changes with the events**: after each batch, the
-//!   views are refreshed — the script runs again (`refresh_scripts`). A bare
-//!   repaint only materialises the description it already has.
+//! - **What the script reads changes when the application says so**: each
+//!   view observes it, and runs the script again at each of its notifications
+//!   (`ScriptView::refresh`) — never at each batch of events, most of which
+//!   change nothing: an ACP chat streams dozens a second. A bare repaint only
+//!   materialises the description it already has.
 //!
 //! The scripts' folder is read off the thread every half second. A change to
 //! a script's sources mounts it again; a broken save leaves the view that
@@ -423,8 +425,9 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// The script views run again: what they read may have changed. Called
-    /// after each batch of events.
+    /// The script views run again, for a change the application does not
+    /// notify — their stored data cleared. The rest reaches them by their
+    /// observation of the application (`mounted`).
     pub(super) fn refresh_scripts(&mut self, cx: &mut Context<Self>) {
         for mounted in self.scripts.mounted.values() {
             mounted.view.update(cx, |view, cx| view.refresh(cx));
@@ -509,6 +512,10 @@ impl ClaudhubApp {
         match result {
             Ok(view) => {
                 self.scripts.failed.remove(&key);
+                let app = cx.entity();
+                view.update(cx, |_, cx| {
+                    cx.observe(&app, |view, _, cx| view.refresh(cx)).detach();
+                });
                 let replaced = self
                     .scripts
                     .mounted

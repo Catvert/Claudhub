@@ -535,8 +535,10 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   déroule (`App::defer`), puis prend la fenêtre.
 - **Un composant lit l'application avant de peindre** : en mode retenu, une
   vue qui ne l'a pas lue garde sa mise en page et ses cartes périmées.
-  Après chaque lot d'événements, les vues sont rafraîchies (`ScriptView::refresh`,
-  le script retourne).
+  Chaque vue observe l'application et rejoue le script à chacune de ses
+  notifications (`ScriptView::refresh`) — **jamais à chaque lot
+  d'événements** : un chat ACP en diffuse des dizaines par seconde, et chacun
+  redessinait la fenêtre.
 - **La molette d'un script est lissée comme la nôtre** : le Shell signale
   chaque zone défilante et chaque liste virtuelle qu'une vue dessine
   (`scroll_hook`, un ajout du fork), son mouvement y avance ; la molette est
