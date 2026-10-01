@@ -570,7 +570,11 @@ l'accueil relit les projets affichés toutes les deux secondes ; la main n'y
   un autre nom.
 
 **Le fork de GPUI Kit** : seuls `gpui-base` et `gpui-component` sont patchés
-(`Cargo.toml`), la façade `gpui-kit` et GPUI viennent de crates.io. Ce que la
+(`Cargo.toml`), la façade `gpui-kit` vient de crates.io. **GPUI vient de
+gpui-fast** (mode retenu) : les crates `compat/` de ce dépôt portent les noms et
+la version des `gpui-pre` que Kit épingle ; le fork est donc épinglé sur sa
+branche `claudhub-v0.7.0-gpui-fast`, qui suit l'API de gpui-fast — un correctif
+de la série `claudhub-v0.7.0` s'y reporte. Ce que la
 série de commits ajoute — les crochets publics et les comportements, et comment
 la rebaser — est dans [`docs/gpui-kit-migration.md`](docs/gpui-kit-migration.md).
 Trois de ces comportements se perdent sans erreur si le fork est retiré : le

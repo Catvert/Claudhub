@@ -219,7 +219,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] 
 gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "fc039a51901377b6159b34543f5c7ce41f0b77d9" }
 gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "fc039a51901377b6159b34543f5c7ce41f0b77d9" }
 
-# Essai : GPUI en mode retenu (gpui-fast). Les crates de `compat/` portent les
+# GPUI en mode retenu (gpui-fast). Les crates de `compat/` portent les
 # noms et la version (=0.3.7) des instantanés gpui-pre que Kit épingle, et
 # réexportent ceux de gpui-fast. Quand Kit change de gpui-pre, le patch cesse
 # de s'appliquer, avec un simple avertissement de cargo.
