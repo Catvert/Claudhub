@@ -1,0 +1,14 @@
+{
+  "title": { "fr": "Requêtes HTTP", "en": "HTTP requests" },
+  "kind": "tab",
+  "icon": "send",
+  "description": {
+    "fr": "Un client HTTP à la HTTPie : des requêtes enregistrées, rejouées d'un clic — méthode, paramètres, en-têtes, corps JSON, formulaire ou multipart, authentification — et la réponse mise en forme.",
+    "en": "An HTTPie-like HTTP client: saved requests replayed in a click — method, parameters, headers, JSON, form or multipart body, authentication — and the response formatted."
+  },
+  "permissions": {
+    "secrets": [
+      { "name": "vault", "label": { "fr": "Jetons, mots de passe et variables secrètes des requêtes", "en": "The requests' tokens, passwords and secret variables" } }
+    ]
+  }
+}

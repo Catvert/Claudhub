@@ -52,7 +52,7 @@ gpui-kit = { version = "0.7.0", optional = true, default-features = false, featu
 # Le runtime des scripts de la vue Focus (QuickJS) — voir `src/ui/scripts.rs`.
 # Hors crates.io (`publish = false` chez Kit) : pris dans notre fork, au même
 # `rev` que gpui-base, dont il dépend.
-gpui-shell = { git = "https://github.com/Catvert/gpui-kit", rev = "51f1ffee24510f52cb94c2c7573786f8a17ac205", optional = true }
+gpui-shell = { git = "https://github.com/Catvert/gpui-kit", rev = "ef4f269a4f60d7a5d5f47abdb63f1774f62157be", optional = true }
 
 # Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
 rust-embed = { version = "8", optional = true }
@@ -226,12 +226,12 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] 
 # `claudhub-v0.7.0`, plus ce que l'API de gpui-fast demande (`wrap_line`
 # prend un `IndentAdjustment`) et qui ne compile pas contre gpui-pre.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "51f1ffee24510f52cb94c2c7573786f8a17ac205" }
-gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "51f1ffee24510f52cb94c2c7573786f8a17ac205" }
+gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "ef4f269a4f60d7a5d5f47abdb63f1774f62157be" }
+gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "ef4f269a4f60d7a5d5f47abdb63f1774f62157be" }
 # gpui-shell nomme `rquickjs` une façade (`crates/shell/rquickjs-compat`) que
 # le workspace de Kit patche à sa racine ; un patch ne traverse pas une
 # dépendance, il faut le redire ici.
-rquickjs = { git = "https://github.com/Catvert/gpui-kit", rev = "51f1ffee24510f52cb94c2c7573786f8a17ac205" }
+rquickjs = { git = "https://github.com/Catvert/gpui-kit", rev = "ef4f269a4f60d7a5d5f47abdb63f1774f62157be" }
 
 # GPUI en mode retenu (gpui-fast). Les crates de `compat/` portent les
 # noms et la version (=0.3.7) des instantanés gpui-pre que Kit épingle, et

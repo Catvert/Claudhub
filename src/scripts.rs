@@ -8,8 +8,14 @@
 //! missing or of another type falls back, and only what makes the folder
 //! meaningless — an entry that is not there — refuses it.
 //!
-//! Pure but for [`discover`] and [`stamp`], which read a folder: the UI
-//! calls both off its thread.
+//! Some ship **inside Claudhub** — the builtins: written at each start to a
+//! folder of their own, which an update rewrites, and **forked** by copying
+//! them into the user's folder under the same name, where the copy takes
+//! their place — their data, secrets and grants, all filed by id, with it.
+//!
+//! Pure but for [`discover`], [`stamp`] and the few that write a folder
+//! ([`seed`], [`install_builtins`], [`retire`], [`fork`], [`set_aside`]):
+//! the UI calls them off its thread.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -46,15 +52,27 @@ pub struct Script {
     pub description: String,
     /// What it asks for beyond drawing — see [`Permissions`].
     pub permissions: Permissions,
+    pub origin: Origin,
 }
 
-/// What a script asks for beyond drawing, as its manifest declares it under
-/// `permissions`. Asking grants nothing: the hosts are reached only once
-/// the user has allowed each, in the Plugins screen.
+/// Where a script comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// The user's folder, and nothing of Claudhub's by that name.
+    #[default]
+    User,
+    /// Shipped inside Claudhub, and brought up to date with it.
+    Builtin,
+    /// The user's copy of a builtin, standing in its place.
+    Fork,
+}
+
+/// What a script declares beyond drawing, under its manifest's
+/// `permissions`. The network needs no declaring: every script may send
+/// HTTP and HTTPS requests anywhere, as an application may — a
+/// `permissions.network` written before is read past.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Permissions {
-    /// The hosts it would send HTTPS requests to, lower-case.
-    pub network: Vec<String>,
     /// The secrets it keeps in the system keyring, by name, with what the
     /// user is told of each.
     pub secrets: Vec<Secret>,
@@ -65,42 +83,6 @@ pub struct Permissions {
 pub struct Secret {
     pub name: String,
     pub label: String,
-}
-
-/// Whether a text names a host, and nothing else: no scheme, no port, no
-/// path — a grant is per host, and `https` is the only scheme granted.
-pub fn valid_host(host: &str) -> bool {
-    !host.is_empty()
-        && host.len() <= 253
-        && !host.starts_with('.')
-        && !host.ends_with('.')
-        && !host.contains("..")
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
-}
-
-/// A host as a manifest or a script writes it: trimmed, lower-case, and a
-/// `https://` or a trailing `/` forgiven. `None` when it is not one.
-pub fn host_of(text: &str) -> Option<String> {
-    let text = text.trim();
-    let text = text.strip_prefix("https://").unwrap_or(text);
-    let host = text.trim_end_matches('/').to_ascii_lowercase();
-    valid_host(&host).then_some(host)
-}
-
-/// The hosts among `wanted` the user has not allowed, in order, once each.
-pub fn pending_hosts<'a>(
-    wanted: impl IntoIterator<Item = &'a String>,
-    granted: &[String],
-) -> Vec<String> {
-    let mut pending: Vec<String> = Vec::new();
-    for host in wanted {
-        if !granted.contains(host) && !pending.contains(host) {
-            pending.push(host.clone());
-        }
-    }
-    pending
 }
 
 /// Whether a folder name can be a script's id: what the settings retain,
@@ -165,25 +147,16 @@ pub fn parse(id: &str, dir: &Path, manifest: &str, language: &str) -> Result<Scr
             .unwrap_or_default()
             .to_string(),
         permissions: permissions(&value, language)?,
+        origin: Origin::User,
     })
 }
 
-/// The `permissions` of a manifest. A host that is not one is refused
-/// rather than dropped: the agent that wrote it is told, and fixes it.
+/// The `permissions` of a manifest. A secret badly named is refused rather
+/// than dropped: the agent that wrote it is told, and fixes it.
 fn permissions(value: &Value, language: &str) -> Result<Permissions, String> {
     let Some(asked) = value.get("permissions").filter(|asked| asked.is_object()) else {
         return Ok(Permissions::default());
     };
-    let mut network: Vec<String> = Vec::new();
-    for host in crate::json::items(asked, "network") {
-        let text = host.as_str().unwrap_or_default();
-        let host = host_of(text).ok_or_else(|| {
-            format!("{MANIFEST}: `{text}` is not a host — write `api.example.com`")
-        })?;
-        if !network.contains(&host) {
-            network.push(host);
-        }
-    }
     let mut secrets: Vec<Secret> = Vec::new();
     for secret in crate::json::items(asked, "secrets") {
         // A name alone, or `{"name": …, "label": …}`.
@@ -207,7 +180,7 @@ fn permissions(value: &Value, language: &str) -> Result<Permissions, String> {
             secrets.push(Secret { name, label });
         }
     }
-    Ok(Permissions { network, secrets })
+    Ok(Permissions { secrets })
 }
 
 /// A text field written once, or once per language.
@@ -276,6 +249,212 @@ pub fn discover(root: &Path, language: &str) -> Found {
     found
 }
 
+/// The builtins and the user's scripts as one list, by id. A folder of the
+/// user's named after a builtin — a script or not — takes its place: it is
+/// a fork, and a fork whose manifest breaks is said broken rather than
+/// silently replaced by what it forked.
+pub fn merge(builtins: Found, user: Found) -> Found {
+    let taken: Vec<String> = user
+        .scripts
+        .iter()
+        .map(|(script, _)| script.id.clone())
+        .chain(user.broken.iter().map(|(id, _)| id.clone()))
+        .collect();
+    let taken = |id: &str| taken.iter().any(|known| known == id);
+    let shipped: Vec<String> = builtins
+        .scripts
+        .iter()
+        .map(|(script, _)| script.id.clone())
+        .chain(builtins.broken.iter().map(|(id, _)| id.clone()))
+        .collect();
+    let mut found = Found::default();
+    for (mut script, stamp) in builtins.scripts {
+        if !taken(&script.id) {
+            script.origin = Origin::Builtin;
+            found.scripts.push((script, stamp));
+        }
+    }
+    for (mut script, stamp) in user.scripts {
+        if shipped.contains(&script.id) {
+            script.origin = Origin::Fork;
+        }
+        found.scripts.push((script, stamp));
+    }
+    found.broken = builtins
+        .broken
+        .into_iter()
+        .filter(|(id, _)| !taken(id))
+        .chain(user.broken)
+        .collect();
+    found.scripts.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+    found.broken.sort();
+    found
+}
+
+/// The ids of a list of shipped files — `<id>/<path>` —, in order, once each.
+pub fn ids_of<'a>(files: &[(&'a str, &str)]) -> Vec<&'a str> {
+    let mut ids: Vec<&str> = Vec::new();
+    for (path, _) in files {
+        if let Some((id, _)) = path.split_once('/') {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// The files of one shipped script, `<id>/` and all.
+fn files_of<'a>(files: &[(&'a str, &'a str)], id: &str) -> Vec<(&'a str, &'a str)> {
+    files
+        .iter()
+        .filter(|(path, _)| path.split_once('/').is_some_and(|(of, _)| of == id))
+        .copied()
+        .collect()
+}
+
+/// The file, in the builtins' folder, holding the fingerprint of what was
+/// written there.
+const BUILTINS_PRINT: &str = ".version";
+
+/// Writes the builtins under `root` — a folder that is Claudhub's alone —
+/// when what is there is not this build's: the folder emptied first, so a
+/// file a newer version dropped goes too. True when it wrote.
+pub fn install_builtins(root: &Path, files: &[(&str, &str)]) -> std::io::Result<bool> {
+    let print = fingerprint(files.iter().map(|(path, content)| (*path, Some(*content))));
+    let there = std::fs::read_to_string(root.join(BUILTINS_PRINT)).unwrap_or_default();
+    if there.trim() == print && ids_of(files).iter().all(|id| root.join(id).is_dir()) {
+        return Ok(false);
+    }
+    if root.exists() {
+        std::fs::remove_dir_all(root)?;
+    }
+    for (path, content) in files {
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(target, content)?;
+    }
+    std::fs::write(root.join(BUILTINS_PRINT), format!("{print}\n"))?;
+    Ok(true)
+}
+
+/// What the runtime writes beside a script's entry at each load: never the
+/// user's work.
+const GENERATED: [&str; 2] = ["gpui-kit.d.ts", "jsconfig.json"];
+
+/// Takes away, from the user's folder `root`, a copy of builtin `id` that is
+/// no fork: one that was written there as an example and never touched, one
+/// whose files are the builtin's own and nothing more, or one that is an
+/// `earlier` version of it, by fingerprint. A builtin that lived in the
+/// user's folder once would otherwise stand still there, in the place of
+/// the one that is brought up to date. True when it did.
+pub fn retire(
+    root: &Path,
+    id: &str,
+    files: &[(&str, &str)],
+    earlier: &[&str],
+) -> std::io::Result<bool> {
+    let own = files_of(files, id);
+    let dir = root.join(id);
+    if own.is_empty() || !dir.is_dir() {
+        return Ok(false);
+    }
+    let on_disk: Vec<(&str, Option<String>)> = own
+        .iter()
+        .map(|(path, _)| (*path, std::fs::read_to_string(root.join(path)).ok()))
+        .collect();
+    let current = fingerprint(on_disk.iter().map(|(path, text)| (*path, text.as_deref())));
+    let offered_path = root.join(OFFERED);
+    let offered = std::fs::read_to_string(&offered_path).unwrap_or_default();
+    let seeded_untouched = offered.lines().any(|line| {
+        line.split_once(' ')
+            .is_some_and(|(of, print)| of == id && print.trim() == current)
+    });
+    let identical = on_disk
+        .iter()
+        .zip(&own)
+        .all(|((_, there), (_, shipped))| there.as_deref() == Some(*shipped));
+    // Anything else in it is the user's: a file of their own makes a fork.
+    let named: Vec<String> = own
+        .iter()
+        .filter_map(|(path, _)| path.split_once('/').map(|(_, rest)| rest.to_string()))
+        .chain(GENERATED.iter().map(|name| name.to_string()))
+        .collect();
+    let only_ours = std::fs::read_dir(&dir)?.flatten().all(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        named.contains(&name)
+            || entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && own.iter().any(|(path, _)| {
+                    path.split_once('/')
+                        .is_some_and(|(_, rest)| rest.starts_with(&format!("{name}/")))
+                })
+    });
+    let known = earlier.contains(&current.as_str());
+    if !(seeded_untouched || identical || known) || !only_ours {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&dir)?;
+    let kept: String = offered
+        .lines()
+        .filter(|line| line.split(' ').next() != Some(id))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if kept != offered {
+        std::fs::write(offered_path, kept)?;
+    }
+    Ok(true)
+}
+
+/// Forks builtin `id`: its files written into the user's folder `root`,
+/// under its name. Refused when that folder exists — it is a fork already,
+/// or the user's.
+pub fn fork(root: &Path, id: &str, files: &[(&str, &str)]) -> std::io::Result<PathBuf> {
+    let own = files_of(files, id);
+    if own.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("`{id}` is not a builtin"),
+        ));
+    }
+    let dir = root.join(id);
+    if dir.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists already", dir.display()),
+        ));
+    }
+    for (path, content) in own {
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(target, content)?;
+    }
+    Ok(dir)
+}
+
+/// Where a fork goes when the user goes back to the builtin: a hidden
+/// folder the reading passes by, so nothing written is lost.
+pub const SET_ASIDE: &str = ".forks";
+
+/// Moves the user's folder `id` out of the way — under [`SET_ASIDE`], named
+/// with `stamp` — and says where.
+pub fn set_aside(root: &Path, id: &str, stamp: u64) -> std::io::Result<PathBuf> {
+    let aside = root.join(SET_ASIDE);
+    std::fs::create_dir_all(&aside)?;
+    let target = (1..)
+        .map(|n| match n {
+            1 => aside.join(format!("{id}-{stamp}")),
+            n => aside.join(format!("{id}-{stamp}-{n}")),
+        })
+        .find(|path| !path.exists())
+        .expect("an unbounded range has a free name");
+    std::fs::rename(root.join(id), &target)?;
+    Ok(target)
+}
+
 /// The file, at the scripts' root, naming the examples written, each with
 /// the fingerprint of what was written.
 const OFFERED: &str = ".examples";
@@ -316,21 +495,9 @@ pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<Vec<String>>
             None => (line.to_string(), None),
         })
         .collect();
-    let mut ids: Vec<&str> = Vec::new();
-    for (path, _) in files {
-        if let Some((id, _)) = path.split_once('/') {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-    }
     let mut written: Vec<String> = Vec::new();
-    for id in ids {
-        let own: Vec<(&str, &str)> = files
-            .iter()
-            .filter(|(path, _)| path.split_once('/').is_some_and(|(of, _)| of == id))
-            .map(|(path, content)| (*path, *content))
-            .collect();
+    for id in ids_of(files) {
+        let own = files_of(files, id);
         let shipped = fingerprint(own.iter().map(|(path, content)| (*path, Some(*content))));
         let there = root.join(id).exists();
         let write = match offered.iter().find(|(known, _)| known == id) {
@@ -402,10 +569,18 @@ pub enum Fared {
     NotShown,
 }
 
+/// One script as [`status_text`] tells it.
+pub struct Report<'a> {
+    pub script: &'a Script,
+    pub fared: Fared,
+    /// Whether the user has it on: off, the boards do not show it.
+    pub enabled: bool,
+}
+
 /// The text of [`STATUS`]: each script and how it fared, the folders that
 /// are not scripts and why, and what the Plugins screen has selected.
 pub fn status_text(
-    scripts: &[(&Script, Fared, Vec<String>)],
+    scripts: &[Report],
     broken: &[(String, String)],
     selected: Option<&str>,
     preview: Option<&str>,
@@ -424,15 +599,31 @@ pub fn status_text(
         out.push_str(&format!(", previewed on the worktree `{preview}`"));
     }
     out.push_str(".\n");
-    for (script, fared, pending) in scripts {
+    for Report {
+        script,
+        fared,
+        enabled,
+    } in scripts
+    {
         let kind = match script.kind {
             Kind::Tab => "tab",
             Kind::Home => "home",
         };
+        let origin = match script.origin {
+            Origin::User => String::new(),
+            Origin::Builtin => format!(
+                ", builtin — read-only in `{}`, fork it to change it",
+                script.dir.display()
+            ),
+            Origin::Fork => ", fork of the builtin".to_string(),
+        };
         out.push_str(&format!(
-            "\n## `{}` ({kind}) — {}\n",
+            "\n## `{}` ({kind}{origin}) — {}\n",
             script.id, script.title
         ));
+        if !enabled {
+            out.push_str("\nDisabled by the user: no board shows it, the Plugins screen still previews it.\n");
+        }
         match fared {
             Fared::Loaded => out.push_str("\nLoaded.\n"),
             Fared::NotShown => out.push_str("\nNot shown since its last change.\n"),
@@ -441,17 +632,6 @@ pub fn status_text(
                 out.push_str(why.trim_end());
                 out.push_str("\n```\n");
             }
-        }
-        if !pending.is_empty() {
-            out.push_str(&format!(
-                "\nWaiting for the user to allow these hosts in the Plugins screen \
-                 (its `fetch` to them fails until then): {}.\n",
-                pending
-                    .iter()
-                    .map(|host| format!("`{host}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
         }
     }
     for (id, why) in broken {
@@ -533,8 +713,9 @@ pub fn is_our_instructions(text: &str) -> bool {
 /// What the agent of the Plugins screen is told before anything: where it
 /// is, what it may touch, how it learns which script the user is looking at
 /// and whether a save worked.
-pub fn instructions(root: &Path) -> String {
+pub fn instructions(root: &Path, builtins: &Path) -> String {
     let root = root.display();
+    let builtins = builtins.display();
     format!(
         "{INSTRUCTIONS_MARK}\n\n\
          # Claudhub scripts\n\n\
@@ -543,24 +724,28 @@ pub fn instructions(root: &Path) -> String {
          and a JavaScript entry run by Claudhub's embedded runtime.\n\n\
          - The `Scripts` section of the claudhub skill gives the format and the `claudhub` \
          module; each script's `gpui-kit.d.ts` gives every signature. Read them before \
-         writing code. `sentry/` is a complete example.\n\
+         writing code. `{builtins}/sentry/` is a complete example.\n\
          - Work only inside this folder.\n\
+         - The builtin scripts ship with Claudhub, in `{builtins}` (also \
+         `$CLAUDHUB_BUILTIN_SCRIPTS`), rewritten at each update: never edit them there. To \
+         change one, fork it — copy its folder here under the same name (the Plugins \
+         screen's Fork does it) —: the copy takes its place, its data and secrets with it, \
+         and stops following updates.\n\
          - `{STATUS}` says which script the user has selected in the Plugins screen — start \
          there unless asked otherwise — and how each script fared.\n\
          - Claudhub reloads a script within a second of a save. After each save, wait a \
          second and read `{STATUS}`: it says whether the script loaded and, if not, the \
          error. Fix it before saying you are done.\n\
          - Never edit `{STATUS}`, `gpui-kit.d.ts` nor this file: Claudhub writes them.\n\
-         - A script that needs the network declares its hosts in `permissions.network` and \
-         keeps its credentials with `set_secret`. Tell the user to allow the hosts in the \
-         Plugins screen — `{STATUS}` lists those still waiting.\n"
+         - A script reaches the network with `fetch`, to any host, nothing to declare; it \
+         keeps its credentials with `set_secret`, never in its storage.\n"
     )
 }
 
 /// Writes the instructions in `root` under each of [`INSTRUCTIONS`]' names,
 /// over a file Claudhub wrote and never over the user's.
-pub fn write_instructions(root: &Path) -> std::io::Result<()> {
-    let text = instructions(root);
+pub fn write_instructions(root: &Path, builtins: &Path) -> std::io::Result<()> {
+    let text = instructions(root, builtins);
     std::fs::create_dir_all(root)?;
     for name in INSTRUCTIONS {
         let path = root.join(name);
@@ -707,8 +892,16 @@ mod tests {
         let (tab, home) = (read("{}").unwrap(), read(r#"{"kind": "home"}"#).unwrap());
         let text = status_text(
             &[
-                (&tab, Fared::Loaded, vec!["sentry.io".into()]),
-                (&home, Fared::Failed("SyntaxError: x\n".into()), Vec::new()),
+                Report {
+                    script: &tab,
+                    fared: Fared::Loaded,
+                    enabled: true,
+                },
+                Report {
+                    script: &home,
+                    fared: Fared::Failed("SyntaxError: x\n".into()),
+                    enabled: false,
+                },
             ],
             &[("old".into(), "its entry `main.js` is missing".into())],
             Some("board"),
@@ -719,8 +912,7 @@ mod tests {
         assert!(text.contains("## `board` (tab) — board\n\nLoaded."));
         assert!(text.contains("**Failed to load:**\n\n```\nSyntaxError: x\n```"));
         assert!(text.contains("## `old` — not a script"));
-        assert!(text.contains("allow these hosts in the Plugins screen"));
-        assert!(text.contains("`sentry.io`"));
+        assert!(text.contains("Disabled by the user"));
     }
 
     #[test]
@@ -735,15 +927,14 @@ mod tests {
     }
 
     #[test]
-    fn the_permissions_are_read_and_hosts_forgiven_their_scheme() {
+    fn the_secrets_are_read_and_a_network_list_read_past() {
         let script = read(
             r#"{"permissions": {
-                "network": ["https://Sentry.io/", "us.sentry.io", "sentry.io"],
+                "network": ["sentry.io", "not a host"],
                 "secrets": ["token", {"name": "dsn", "label": {"fr": "Le DSN", "en": "DSN"}}]
             }}"#,
         )
         .unwrap();
-        assert_eq!(script.permissions.network, ["sentry.io", "us.sentry.io"]);
         let secrets: Vec<(&str, &str)> = script
             .permissions
             .secrets
@@ -752,31 +943,59 @@ mod tests {
             .collect();
         assert_eq!(secrets, [("token", "token"), ("dsn", "Le DSN")]);
         assert_eq!(read("{}").unwrap().permissions, Permissions::default());
-    }
-
-    #[test]
-    fn a_host_that_is_not_one_is_refused() {
-        for host in ["http://x.io", "x.io:8080", "x.io/api", "*.x.io", "", "a..b"] {
-            let manifest = format!(r#"{{"permissions": {{"network": [{host:?}]}}}}"#);
-            assert!(read(&manifest).is_err(), "{host}");
-        }
         assert!(read(r#"{"permissions": {"secrets": ["a/b"]}}"#).is_err());
     }
 
     #[test]
-    fn what_is_pending_is_what_was_not_allowed() {
-        let wanted = ["a.io".to_string(), "b.io".to_string(), "a.io".to_string()];
-        assert_eq!(pending_hosts(&wanted, &["b.io".to_string()]), ["a.io"]);
-        assert!(pending_hosts(&wanted, &wanted).is_empty());
+    fn the_instructions_are_ours_and_say_where_to_look() {
+        let text = instructions(Path::new("/c/scripts"), Path::new("/c/scripts-builtin"));
+        assert!(is_our_instructions(&text));
+        assert!(text.contains("`/c/scripts`"));
+        assert!(text.contains("`/c/scripts-builtin/sentry/`"));
+        assert!(text.contains(STATUS));
+        assert!(!is_our_instructions("# My own CLAUDE.md\n"));
     }
 
     #[test]
-    fn the_instructions_are_ours_and_say_where_to_look() {
-        let text = instructions(Path::new("/c/scripts"));
-        assert!(is_our_instructions(&text));
-        assert!(text.contains("`/c/scripts`"));
-        assert!(text.contains(STATUS));
-        assert!(!is_our_instructions("# My own CLAUDE.md\n"));
+    fn a_users_folder_takes_a_builtins_place() {
+        let at = |id: &str, root: &str| {
+            let script = parse(id, &Path::new(root).join(id), "{}", "en").unwrap();
+            (script, Stamp::default())
+        };
+        let builtins = Found {
+            scripts: vec![at("http", "/b"), at("sentry", "/b"), at("tetris", "/b")],
+            broken: Vec::new(),
+        };
+        let user = Found {
+            scripts: vec![at("mine", "/u"), at("sentry", "/u")],
+            broken: vec![("tetris".into(), "no entry".into())],
+        };
+        let found = merge(builtins, user);
+        let listed: Vec<(&str, &str, Origin)> = found
+            .scripts
+            .iter()
+            .map(|(script, _)| {
+                let root = if script.dir.starts_with("/b") {
+                    "/b"
+                } else {
+                    "/u"
+                };
+                (script.id.as_str(), root, script.origin)
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("http", "/b", Origin::Builtin),
+                ("mine", "/u", Origin::User),
+                ("sentry", "/u", Origin::Fork),
+            ]
+        );
+        // A fork that breaks is said broken, not replaced by the builtin.
+        assert_eq!(
+            found.broken,
+            [("tetris".to_string(), "no entry".to_string())]
+        );
     }
 
     #[test]

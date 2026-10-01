@@ -973,10 +973,7 @@ impl Chat {
     /// under way, those it launched — since the last prompt — even ended,
     /// so that a fan-out of five reads as five until the turn is over.
     pub fn pinned_subagents(&self) -> Vec<(usize, &Subagent)> {
-        let last_prompt = self
-            .prompts()
-            .last()
-            .map_or(0, |prompt| prompt.entry);
+        let last_prompt = self.prompts().last().map_or(0, |prompt| prompt.entry);
         self.entries
             .iter()
             .enumerate()
@@ -3381,7 +3378,10 @@ mod tests {
         // One the turn left running is closed with it.
         chat.receive(&done(&second["id"]));
         assert!(chat.pinned_subagents().is_empty());
-        assert_eq!(chat.subagent("b").unwrap().state.as_deref(), Some("cancelled"));
+        assert_eq!(
+            chat.subagent("b").unwrap().state.as_deref(),
+            Some("cancelled")
+        );
     }
 
     #[test]

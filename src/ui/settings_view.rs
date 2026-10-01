@@ -283,7 +283,7 @@ impl ClaudhubApp {
                 Page::Lsp => lsp_page(),
                 Page::Sentry => sentry_page(),
                 Page::Databases => databases_page(),
-                Page::Scripts => scripts_page(self.scripts_listing()),
+                Page::Scripts => scripts_page(self.scripts_listing(cx)),
                 // The ring itself is behind an `Rc`: what is cloned here is
                 // three words.
                 Page::Logs => logs_page(logs.clone()),
@@ -1662,15 +1662,19 @@ struct ScriptsListing {
 }
 
 impl ClaudhubApp {
-    fn scripts_listing(&self) -> ScriptsListing {
+    fn scripts_listing(&self, cx: &App) -> ScriptsListing {
         use crate::scripts::Kind;
         let homes = std::iter::once((SharedString::default(), tr!("settings-home-builtin")))
-            .chain(self.scripts.of_kind(Kind::Home).map(|script| {
-                (
-                    SharedString::from(script.id.clone()),
-                    SharedString::from(script.title.clone()),
-                )
-            }))
+            .chain(
+                self.enabled_scripts(Kind::Home, cx)
+                    .into_iter()
+                    .map(|script| {
+                        (
+                            SharedString::from(script.id.clone()),
+                            SharedString::from(script.title.clone()),
+                        )
+                    }),
+            )
             .collect();
         let found = [Kind::Home, Kind::Tab]
             .into_iter()

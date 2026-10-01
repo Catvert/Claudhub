@@ -20,11 +20,12 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
+    switch::Switch,
     v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _,
 };
 use gpui_kit::{div, prelude::*, px, AnyElement, Context, SharedString, Window};
 
-use crate::scripts::Kind;
+use crate::scripts::{Kind, Origin};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
@@ -159,14 +160,32 @@ impl ClaudhubApp {
             .flat_map(|kind| self.scripts.of_kind(kind))
             .map(|script| {
                 let lit = selected.as_deref() == Some(script.id.as_str());
-                // A host it waits for is said on its row: the screen is where
-                // it is allowed.
-                let waiting = !self.pending_hosts(&script.id, cx).is_empty();
+                let enabled = super::scripts::script_enabled(&script.id, cx);
                 let id = script.id.clone();
                 let kind = match script.kind {
                     Kind::Tab => tr!("settings-script-tab"),
                     Kind::Home => tr!("settings-script-home"),
                 };
+                let origin = match script.origin {
+                    Origin::User => None,
+                    Origin::Builtin => Some(tr!("plugins-builtin")),
+                    Origin::Fork => Some(tr!("plugins-fork")),
+                };
+                let switch = Switch::new(SharedString::from(format!("plugins-on-{id}")))
+                    .xsmall()
+                    .checked(enabled)
+                    .tooltip(if enabled {
+                        tr!("plugins-disable")
+                    } else {
+                        tr!("plugins-enable")
+                    })
+                    .on_click({
+                        let (app, id) = (cx.entity().downgrade(), id.clone());
+                        move |on, _, cx| {
+                            let _ =
+                                app.update(cx, |this, cx| this.set_script_enabled(&id, *on, cx));
+                        }
+                    });
                 v_flex()
                     .id(SharedString::from(format!("plugins-row-{id}")))
                     .w_full()
@@ -187,10 +206,20 @@ impl ClaudhubApp {
                         cx.notify();
                     }))
                     .child(
-                        div()
-                            .truncate()
-                            .text_sm()
-                            .child(SharedString::from(script.title.clone())),
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .when(!enabled, |el| el.text_color(theme.muted_foreground))
+                                    .child(SharedString::from(script.title.clone())),
+                            )
+                            .child(switch),
                     )
                     .child(
                         h_flex()
@@ -203,13 +232,15 @@ impl ClaudhubApp {
                                     .child(SharedString::from(script.id.clone())),
                             )
                             .child(kind)
-                            .when(waiting, |el| {
-                                el.child(
-                                    div()
-                                        .text_color(theme.warning)
-                                        .child(tr!("plugins-waiting")),
-                                )
-                            }),
+                            .children(origin.map(|origin| {
+                                div()
+                                    .text_color(if script.origin == Origin::Fork {
+                                        theme.warning
+                                    } else {
+                                        theme.ring
+                                    })
+                                    .child(origin)
+                            })),
                     )
                     .into_any_element()
             })
@@ -382,18 +413,46 @@ impl ClaudhubApp {
                     })
                 }
             });
-        let open_entry = selected.as_ref().and_then(|id| {
-            let script = self.scripts.script(id)?;
-            let entry = script.dir.join(&script.entry);
-            Some(
-                Button::new("plugins-open-entry")
+        // A builtin is not opened — an update would write over what was
+        // changed in it —: it is forked. A fork goes back to it.
+        let gestures: Vec<AnyElement> = selected
+            .as_ref()
+            .and_then(|id| self.scripts.script(id))
+            .map(|script| {
+                let entry = script.dir.join(&script.entry);
+                let open = Button::new("plugins-open-entry")
                     .ghost()
                     .xsmall()
                     .icon(icon("external-link"))
                     .tooltip(tr!("plugins-open-entry"))
-                    .on_click(move |_, _, cx| cx.open_with_system(&entry)),
-            )
-        });
+                    .on_click(move |_, _, cx| cx.open_with_system(&entry));
+                let id = script.id.clone();
+                match script.origin {
+                    Origin::User => vec![open.into_any_element()],
+                    Origin::Builtin => vec![Button::new("plugins-fork")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("git-fork"))
+                        .label(tr!("plugins-fork-action"))
+                        .tooltip(tr!("plugins-fork-help"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.fork_script(&id, cx)))
+                        .into_any_element()],
+                    Origin::Fork => vec![
+                        open.into_any_element(),
+                        Button::new("plugins-unfork")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("undo-2"))
+                            .label(tr!("plugins-unfork-action"))
+                            .tooltip(tr!("plugins-unfork-help"))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.unfork_script(&id, cx)),
+                            )
+                            .into_any_element(),
+                    ],
+                }
+            })
+            .unwrap_or_default();
         let title = selected
             .as_ref()
             .and_then(|id| self.scripts.script(id))
@@ -446,7 +505,7 @@ impl ClaudhubApp {
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(title),
                     )
-                    .children(open_entry)
+                    .children(gestures)
                     .child(picker),
             )
             .children(
@@ -458,31 +517,16 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// What the selected script may do beyond drawing, and the gestures on
-    /// it: the hosts it asks for, allowed or to allow; its secrets, to
-    /// forget; its data, to clear. Nothing when it asks for nothing and
-    /// keeps nothing.
+    /// What the selected script keeps, and the gestures on it: its secrets,
+    /// to forget; its data, to clear. Nothing when it keeps nothing. The
+    /// network is every script's, and asks nothing.
     fn plugins_permissions(&mut self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         let script = self.scripts.script(id)?.clone();
-        let granted = super::scripts::granted_hosts(id, cx);
-        // What it asks for, then what was allowed that it no longer asks
-        // for: still allowed, and withdrawn from here.
-        let mut hosts = self.wanted_hosts(id);
-        for host in &granted {
-            if !hosts.contains(host) {
-                hosts.push(host.clone());
-            }
-        }
         let has_data = !self.store_of(id).is_empty();
-        if hosts.is_empty() && script.permissions.secrets.is_empty() && !has_data {
+        if script.permissions.secrets.is_empty() && !has_data {
             return None;
         }
-        let pending: Vec<String> = hosts
-            .iter()
-            .filter(|host| !granted.contains(host))
-            .cloned()
-            .collect();
         let line = |label: SharedString| {
             h_flex().w_full().gap_2().items_center().text_xs().child(
                 div()
@@ -492,63 +536,6 @@ impl ClaudhubApp {
                     .child(label),
             )
         };
-        let host_rows = hosts.iter().map(|host| {
-            let allowed = granted.contains(host);
-            let (app, id, host_name) = (cx.entity().downgrade(), id.to_string(), host.clone());
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(
-                    icon(if allowed { "check" } else { "triangle-alert" })
-                        .xsmall()
-                        .text_color(if allowed {
-                            theme.success
-                        } else {
-                            theme.warning
-                        }),
-                )
-                .child(
-                    div()
-                        .font_family(theme.mono_font_family.clone())
-                        .child(SharedString::from(host.clone())),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("plugins-host-{host}")))
-                        .ghost()
-                        .xsmall()
-                        .label(if allowed {
-                            tr!("plugins-revoke")
-                        } else {
-                            tr!("plugins-allow")
-                        })
-                        .on_click(move |_, _, cx| {
-                            let _ = app.update(cx, |this, cx| {
-                                this.grant_host(&id, &host_name, !allowed, cx)
-                            });
-                        }),
-                )
-        });
-        let network = (!hosts.is_empty()).then(|| {
-            let (app, id, pending) = (cx.entity().downgrade(), id.to_string(), pending.clone());
-            line(tr!("plugins-network"))
-                .flex_wrap()
-                .children(host_rows)
-                .when(pending.len() > 1, |el| {
-                    el.child(
-                        Button::new("plugins-allow-all")
-                            .outline()
-                            .xsmall()
-                            .label(tr!("plugins-allow-all"))
-                            .on_click(move |_, _, cx| {
-                                let _ = app.update(cx, |this, cx| {
-                                    for host in &pending {
-                                        this.grant_host(&id, host, true, cx);
-                                    }
-                                });
-                            }),
-                    )
-                })
-        });
         let secrets = (!script.permissions.secrets.is_empty()).then(|| {
             let names: Vec<(String, String)> = script
                 .permissions
@@ -623,13 +610,8 @@ impl ClaudhubApp {
                 .p_2()
                 .rounded(theme.radius)
                 .border_1()
-                .border_color(if pending.is_empty() {
-                    theme.border
-                } else {
-                    theme.warning
-                })
+                .border_color(theme.border)
                 .bg(theme.background)
-                .children(network)
                 .children(secrets)
                 .children(data)
                 .into_any_element(),
@@ -707,10 +689,9 @@ impl ClaudhubApp {
         };
         // The folder is made with the examples the first time it is read;
         // an agent started before that would start nowhere.
-        let ready = crate::scripts::seed(&root, super::scripts::EXAMPLES)
-            .map(drop)
-            .and_then(|()| crate::scripts::write_instructions(&root));
-        if let Err(error) = ready {
+        let builtins = crate::ui::scripts::builtin_root().unwrap_or_else(|| root.clone());
+        super::scripts::prepare(&root, &builtins);
+        if let Err(error) = crate::scripts::write_instructions(&root, &builtins) {
             log::warn!("preparing the scripts' folder: {error}");
         }
         self.write_scripts_status(cx);

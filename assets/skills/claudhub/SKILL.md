@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 7 -->
+<!-- claudhub-skill-version: 8 -->
 
 # Claudhub
 
@@ -147,10 +147,9 @@ letters, digits, `-`, `_`, `.`. It holds:
   "entry": "main.js", "description": "…", "permissions": {…}}`. Only the
   file is required; the title defaults to the id, the kind to `tab`, the
   entry to `main.js`. A title or description can be `{"fr": "…", "en": "…"}`.
-  `icon` is a Lucide name. `permissions` asks for what is below; asking
-  grants nothing — the user allows each host in the Plugins screen:
-  `{"network": ["api.example.com"], "secrets": [{"name": "token", "label":
-  "API token"}]}`. Hosts are bare names (HTTPS, port 443).
+  `icon` is a Lucide name. `permissions` declares the secrets it keeps:
+  `{"secrets": [{"name": "token", "label": "API token"}]}`. The network
+  needs no declaring.
 - the entry, an ES module whose default export is a class extending `View`.
 
 Saving any file reloads the script on every board within a second. If it
@@ -203,10 +202,8 @@ export default class Example extends View {
 - There are **no dialogs, toasts or tooltips** in a script: say things with
   `notify(text)` or in the view itself.
 - **Network**: the standard `fetch(url, {method, headers, body})` reaches
-  the hosts the user allowed — `granted_hosts()` lists them. Call it inside
-  `cx.spawn(async (cx) => { …; cx.notify(); })`. A host only known at run
-  time (a self-hosted instance) is asked for with `request_network(host)`:
-  the user is asked, and the script is mounted again once allowed.
+  any address over HTTP or HTTPS, any port. Call it inside
+  `cx.spawn(async (cx) => { …; cx.notify(); })`.
 - **Storage**: `storage_get(key)`, `storage_set(key, json)`,
   `storage_remove(key)`, `storage_keys()` — this script's data, kept across
   restarts, shared by its views on every board. Key per-repository data by
@@ -230,8 +227,16 @@ export default class Example extends View {
 - No file, process or raw socket access, and never git or shell commands:
   what a script knows of the worktree comes from the module; ask the user,
   or use `send_to_agent`.
-- `$CLAUDHUB_SCRIPTS/sentry` is a complete example: settings in storage,
-  its token in the keyring, `fetch` to Sentry's API, a list and a detail.
+- **Builtins** ship with Claudhub in `$CLAUDHUB_BUILTIN_SCRIPTS/<id>/`
+  (`sentry`, `http-client`) and are rewritten at each update: never edit
+  them there. To change one, **fork** it — copy its folder into
+  `$CLAUDHUB_SCRIPTS/` under the same id (the Plugins screen's Fork button
+  does it): the copy replaces the builtin, keeps its storage and secrets,
+  and no longer follows updates. `scripts()` says each one's `origin`
+  (`builtin`, `user`, `fork`) and whether the user has it `enabled`.
+- `$CLAUDHUB_BUILTIN_SCRIPTS/sentry` is a complete example: settings in
+  storage, its token in the keyring, `fetch` to Sentry's API, a list and a
+  detail.
 - Keep `render` cheap — it runs on every refresh. **A long list is
   virtual**: `v_virtual_list(id, count, height, (i) => key, (range) =>
   rows)` from `gpui-base`, `.size_full()`, with `Scrollbar.vertical(id)

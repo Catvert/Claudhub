@@ -7,9 +7,8 @@
 //   the prompt's introduction — once for the machine, the project once per
 //   repository, the sections one folded;
 // - its **secret** (`secret("token")`), in the system keyring;
-// - the **network**: `sentry.io` is asked for in `claudhub.json`, another
-//   instance at run time (`request_network`); either is reached once the user
-//   allowed it in the Plugins screen, which mounts this again;
+// - the **network**: `fetch` to the instance, `sentry.io` or one's own —
+//   nothing to ask, a plugin may reach any address;
 // - the **pieces** Claudhub lends: `CodeLine` for the deployed code, `Icon`,
 //   `Badge`, `ShareBar`; and its gestures — `open_file` for a frame of this
 //   worktree, `ask_agent` for the dialog where the prompt is read before it
@@ -32,8 +31,6 @@ import {
   storage_set,
   secret,
   set_secret,
-  granted_hosts,
-  request_network,
   open_url,
   copy_text,
   notify,
@@ -51,7 +48,6 @@ import {
 import {
   DEFAULT_HOST,
   DEFAULT_QUERY,
-  hostOf,
   issuesUrl,
   eventUrl,
   tagsUrl,
@@ -168,19 +164,10 @@ export default class Sentry extends View {
     return readJson(await fetch(url, { headers: { Authorization: `Bearer ${token}` } }));
   }
 
-  /** The host is allowed, or asked for: the Plugins screen mounts this again once it is. */
-  reachable(config) {
-    const host = hostOf(config.host);
-    if (granted_hosts().includes(host)) return true;
-    request_network(host);
-    this.error = this.t.allow(host);
-    return false;
-  }
-
   async load(cx) {
     const config = this.config();
     this.error = null;
-    if (!config.org || !config.project || !this.hasToken || !this.reachable(config)) {
+    if (!config.org || !config.project || !this.hasToken) {
       cx.notify();
       return;
     }

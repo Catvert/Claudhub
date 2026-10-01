@@ -552,11 +552,10 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
 - **Pas de `ShellRoot`** : la racine de la fenêtre est celle de Kit, et les
   deux veulent l'être. Dialogues, toasts et tooltips d'un script ne
   s'affichent pas ; `notify()` passe par nos bulles.
-- **Ce qu'un script peut au-delà de dessiner** : le **réseau** HTTPS vers
-  les hôtes que l'utilisateur a autorisés (`plugin_grants` des réglages ;
-  le manifeste ou `request_network` ne font que demander), et rien d'autre
-  — ni fichiers, ni processus, ni `localStorage`. Une autorisation est
-  figée dans la politique d'une vue : la changer la remonte. Son **stockage**
+- **Ce qu'un script peut au-delà de dessiner** : le **réseau**, HTTP et
+  HTTPS vers tout hôte (`any_http_request`, un ajout du fork : une
+  autorisation par hôte était une question à chaque adresse), et rien
+  d'autre — ni fichiers, ni processus, ni `localStorage`. Son **stockage**
   est dans le module (`storage_*`, `<config>/scripts-data/<id>.json`) et
   non celui du Shell, qui lie un fichier à une `Policy` — deux tableaux, deux
   caches, un fichier. Ses **secrets** sont dans le trousseau
@@ -565,8 +564,19 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   sauvegarde cassée laisse la vue qui marchait, et l'erreur part en bulle.
   Un exemple (`assets/scripts/`) est écrit une fois, puis **mis à jour tant
   qu'on n'y a pas touché** (empreinte dans `.examples`) ; modifié ou
-  supprimé, il reste tel quel. `sentry` est le portillon
-  d'acceptation : un panneau entier, réglages, jeton et requêtes compris.
+  supprimé, il reste tel quel.
+- **Les intégrés** (`ui::scripts::BUILTINS` : `sentry`, `http-client`) sont
+  **réécrits à chaque version** dans `<config>/scripts-builtin/`, à nous
+  seuls. **Forker** = copier dans le dossier de l'utilisateur **sous le même
+  nom** : la copie prend la place (`scripts::merge`), et avec elle les
+  données, secrets et la tâche des tableaux, tous rangés par id ; revenir
+  l'écarte dans `.forks/`, jamais effacée. Une copie qui n'est pas un fork
+  (exemple intact, fichiers identiques, empreinte connue d'une version
+  passée) est retirée au démarrage (`scripts::retire`). `sentry` est le
+  portillon d'acceptation : un panneau entier, réglages, jeton et requêtes.
+- **Un script se désactive** (`disabled_plugins` des réglages, la liste de
+  ce qui est éteint : un nouveau est allumé) : aucun tableau ne le montre,
+  ses vues sont lâchées, l'écran Plugins l'aperçoit encore.
 - **Ce que Claudhub prête** (`ui::script_kit`) : des pièces peintes par
   nous — `CodeBlock` et `CodeLine` (coloration mise en cache : un composant
   est rebâti à chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se

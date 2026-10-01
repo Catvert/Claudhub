@@ -2168,6 +2168,12 @@ impl ClaudhubApp {
                 .env
                 .insert("CLAUDHUB_SCRIPTS".into(), scripts.display().to_string());
         }
+        if let Some(builtins) = crate::ui::scripts::builtin_root() {
+            launch.env.insert(
+                "CLAUDHUB_BUILTIN_SCRIPTS".into(),
+                builtins.display().to_string(),
+            );
+        }
         // A pty we cannot open is a system problem: descriptor limit reached,
         // `/dev/pts` missing. We give the terminal up and say so, rather than
         // panic in the middle of a render — which is what this code used to do,

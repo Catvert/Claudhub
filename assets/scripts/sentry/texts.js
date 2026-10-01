@@ -45,7 +45,6 @@ const TEXTS = {
     tokenHelp: "Un jeton avec la portée event:read, gardé dans le trousseau du système.",
     intro: "Introduction du prompt",
     introHelp: "Ce qui précède l'erreur quand on la confie à l'agent ; vide, la phrase par défaut.",
-    allow: (host) => `Autorisez ${host} dans l'écran Plugins pour lire Sentry.`,
     noToken: "Aucun jeton : ouvrez les réglages.",
     defaultIntro:
       "Cette erreur est remontée par Sentry. Voici sa trace et le code déployé au moment où elle s'est produite. Dis-moi ce qui la provoque, puis corrige-la.",
@@ -93,7 +92,6 @@ const TEXTS = {
     tokenHelp: "A token with the event:read scope, kept in the system keyring.",
     intro: "Prompt introduction",
     introHelp: "What comes before the error when it is handed to the agent; empty, the default sentence.",
-    allow: (host) => `Allow ${host} in the Plugins screen to read Sentry.`,
     noToken: "No token: open the settings.",
     defaultIntro:
       "This error was reported by Sentry. Here is its trace and the code deployed when it happened. Tell me what causes it, then fix it.",

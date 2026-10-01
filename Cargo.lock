@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3244,7 +3244,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3322,7 +3322,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3333,7 +3333,7 @@ dependencies = [
 [[package]]
 name = "gpui-fps"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "core-graphics 0.24.0",
  "gpui-pre",
@@ -3363,7 +3363,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -3469,7 +3469,7 @@ dependencies = [
 [[package]]
 name = "gpui-shell"
 version = "0.7.0"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7378,7 +7378,7 @@ dependencies = [
 [[package]]
 name = "rquickjs"
 version = "0.12.9"
-source = "git+https://github.com/Catvert/gpui-kit?rev=51f1ffee24510f52cb94c2c7573786f8a17ac205#51f1ffee24510f52cb94c2c7573786f8a17ac205"
+source = "git+https://github.com/Catvert/gpui-kit?rev=ef4f269a4f60d7a5d5f47abdb63f1774f62157be#ef4f269a4f60d7a5d5f47abdb63f1774f62157be"
 dependencies = [
  "quickjs-jit",
 ]

@@ -70,13 +70,16 @@ multi-cursor rendering (0.6.1).
 | `ResizeHandle::reach` | the dock skin: grab the divider in the gutter beside a dock |
 | `MessageScrollerState::list_state` | `src/ui/chat_view.rs`: the transcript's wheel eased (`scroll::wheel_capture`) rather than let jump |
 | `gpui_shell::scroll_hook::observe_scroll_areas` (on `claudhub-v0.7.0-gpui-fast` only, with `gpui-shell` itself) | `src/ui/scripts.rs`: the scripts' lists and scroll areas get Claudhub's wheel smoothing |
+| `gpui_shell::Capabilities::any_http_request` | `src/ui/scripts.rs`: every script may `fetch` any HTTP or HTTPS address, with no grant per host |
 
 The fork also preserves behavior without a new call site: dock card geometry
 and spacing, resize targets across panel gutters, split sizes surviving layout
 reconciliation, moving the last side panel, hiding emptied dock regions,
 visible selection while a menu has focus, truncated menu labels, scrollbar
 hit testing through overlays, smart-case search, and Tab/Shift+Tab reaching
-the terminal outside modal surfaces. Gutter-mark hooks remain part of the
+the terminal outside modal surfaces, and a divider's resting hairline in the
+`resizable.handle` colour the application projects into base — transparent
+in Claudhub, which parts its cards by a gutter and shows only the pill. Gutter-mark hooks remain part of the
 series as well.
 
 Upstream 0.7.0 adds editor range decorations

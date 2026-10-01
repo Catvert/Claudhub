@@ -28,9 +28,9 @@
 //!
 //! The scripts' folder is read off the thread every half second. A change to
 //! a script's sources mounts it again; a broken save leaves the view that
-//! worked on screen, and says why in a bubble. Nothing here reaches the
-//! scripts' own grants: the policy permits no file, process nor network —
-//! what a script may do is what the module offers.
+//! worked on screen, and says why in a bubble. The policy permits HTTP and
+//! HTTPS requests anywhere, and no file nor process: what a script may do
+//! beyond that is what the module offers.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ use gpui_kit::{
 use gpui_shell::policy::Policy;
 use gpui_shell::{
     Capabilities, ComponentArgs, HostArguments, HostError, HostModule, HostObject, HostResult,
-    HostValue, HttpRequestGrant, ScriptView, ShellRuntime,
+    HostValue, ScriptView, ShellRuntime,
 };
 
 use crate::scripts::{self, Kind, Script, Stamp};
@@ -81,6 +81,12 @@ pub(super) const EXAMPLES: &[(&str, &str)] = &[
         "dashboard/main.js",
         include_str!("../../assets/scripts/dashboard/main.js"),
     ),
+];
+
+/// The scripts that ship inside Claudhub — see `crate::scripts` —, written
+/// to [`builtin_root`] and brought up to date with each build. Sentry was an
+/// example once: an untouched copy of it in the user's folder is retired.
+pub(super) const BUILTINS: &[(&str, &str)] = &[
     (
         "sentry/claudhub.json",
         include_str!("../../assets/scripts/sentry/claudhub.json"),
@@ -97,7 +103,63 @@ pub(super) const EXAMPLES: &[(&str, &str)] = &[
         "sentry/texts.js",
         include_str!("../../assets/scripts/sentry/texts.js"),
     ),
+    (
+        "http-client/claudhub.json",
+        include_str!("../../assets/scripts/http-client/claudhub.json"),
+    ),
+    (
+        "http-client/main.js",
+        include_str!("../../assets/scripts/http-client/main.js"),
+    ),
+    (
+        "http-client/http.js",
+        include_str!("../../assets/scripts/http-client/http.js"),
+    ),
+    (
+        "http-client/texts.js",
+        include_str!("../../assets/scripts/http-client/texts.js"),
+    ),
 ];
+
+/// Fingerprints of earlier versions of the builtins, as they may still lie
+/// in the user's folder — see `scripts::retire`: Requêtes HTTP was written
+/// there by the Plugins agent before it shipped, and Sentry seeded there as
+/// an example.
+const EARLIER: &[(&str, &str)] = &[
+    ("http-client", "39e76b702af5bd1f"),
+    ("sentry", "81ef7b6965f346f7"),
+];
+
+/// Where the builtins are written: beside the user's folder, Claudhub's
+/// alone, emptied and written again by an update.
+pub fn builtin_root() -> Option<PathBuf> {
+    super::settings::config_dir().map(|dir| dir.join("scripts-builtin"))
+}
+
+/// Readies the folders, off the thread: the builtins written, the copies
+/// that are no fork retired, the examples seeded.
+pub(super) fn prepare(root: &Path, builtins: &Path) {
+    if let Err(error) = scripts::install_builtins(builtins, BUILTINS) {
+        log::warn!("writing the builtin scripts: {error}");
+    }
+    for id in scripts::ids_of(BUILTINS) {
+        let earlier: Vec<&str> = EARLIER
+            .iter()
+            .filter(|(of, _)| *of == id)
+            .map(|(_, print)| *print)
+            .collect();
+        match scripts::retire(root, id, BUILTINS, &earlier) {
+            Ok(true) => {
+                log::info!("script {id}: the copy in the scripts' folder gave way to the builtin")
+            }
+            Ok(false) => {}
+            Err(error) => log::warn!("script {id}: retiring the copy: {error}"),
+        }
+    }
+    if let Err(error) = scripts::seed(root, EXAMPLES) {
+        log::warn!("writing the example scripts: {error}");
+    }
+}
 
 /// A board's view of one script: `(worktree, script id)`.
 type Key = (PathBuf, String);
@@ -130,9 +192,6 @@ pub(crate) struct Scripts {
     /// Where the stores' writes queue, one after the other — two written
     /// side by side could land in the wrong order.
     writer: Option<async_channel::Sender<(PathBuf, String)>>,
-    /// The hosts each script asked for while running (`request_network`),
-    /// beyond its manifest's.
-    pub(super) requested: HashMap<String, Vec<String>>,
 }
 
 /// Where scripts' data lives: beside their folder, not in it — an update of
@@ -234,9 +293,6 @@ pub(crate) struct Screen {
 struct Mounted {
     view: Entity<ScriptView>,
     stamp: Stamp,
-    /// The hosts it was mounted allowed to reach: a grant is frozen into
-    /// the view's policy, so a changed one mounts it again.
-    hosts: Vec<String>,
 }
 
 impl Scripts {
@@ -273,24 +329,25 @@ impl ClaudhubApp {
         if std::mem::replace(&mut self.scripts.watching, true) {
             return;
         }
-        let Some(root) = root() else {
+        let (Some(root), Some(builtins)) = (root(), builtin_root()) else {
             return;
         };
         cx.spawn(async move |this, cx| {
-            let folder = root.clone();
+            let (folder, shipped) = (root.clone(), builtins.clone());
             cx.background_executor()
-                .spawn(async move {
-                    if let Err(error) = scripts::seed(&folder, EXAMPLES) {
-                        log::warn!("writing the example scripts: {error}");
-                    }
-                })
+                .spawn(async move { prepare(&folder, &shipped) })
                 .await;
             loop {
-                let folder = root.clone();
+                let (folder, shipped) = (root.clone(), builtins.clone());
                 let language = rust_i18n::locale().to_string();
                 let found = cx
                     .background_executor()
-                    .spawn(async move { scripts::discover(&folder, &language) })
+                    .spawn(async move {
+                        scripts::merge(
+                            scripts::discover(&shipped, &language),
+                            scripts::discover(&folder, &language),
+                        )
+                    })
                     .await;
                 if this
                     .update(cx, |app, cx| app.scripts_found(found, cx))
@@ -353,16 +410,14 @@ impl ClaudhubApp {
         let Some(root) = root() else {
             return;
         };
-        let fared: Vec<(&Script, scripts::Fared, Vec<String>)> = self
+        let fared: Vec<scripts::Report> = self
             .scripts
             .found
             .iter()
-            .map(|(script, stamp)| {
-                (
-                    script,
-                    self.fared(script, *stamp),
-                    self.pending_hosts(&script.id, cx),
-                )
+            .map(|(script, stamp)| scripts::Report {
+                script,
+                fared: self.fared(script, *stamp),
+                enabled: script_enabled(&script.id, cx),
             })
             .collect();
         let preview = self
@@ -425,6 +480,91 @@ impl ClaudhubApp {
         .detach();
     }
 
+    /// Turns script `id` on or off for the boards. Off, its views are let
+    /// go — each one observes the application, shown or not —; the Plugins
+    /// screen's preview mounts it again if it is the one selected.
+    pub(super) fn set_script_enabled(&mut self, id: &str, enabled: bool, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        super::settings::Settings::update_global(cx, |settings| {
+            settings.disabled_plugins.retain(|known| *known != id);
+            if !enabled {
+                settings.disabled_plugins.push(id.clone());
+                settings.disabled_plugins.sort();
+            }
+        });
+        if !enabled {
+            self.scripts.mounted.retain(|(_, of), mounted| {
+                let kept = *of != id;
+                if !kept {
+                    forget_tracks(mounted.view.entity_id());
+                }
+                kept
+            });
+        }
+        self.write_scripts_status(cx);
+        cx.notify();
+    }
+
+    /// Forks builtin `id` into the user's folder, off the thread: the copy
+    /// takes its place at the next reading, and stays selected.
+    pub(super) fn fork_script(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(root) = root() else {
+            return;
+        };
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let (folder, of) = (root.clone(), id.clone());
+            let forked = cx
+                .background_executor()
+                .spawn(async move { scripts::fork(&folder, &of, BUILTINS) })
+                .await;
+            let _ = this.update(cx, |app, cx| match forked {
+                Ok(dir) => {
+                    app.scripts.screen.selected = Some(id.clone());
+                    app.announce(
+                        tr!("plugins-forked", { id: id, path: dir.display().to_string() }),
+                        cx,
+                    );
+                    app.write_scripts_status(cx);
+                    cx.notify();
+                }
+                Err(error) => app.announce_error(SharedString::from(error.to_string()), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Back to builtin `id`: the fork set aside in a hidden folder, never
+    /// deleted.
+    pub(super) fn unfork_script(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(root) = root() else {
+            return;
+        };
+        let id = id.to_string();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        cx.spawn(async move |this, cx| {
+            let (folder, of) = (root.clone(), id.clone());
+            let aside = cx
+                .background_executor()
+                .spawn(async move { scripts::set_aside(&folder, &of, stamp) })
+                .await;
+            let _ = this.update(cx, |app, cx| match aside {
+                Ok(path) => {
+                    app.announce(
+                        tr!("plugins-unforked", { id: id, path: path.display().to_string() }),
+                        cx,
+                    );
+                    app.write_scripts_status(cx);
+                    cx.notify();
+                }
+                Err(error) => app.announce_error(SharedString::from(error.to_string()), cx),
+            });
+        })
+        .detach();
+    }
+
     /// The script views run again, for a change the application does not
     /// notify — their stored data cleared. The rest reaches them by their
     /// observation of the application (`mounted`).
@@ -455,28 +595,23 @@ impl ClaudhubApp {
             return script_notice(tr!("scripts-missing", { id: id }), cx);
         };
         let key: Key = (path.to_path_buf(), id.to_string());
-        let hosts = granted_hosts(id, cx);
         let current = self
             .scripts
             .mounted
             .get(&key)
-            .map(|mounted| (mounted.view.clone(), (mounted.stamp, mounted.hosts.clone())));
+            .map(|mounted| (mounted.view.clone(), mounted.stamp));
         let failed = self
             .scripts
             .failed
             .get(&key)
             .filter(|(at, _)| *at == stamp)
             .map(|(_, why)| why.clone());
-        let fresh = current
-            .as_ref()
-            .is_some_and(|(_, (at, with))| *at == stamp && *with == hosts);
+        let fresh = current.as_ref().is_some_and(|(_, at)| *at == stamp);
         if !fresh && failed.is_none() && self.scripts.mounting.insert(key.clone()) {
             let app = cx.entity();
             window.defer(cx, move |window, cx| {
-                let result = mount(&app, &key.0, &script, &hosts, window, cx);
-                app.update(cx, |this, cx| {
-                    this.mounted(key, &script, stamp, hosts, result, cx)
-                });
+                let result = mount(&app, &key.0, &script, window, cx);
+                app.update(cx, |this, cx| this.mounted(key, &script, stamp, result, cx));
             });
         }
         match (current, failed) {
@@ -504,7 +639,6 @@ impl ClaudhubApp {
         key: Key,
         script: &Script,
         stamp: Stamp,
-        hosts: Vec<String>,
         result: gpui_shell::anyhow::Result<Entity<ScriptView>>,
         cx: &mut Context<Self>,
     ) {
@@ -516,10 +650,7 @@ impl ClaudhubApp {
                 view.update(cx, |_, cx| {
                     cx.observe(&app, |view, _, cx| view.refresh(cx)).detach();
                 });
-                let replaced = self
-                    .scripts
-                    .mounted
-                    .insert(key, Mounted { view, stamp, hosts });
+                let replaced = self.scripts.mounted.insert(key, Mounted { view, stamp });
                 if let Some(replaced) = replaced {
                     forget_tracks(replaced.view.entity_id());
                 }
@@ -622,78 +753,6 @@ impl ClaudhubApp {
         data_root().map(|root| root.join(format!("{id}.json")))
     }
 
-    /// Every host script `id` wants: its manifest's, then those it asked for
-    /// while running.
-    pub(super) fn wanted_hosts(&self, id: &str) -> Vec<String> {
-        let mut wanted: Vec<String> = self
-            .scripts
-            .script(id)
-            .map(|script| script.permissions.network.clone())
-            .unwrap_or_default();
-        for host in self.scripts.requested.get(id).into_iter().flatten() {
-            if !wanted.contains(host) {
-                wanted.push(host.clone());
-            }
-        }
-        wanted
-    }
-
-    /// The hosts script `id` wants and the user has not allowed.
-    pub(super) fn pending_hosts(&self, id: &str, cx: &App) -> Vec<String> {
-        scripts::pending_hosts(&self.wanted_hosts(id), &granted_hosts(id, cx))
-    }
-
-    /// A script asks for a host while running: kept, said once, and left to
-    /// the user to allow in the Plugins screen.
-    fn network_requested(&mut self, id: &str, host: String, cx: &mut Context<Self>) -> bool {
-        if granted_hosts(id, cx).contains(&host) {
-            return true;
-        }
-        if !self.wanted_hosts(id).contains(&host) {
-            self.scripts
-                .requested
-                .entry(id.to_string())
-                .or_default()
-                .push(host.clone());
-            let title = self
-                .scripts
-                .script(id)
-                .map_or_else(|| id.to_string(), |script| script.title.clone());
-            self.announce(
-                tr!("plugins-network-asked", { title: title, host: host }),
-                cx,
-            );
-            self.write_scripts_status(cx);
-            cx.notify();
-        }
-        false
-    }
-
-    /// Allows or withdraws a host for script `id`; its views mount again
-    /// with the new grant.
-    pub(super) fn grant_host(
-        &mut self,
-        id: &str,
-        host: &str,
-        allowed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let (id, host) = (id.to_string(), host.to_string());
-        super::settings::Settings::update_global(cx, |settings| {
-            let hosts = settings.plugin_grants.entry(id.clone()).or_default();
-            hosts.retain(|known| *known != host);
-            if allowed {
-                hosts.push(host.clone());
-                hosts.sort();
-            }
-            if hosts.is_empty() {
-                settings.plugin_grants.remove(&id);
-            }
-        });
-        self.write_scripts_status(cx);
-        cx.notify();
-    }
-
     /// Forgets the views of a worktree that went away.
     pub(super) fn drop_scripts_of(&mut self, path: &Path) {
         self.scripts.mounted.retain(|(worktree, _), mounted| {
@@ -718,7 +777,17 @@ impl ClaudhubApp {
                 self.scripts
                     .script(id)
                     .is_some_and(|script| script.kind == Kind::Tab)
+                    && script_enabled(id, cx)
             })
+    }
+
+    /// The tab scripts the boards show: those found and not turned off.
+    pub(super) fn enabled_scripts(&self, kind: Kind, cx: &App) -> Vec<Script> {
+        self.scripts
+            .of_kind(kind)
+            .filter(|script| script_enabled(&script.id, cx))
+            .cloned()
+            .collect()
     }
 
     /// Puts a script's tab on a board.
@@ -739,7 +808,7 @@ impl ClaudhubApp {
         let id = super::settings::Settings::global(cx).home_script.trim();
         self.scripts
             .script(id)
-            .filter(|script| script.kind == Kind::Home)
+            .filter(|script| script.kind == Kind::Home && script_enabled(id, cx))
             .map(|script| script.id.clone())
     }
 
@@ -825,7 +894,7 @@ impl ClaudhubApp {
         )
     }
 
-    fn script_list(&self) -> HostValue {
+    fn script_list(&self, cx: &App) -> HostValue {
         HostValue::Array(
             self.scripts
                 .found
@@ -839,6 +908,15 @@ impl ClaudhubApp {
                             match script.kind {
                                 Kind::Tab => "tab",
                                 Kind::Home => "home",
+                            },
+                        )
+                        .field("enabled", script_enabled(&script.id, cx))
+                        .field(
+                            "origin",
+                            match script.origin {
+                                scripts::Origin::User => "user",
+                                scripts::Origin::Builtin => "builtin",
+                                scripts::Origin::Fork => "fork",
                             },
                         )
                         .into()
@@ -881,7 +959,6 @@ fn mount(
     app: &Entity<ClaudhubApp>,
     path: &Path,
     script: &Script,
-    hosts: &[String],
     window: &mut Window,
     cx: &mut App,
 ) -> gpui_shell::anyhow::Result<Entity<ScriptView>> {
@@ -901,7 +978,7 @@ fn mount(
     );
     let policy = Policy::new()
         .with_application(&script.id)
-        .with_capabilities(capabilities(hosts))
+        .with_capabilities(capabilities())
         .with_host_module(module)
         .map_err(|error| gpui_shell::anyhow::anyhow!("{}", error.message()))?;
     gpui_shell::policy::set_default(policy);
@@ -912,27 +989,23 @@ fn mount(
     view
 }
 
-/// The hosts the user allowed script `id` to reach.
-pub(super) fn granted_hosts(id: &str, cx: &App) -> Vec<String> {
-    super::settings::Settings::global(cx)
-        .plugin_grants
-        .get(id)
-        .cloned()
-        .unwrap_or_default()
+/// Whether the user has script `id` on — see `Settings::disabled_plugins`.
+pub(super) fn script_enabled(id: &str, cx: &App) -> bool {
+    !super::settings::Settings::global(cx)
+        .disabled_plugins
+        .iter()
+        .any(|off| off == id)
 }
 
-/// What a script may do beyond drawing: HTTPS requests to the hosts the user
-/// allowed — any method, any path, port 443 —, and writing to the
-/// clipboard. No file, no process, no raw socket, no `localStorage`: the
-/// module keeps its data (`storage_*`) and its secrets (`secret`).
-fn capabilities(hosts: &[String]) -> Capabilities {
-    const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+/// What a script may do beyond drawing: HTTP and HTTPS requests, anywhere —
+/// the user asked for plugins trusted with the network as an application
+/// is, a grant per host being a question at every new address —, and
+/// writing to the clipboard. No file, no process, no raw socket, no
+/// `localStorage`: the module keeps its data (`storage_*`) and its secrets
+/// (`secret`).
+fn capabilities() -> Capabilities {
     Capabilities::new()
-        .http_requests(
-            hosts.iter().map(|host| {
-                HttpRequestGrant::new(host.clone(), METHODS, Vec::<String>::new(), ["/"])
-            }),
-        )
+        .any_http_request(true)
         .clipboard_write(true)
 }
 
@@ -966,7 +1039,15 @@ export interface Terminal {
   /** What its agent does: at work, waiting on the user, or nothing. */
   doing: "working" | "waiting" | null;
 }
-export interface ScriptInfo { id: string; title: string; kind: "tab" | "home"; }
+export interface ScriptInfo {
+  id: string;
+  title: string;
+  kind: "tab" | "home";
+  /** Off, no board shows it. */
+  enabled: boolean;
+  /** Shipped with Claudhub, the user's own, or the user's copy of a builtin. */
+  origin: "builtin" | "user" | "fork";
+}
 export type Tab = "home" | "git" | "review" | "pr" | "tests" | "notes" | "todo" | "terminals";
 /** A piece of the board painted by Claudhub: `Card.new("id")`. */
 export interface HostComponent { "new"(id: string, props?: HostValue): NativeElement; }
@@ -1003,14 +1084,6 @@ export function secret(name: string): Promise<string | null>;
 export function set_secret(name: string, value: string): Promise<void>;
 export function delete_secret(name: string): Promise<void>;
 
-/** The hosts the user allowed this script to `fetch` from (HTTPS). */
-export function granted_hosts(): string[];
-/**
- * Asks for a host not in the manifest — a self-hosted instance. True when it
- * is allowed already; otherwise the user is asked in the Plugins screen, and
- * the script is mounted again once it is.
- */
-export function request_network(host: string): boolean;
 /** Opens an http(s) address in the browser. */
 export function open_url(url: string): void;
 /** Puts a text on the clipboard. */
@@ -1059,7 +1132,10 @@ fn module(
             "terminals",
             read(&app, path, |this, path, cx| this.script_terminals(path, cx)),
         )
-        .function("scripts", read(&app, path, |this, _, _| this.script_list()))
+        .function(
+            "scripts",
+            read(&app, path, |this, _, cx| this.script_list(cx)),
+        )
         .function("language", |_| Ok(HostValue::from(&*rust_i18n::locale())))
         .function("storage_get", {
             let (app, id) = (app.clone(), id.clone());
@@ -1154,32 +1230,6 @@ fn module(
                         Ok(()) | Err(keyring::Error::NoEntry) => Ok(HostValue::Null),
                         Err(error) => Err(HostError::new(error.to_string())),
                     }
-                })
-            }
-        })
-        .function("granted_hosts", {
-            let id = id.clone();
-            move |_| {
-                gpui_shell::with_current_app(|cx| {
-                    HostValue::Array(
-                        granted_hosts(&id, cx)
-                            .into_iter()
-                            .map(HostValue::from)
-                            .collect(),
-                    )
-                })
-                .ok_or_else(unreachable)
-            }
-        })
-        .function("request_network", {
-            let (app, id) = (app.clone(), id.clone());
-            move |arguments| {
-                let text = arguments.string(0)?;
-                let host = scripts::host_of(text).ok_or_else(|| {
-                    HostError::new(format!("`{text}` is not a host — write `api.example.com`"))
-                })?;
-                change(&app, |this, cx| {
-                    Ok(HostValue::from(this.network_requested(&id, host, cx)))
                 })
             }
         })
@@ -1526,8 +1576,8 @@ mod tests {
         assert_eq!(registered, declared);
     }
 
-    /// The scripts shipped as examples, and the skeletons of a new one, are
-    /// found, link against the module's declared exports and evaluate — a renamed export or a typo in an
+    /// The scripts shipped as examples and as builtins, and the skeletons of
+    /// a new one, are found, link against the module's declared exports and evaluate — a renamed export or a typo in an
     /// import fails here rather than on someone's first board.
     #[test]
     fn the_shipped_scripts_load_against_the_module() {
@@ -1536,7 +1586,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             scripts::seed(&root, EXAMPLES).unwrap(),
-            ["home-columns", "dashboard", "sentry"]
+            ["home-columns", "dashboard"]
         );
         // Removed, an example does not come back.
         std::fs::remove_dir_all(root.join("dashboard")).unwrap();
@@ -1554,17 +1604,17 @@ mod tests {
         let older: Vec<(&str, &str)> = EXAMPLES
             .iter()
             .map(|(path, content)| match *path {
-                "sentry/main.js" => (*path, "// an older version\n"),
+                "dashboard/main.js" => (*path, "// an older version\n"),
                 _ => (*path, *content),
             })
             .collect();
         let elsewhere = root.with_extension("older");
         let _ = std::fs::remove_dir_all(&elsewhere);
         scripts::seed(&elsewhere, &older).unwrap();
-        assert_eq!(scripts::seed(&elsewhere, EXAMPLES).unwrap(), ["sentry"]);
+        assert_eq!(scripts::seed(&elsewhere, EXAMPLES).unwrap(), ["dashboard"]);
         assert_eq!(
-            std::fs::read_to_string(elsewhere.join("sentry/main.js")).unwrap(),
-            include_str!("../../assets/scripts/sentry/main.js")
+            std::fs::read_to_string(elsewhere.join("dashboard/main.js")).unwrap(),
+            include_str!("../../assets/scripts/dashboard/main.js")
         );
         // …and never what the user changed.
         scripts::seed(&elsewhere, &older).unwrap();
@@ -1595,7 +1645,64 @@ mod tests {
             assert_eq!(scripts::free_id(&root, base), format!("{base}-2"));
         }
 
-        let found = scripts::discover(&root, "fr");
+        // The builtins: written once, not again while they are this build's.
+        let builtins = root.with_extension("builtin");
+        let _ = std::fs::remove_dir_all(&builtins);
+        assert!(scripts::install_builtins(&builtins, BUILTINS).unwrap());
+        assert!(!scripts::install_builtins(&builtins, BUILTINS).unwrap());
+        // Sentry as the example it was: seeded, untouched, it gives way…
+        let sentry: Vec<(&str, &str)> = BUILTINS
+            .iter()
+            .copied()
+            .filter(|(path, _)| path.starts_with("sentry/"))
+            .collect();
+        let legacy = root.with_extension("legacy");
+        let _ = std::fs::remove_dir_all(&legacy);
+        scripts::seed(&legacy, &sentry).unwrap();
+        std::fs::write(legacy.join("sentry/gpui-kit.d.ts"), "// generated").unwrap();
+        assert!(scripts::retire(&legacy, "sentry", BUILTINS, &[]).unwrap());
+        assert!(!legacy.join("sentry").exists());
+        assert!(!std::fs::read_to_string(legacy.join(".examples"))
+            .unwrap()
+            .contains("sentry"));
+        // …but changed, it is a fork, and stays.
+        scripts::seed(&legacy, &sentry).unwrap();
+        std::fs::write(legacy.join("sentry/main.js"), "// mine\n").unwrap();
+        assert!(!scripts::retire(&legacy, "sentry", BUILTINS, &[]).unwrap());
+        // A fork is written once, and set aside rather than deleted.
+        assert!(scripts::fork(&legacy, "sentry", BUILTINS).is_err());
+        let aside = scripts::set_aside(&legacy, "sentry", 7).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(aside.join("main.js")).unwrap(),
+            "// mine\n"
+        );
+        let forked = scripts::fork(&legacy, "http-client", BUILTINS).unwrap();
+        assert!(forked.join(scripts::MANIFEST).is_file());
+        assert!(!scripts::retire(&legacy, "http-client", &[], &[]).unwrap());
+        let merged = scripts::merge(
+            scripts::discover(&builtins, "fr"),
+            scripts::discover(&legacy, "fr"),
+        );
+        let origins: Vec<(&str, scripts::Origin)> = merged
+            .scripts
+            .iter()
+            .map(|(script, _)| (script.id.as_str(), script.origin))
+            .collect();
+        assert_eq!(
+            origins,
+            [
+                ("http-client", scripts::Origin::Fork),
+                ("sentry", scripts::Origin::Builtin),
+            ]
+        );
+        // A copy identical to the builtin's is no fork either.
+        assert!(scripts::retire(&legacy, "http-client", BUILTINS, &[]).unwrap());
+        let _ = std::fs::remove_dir_all(&legacy);
+
+        let found = scripts::merge(
+            scripts::discover(&builtins, "fr"),
+            scripts::discover(&root, "fr"),
+        );
         assert_eq!(found.broken, Vec::<(String, String)>::new());
         let kinds: Vec<(&str, Kind)> = found
             .scripts
@@ -1607,6 +1714,7 @@ mod tests {
             [
                 ("dashboard", Kind::Tab),
                 ("home-columns", Kind::Home),
+                ("http-client", Kind::Tab),
                 ("new-home", Kind::Home),
                 ("new-tab", Kind::Tab),
                 ("sentry", Kind::Tab),
@@ -1627,5 +1735,6 @@ mod tests {
             let _ = std::fs::rename(&root, &keep);
         }
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&builtins);
     }
 }

@@ -266,8 +266,8 @@ impl ClaudhubApp {
     ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let tabs: Vec<(String, String, String)> = self
-            .scripts
-            .of_kind(crate::scripts::Kind::Tab)
+            .enabled_scripts(crate::scripts::Kind::Tab, cx)
+            .into_iter()
             .map(|script| {
                 // A name the shipped icons do not have would draw nothing.
                 let glyph = script

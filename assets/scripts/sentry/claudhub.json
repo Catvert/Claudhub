@@ -7,7 +7,6 @@
     "en": "The project's Sentry errors: the list, each one's latest event with its trace, and handing it to the agent. Written end to end as a plugin."
   },
   "permissions": {
-    "network": ["sentry.io"],
     "secrets": [
       { "name": "token", "label": { "fr": "Jeton d'API Sentry", "en": "Sentry API token" } }
     ]
