@@ -42,8 +42,8 @@ use gpui_kit::{
 };
 use gpui_shell::policy::Policy;
 use gpui_shell::{
-    ComponentArgs, HostArguments, HostError, HostModule, HostObject, HostResult, HostValue,
-    ScriptView, ShellRuntime,
+    Capabilities, ComponentArgs, HostArguments, HostError, HostModule, HostObject, HostResult,
+    HostValue, HttpRequestGrant, ScriptView, ShellRuntime,
 };
 
 use crate::scripts::{self, Kind, Script, Stamp};
@@ -79,6 +79,18 @@ pub(super) const EXAMPLES: &[(&str, &str)] = &[
         "dashboard/main.js",
         include_str!("../../assets/scripts/dashboard/main.js"),
     ),
+    (
+        "sentry/claudhub.json",
+        include_str!("../../assets/scripts/sentry/claudhub.json"),
+    ),
+    (
+        "sentry/main.js",
+        include_str!("../../assets/scripts/sentry/main.js"),
+    ),
+    (
+        "sentry/sentry.js",
+        include_str!("../../assets/scripts/sentry/sentry.js"),
+    ),
 ];
 
 /// A board's view of one script: `(worktree, script id)`.
@@ -106,7 +118,26 @@ pub(crate) struct Scripts {
     /// The last text written to the status file: written again only when it
     /// says something else.
     status: String,
+    /// Each script's data — `storage_*` —, by its id: one map whatever the
+    /// boards it is drawn on, read from disk at its first use.
+    stores: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// Where the stores' writes queue, one after the other — two written
+    /// side by side could land in the wrong order.
+    writer: Option<async_channel::Sender<(PathBuf, String)>>,
+    /// The hosts each script asked for while running (`request_network`),
+    /// beyond its manifest's.
+    pub(super) requested: HashMap<String, Vec<String>>,
 }
+
+/// Where scripts' data lives: beside their folder, not in it — an update of
+/// a script, or the agent editing it, never reaches its data.
+fn data_root() -> Option<PathBuf> {
+    super::settings::config_dir().map(|dir| dir.join("scripts-data"))
+}
+
+/// The keyring service scripts' secrets are filed under, each as
+/// `<script>/<name>`.
+const SECRETS: &str = "claudhub-plugins";
 
 /// The Plugins screen: whether it is the one shown, and what it has chosen.
 #[derive(Default)]
@@ -123,6 +154,9 @@ pub(crate) struct Screen {
 struct Mounted {
     view: Entity<ScriptView>,
     stamp: Stamp,
+    /// The hosts it was mounted allowed to reach: a grant is frozen into
+    /// the view's policy, so a changed one mounts it again.
+    hosts: Vec<String>,
 }
 
 impl Scripts {
@@ -162,25 +196,30 @@ impl ClaudhubApp {
         let Some(root) = root() else {
             return;
         };
-        cx.spawn(async move |this, cx| loop {
+        cx.spawn(async move |this, cx| {
             let folder = root.clone();
-            let language = rust_i18n::locale().to_string();
-            let found = cx
-                .background_executor()
+            cx.background_executor()
                 .spawn(async move {
                     if let Err(error) = scripts::seed(&folder, EXAMPLES) {
                         log::warn!("writing the example scripts: {error}");
                     }
-                    scripts::discover(&folder, &language)
                 })
                 .await;
-            if this
-                .update(cx, |app, cx| app.scripts_found(found, cx))
-                .is_err()
-            {
-                break;
+            loop {
+                let folder = root.clone();
+                let language = rust_i18n::locale().to_string();
+                let found = cx
+                    .background_executor()
+                    .spawn(async move { scripts::discover(&folder, &language) })
+                    .await;
+                if this
+                    .update(cx, |app, cx| app.scripts_found(found, cx))
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(POLL).await;
             }
-            cx.background_executor().timer(POLL).await;
         })
         .detach();
     }
@@ -234,11 +273,17 @@ impl ClaudhubApp {
         let Some(root) = root() else {
             return;
         };
-        let fared: Vec<(&Script, scripts::Fared)> = self
+        let fared: Vec<(&Script, scripts::Fared, Vec<String>)> = self
             .scripts
             .found
             .iter()
-            .map(|(script, stamp)| (script, self.fared(script, *stamp)))
+            .map(|(script, stamp)| {
+                (
+                    script,
+                    self.fared(script, *stamp),
+                    self.pending_hosts(&script.id, cx),
+                )
+            })
             .collect();
         let preview = self
             .scripts
@@ -329,23 +374,28 @@ impl ClaudhubApp {
             return script_notice(tr!("scripts-missing", { id: id }), cx);
         };
         let key: Key = (path.to_path_buf(), id.to_string());
+        let hosts = granted_hosts(id, cx);
         let current = self
             .scripts
             .mounted
             .get(&key)
-            .map(|mounted| (mounted.view.clone(), mounted.stamp));
+            .map(|mounted| (mounted.view.clone(), (mounted.stamp, mounted.hosts.clone())));
         let failed = self
             .scripts
             .failed
             .get(&key)
             .filter(|(at, _)| *at == stamp)
             .map(|(_, why)| why.clone());
-        let fresh = current.as_ref().is_some_and(|(_, at)| *at == stamp);
+        let fresh = current
+            .as_ref()
+            .is_some_and(|(_, (at, with))| *at == stamp && *with == hosts);
         if !fresh && failed.is_none() && self.scripts.mounting.insert(key.clone()) {
             let app = cx.entity();
             window.defer(cx, move |window, cx| {
-                let result = mount(&app, &key.0, &script, window, cx);
-                app.update(cx, |this, cx| this.mounted(key, &script, stamp, result, cx));
+                let result = mount(&app, &key.0, &script, &hosts, window, cx);
+                app.update(cx, |this, cx| {
+                    this.mounted(key, &script, stamp, hosts, result, cx)
+                });
             });
         }
         match (current, failed) {
@@ -360,6 +410,7 @@ impl ClaudhubApp {
         key: Key,
         script: &Script,
         stamp: Stamp,
+        hosts: Vec<String>,
         result: gpui_shell::anyhow::Result<Entity<ScriptView>>,
         cx: &mut Context<Self>,
     ) {
@@ -367,7 +418,9 @@ impl ClaudhubApp {
         match result {
             Ok(view) => {
                 self.scripts.failed.remove(&key);
-                self.scripts.mounted.insert(key, Mounted { view, stamp });
+                self.scripts
+                    .mounted
+                    .insert(key, Mounted { view, stamp, hosts });
             }
             Err(error) => {
                 let why = format!("{error:#}");
@@ -405,6 +458,138 @@ impl ClaudhubApp {
             .get(&(path.to_path_buf(), id.to_string()))
             .filter(|(at, _)| at == stamp)
             .map(|(_, why)| why.as_str())
+    }
+
+    /// Script `id`'s data, read from disk the first time.
+    pub(super) fn store_of(&mut self, id: &str) -> &mut serde_json::Map<String, serde_json::Value> {
+        self.scripts
+            .stores
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                data_root()
+                    .and_then(|root| std::fs::read_to_string(root.join(format!("{id}.json"))).ok())
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .and_then(|value| match value {
+                        serde_json::Value::Object(map) => Some(map),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            })
+    }
+
+    /// Changes script `id`'s data, and queues it to be written.
+    fn store_update(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store_of(id);
+        change(store);
+        let text = serde_json::to_string_pretty(&*store).unwrap_or_default();
+        let Some(root) = data_root() else {
+            return;
+        };
+        let writer = self.scripts.writer.get_or_insert_with(|| {
+            let (sender, receiver) = async_channel::unbounded::<(PathBuf, String)>();
+            cx.background_executor()
+                .spawn(async move {
+                    while let Ok((path, text)) = receiver.recv().await {
+                        let written = path
+                            .parent()
+                            .map_or(Ok(()), std::fs::create_dir_all)
+                            .and_then(|()| std::fs::write(&path, text));
+                        if let Err(error) = written {
+                            log::warn!("writing {}: {error}", path.display());
+                        }
+                    }
+                })
+                .detach();
+            sender
+        });
+        let _ = writer.try_send((root.join(format!("{id}.json")), text));
+    }
+
+    /// Forgets script `id`'s data, on disk too.
+    pub(super) fn clear_store(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.store_update(id, |store| store.clear(), cx);
+    }
+
+    /// Where script `id`'s data is written.
+    pub(super) fn store_path(id: &str) -> Option<PathBuf> {
+        data_root().map(|root| root.join(format!("{id}.json")))
+    }
+
+    /// Every host script `id` wants: its manifest's, then those it asked for
+    /// while running.
+    pub(super) fn wanted_hosts(&self, id: &str) -> Vec<String> {
+        let mut wanted: Vec<String> = self
+            .scripts
+            .script(id)
+            .map(|script| script.permissions.network.clone())
+            .unwrap_or_default();
+        for host in self.scripts.requested.get(id).into_iter().flatten() {
+            if !wanted.contains(host) {
+                wanted.push(host.clone());
+            }
+        }
+        wanted
+    }
+
+    /// The hosts script `id` wants and the user has not allowed.
+    pub(super) fn pending_hosts(&self, id: &str, cx: &App) -> Vec<String> {
+        scripts::pending_hosts(&self.wanted_hosts(id), &granted_hosts(id, cx))
+    }
+
+    /// A script asks for a host while running: kept, said once, and left to
+    /// the user to allow in the Plugins screen.
+    fn network_requested(&mut self, id: &str, host: String, cx: &mut Context<Self>) -> bool {
+        if granted_hosts(id, cx).contains(&host) {
+            return true;
+        }
+        if !self.wanted_hosts(id).contains(&host) {
+            self.scripts
+                .requested
+                .entry(id.to_string())
+                .or_default()
+                .push(host.clone());
+            let title = self
+                .scripts
+                .script(id)
+                .map_or_else(|| id.to_string(), |script| script.title.clone());
+            self.announce(
+                tr!("plugins-network-asked", { title: title, host: host }),
+                cx,
+            );
+            self.write_scripts_status(cx);
+            cx.notify();
+        }
+        false
+    }
+
+    /// Allows or withdraws a host for script `id`; its views mount again
+    /// with the new grant.
+    pub(super) fn grant_host(
+        &mut self,
+        id: &str,
+        host: &str,
+        allowed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, host) = (id.to_string(), host.to_string());
+        super::settings::Settings::update_global(cx, |settings| {
+            let hosts = settings.plugin_grants.entry(id.clone()).or_default();
+            hosts.retain(|known| *known != host);
+            if allowed {
+                hosts.push(host.clone());
+                hosts.sort();
+            }
+            if hosts.is_empty() {
+                settings.plugin_grants.remove(&id);
+            }
+        });
+        self.write_scripts_status(cx);
+        cx.notify();
     }
 
     /// Forgets the views of a worktree that went away.
@@ -470,6 +655,12 @@ impl ClaudhubApp {
             .field("name", name.to_string())
             .field("branch", branch.map_or(HostValue::Null, HostValue::from))
             .field("main", self.main_of(path).as_deref() == Some(path))
+            .field(
+                "repository",
+                self.main_of(path).map_or(HostValue::Null, |main| {
+                    main.to_string_lossy().into_owned().into()
+                }),
+            )
             .field("active", self.active.as_deref() == Some(path))
             .field("ahead", ahead as f64)
             .field("behind", behind as f64)
@@ -584,6 +775,7 @@ fn mount(
     app: &Entity<ClaudhubApp>,
     path: &Path,
     script: &Script,
+    hosts: &[String],
     window: &mut Window,
     cx: &mut App,
 ) -> gpui_shell::anyhow::Result<Entity<ScriptView>> {
@@ -595,9 +787,15 @@ fn mount(
             runtime
         }
     };
-    let module = module(app.downgrade(), path, Some(window.window_handle()));
+    let module = module(
+        app.downgrade(),
+        path,
+        &script.id,
+        Some(window.window_handle()),
+    );
     let policy = Policy::new()
         .with_application(&script.id)
+        .with_capabilities(capabilities(hosts))
         .with_host_module(module)
         .map_err(|error| gpui_shell::anyhow::anyhow!("{}", error.message()))?;
     gpui_shell::policy::set_default(policy);
@@ -606,6 +804,30 @@ fn mount(
         .and_then(|loaded| runtime.mount_application(&loaded, window, cx));
     gpui_shell::policy::set_default(Policy::new());
     view
+}
+
+/// The hosts the user allowed script `id` to reach.
+pub(super) fn granted_hosts(id: &str, cx: &App) -> Vec<String> {
+    super::settings::Settings::global(cx)
+        .plugin_grants
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// What a script may do beyond drawing: HTTPS requests to the hosts the user
+/// allowed — any method, any path, port 443 —, and writing to the
+/// clipboard. No file, no process, no raw socket, no `localStorage`: the
+/// module keeps its data (`storage_*`) and its secrets (`secret`).
+fn capabilities(hosts: &[String]) -> Capabilities {
+    const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    Capabilities::new()
+        .http_requests(
+            hosts.iter().map(|host| {
+                HttpRequestGrant::new(host.clone(), METHODS, Vec::<String>::new(), ["/"])
+            }),
+        )
+        .clipboard_write(true)
 }
 
 /// The TypeScript face of the `claudhub` module, checked against what is
@@ -620,6 +842,8 @@ export interface Worktree {
   branch: string | null;
   /** The repository's main checkout. */
   main: boolean;
+  /** The path of the repository's main checkout: one key for every worktree of it. */
+  repository: string | null;
   /** The one the editor shows. */
   active: boolean;
   ahead: number;
@@ -662,6 +886,30 @@ export function send_to_agent(text: string): void;
 /** Says something in a bubble. */
 export function notify(text: string): void;
 
+/** This script's data, kept across restarts and shared by its views on every board. Any JSON. */
+export function storage_get(key: string): HostValue;
+export function storage_set(key: string, value: HostValue): void;
+export function storage_remove(key: string): void;
+export function storage_keys(): string[];
+
+/** A secret of this script, from the system keyring; null when none was set. */
+export function secret(name: string): Promise<string | null>;
+export function set_secret(name: string, value: string): Promise<void>;
+export function delete_secret(name: string): Promise<void>;
+
+/** The hosts the user allowed this script to `fetch` from (HTTPS). */
+export function granted_hosts(): string[];
+/**
+ * Asks for a host not in the manifest — a self-hosted instance. True when it
+ * is allowed already; otherwise the user is asked in the Plugins screen, and
+ * the script is mounted again once it is.
+ */
+export function request_network(host: string): boolean;
+/** Opens an http(s) address in the browser. */
+export function open_url(url: string): void;
+/** Puts a text on the clipboard. */
+export function copy_text(text: string): void;
+
 export const BranchCard: HostComponent;
 export const PullRequestCard: HostComponent;
 export const ChangesCard: HostComponent;
@@ -683,8 +931,10 @@ export const TerminalsTab: HostComponent;
 fn module(
     app: WeakEntity<ClaudhubApp>,
     path: &Path,
+    id: &str,
     window: Option<AnyWindowHandle>,
 ) -> HostModule {
+    let id = id.to_string();
     HostModule::new("claudhub")
         .declarations(DECLARATIONS)
         .function(
@@ -705,6 +955,144 @@ fn module(
         )
         .function("scripts", read(&app, path, |this, _, _| this.script_list()))
         .function("language", |_| Ok(HostValue::from(&*rust_i18n::locale())))
+        .function("storage_get", {
+            let (app, id) = (app.clone(), id.clone());
+            move |arguments| {
+                let key = arguments.string(0)?.to_string();
+                change(&app, |this, _| {
+                    Ok(this
+                        .store_of(&id)
+                        .get(&key)
+                        .map_or(HostValue::Null, from_json))
+                })
+            }
+        })
+        .function("storage_keys", {
+            let (app, id) = (app.clone(), id.clone());
+            move |_| {
+                change(&app, |this, _| {
+                    Ok(HostValue::Array(
+                        this.store_of(&id)
+                            .keys()
+                            .map(|key| HostValue::from(key.as_str()))
+                            .collect(),
+                    ))
+                })
+            }
+        })
+        .function("storage_set", {
+            let (app, id) = (app.clone(), id.clone());
+            move |arguments| {
+                let key = arguments.string(0)?.to_string();
+                let value = to_json(arguments.value(1)?);
+                change(&app, |this, cx| {
+                    this.store_update(
+                        &id,
+                        |store| {
+                            store.insert(key, value);
+                        },
+                        cx,
+                    );
+                    Ok(HostValue::Null)
+                })
+            }
+        })
+        .function("storage_remove", {
+            let (app, id) = (app.clone(), id.clone());
+            move |arguments| {
+                let key = arguments.string(0)?.to_string();
+                change(&app, |this, cx| {
+                    this.store_update(
+                        &id,
+                        |store| {
+                            store.remove(&key);
+                        },
+                        cx,
+                    );
+                    Ok(HostValue::Null)
+                })
+            }
+        })
+        .async_function("secret", {
+            let id = id.clone();
+            move |arguments| {
+                let entry = secret_entry(&id, arguments.string(0)?)?;
+                Ok(async move {
+                    match entry.get_password() {
+                        Ok(secret) => Ok(HostValue::from(secret)),
+                        Err(keyring::Error::NoEntry) => Ok(HostValue::Null),
+                        Err(error) => Err(HostError::new(error.to_string())),
+                    }
+                })
+            }
+        })
+        .async_function("set_secret", {
+            let id = id.clone();
+            move |arguments| {
+                let entry = secret_entry(&id, arguments.string(0)?)?;
+                let secret = arguments.string(1)?.to_string();
+                Ok(async move {
+                    entry
+                        .set_password(&secret)
+                        .map(|()| HostValue::Null)
+                        .map_err(|error| HostError::new(error.to_string()))
+                })
+            }
+        })
+        .async_function("delete_secret", {
+            let id = id.clone();
+            move |arguments| {
+                let entry = secret_entry(&id, arguments.string(0)?)?;
+                Ok(async move {
+                    match entry.delete_credential() {
+                        Ok(()) | Err(keyring::Error::NoEntry) => Ok(HostValue::Null),
+                        Err(error) => Err(HostError::new(error.to_string())),
+                    }
+                })
+            }
+        })
+        .function("granted_hosts", {
+            let id = id.clone();
+            move |_| {
+                gpui_shell::with_current_app(|cx| {
+                    HostValue::Array(
+                        granted_hosts(&id, cx)
+                            .into_iter()
+                            .map(HostValue::from)
+                            .collect(),
+                    )
+                })
+                .ok_or_else(unreachable)
+            }
+        })
+        .function("request_network", {
+            let (app, id) = (app.clone(), id.clone());
+            move |arguments| {
+                let text = arguments.string(0)?;
+                let host = scripts::host_of(text).ok_or_else(|| {
+                    HostError::new(format!("`{text}` is not a host — write `api.example.com`"))
+                })?;
+                change(&app, |this, cx| {
+                    Ok(HostValue::from(this.network_requested(&id, host, cx)))
+                })
+            }
+        })
+        .function("open_url", |arguments| {
+            let url = arguments.string(0)?.to_string();
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(HostError::new("only http and https addresses open"));
+            }
+            gpui_shell::with_current_app(|cx| cx.open_url(&url)).ok_or_else(unreachable)?;
+            Ok(HostValue::Null)
+        })
+        .function("copy_text", |arguments| {
+            let text = arguments.string(0)?.to_string();
+            gpui_shell::with_current_app(|cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text))
+            })
+            .ok_or_else(unreachable)?;
+            Ok(HostValue::Null)
+        })
         .function("open_tab", {
             let (app, path) = (app.clone(), path.to_path_buf());
             move |arguments| {
@@ -837,6 +1225,80 @@ fn module(
         )
 }
 
+/// What a module function answers outside a call, which cannot happen
+/// from a script.
+fn unreachable() -> HostError {
+    HostError::new("Claudhub is not reachable outside a call")
+}
+
+/// A function of the module that changes the application — or reads what
+/// it loads on demand.
+fn change(
+    app: &WeakEntity<ClaudhubApp>,
+    act: impl FnOnce(&mut ClaudhubApp, &mut Context<ClaudhubApp>) -> HostResult,
+) -> HostResult {
+    gpui_shell::with_current_app(|cx| app.update(cx, act).ok())
+        .flatten()
+        .ok_or_else(unreachable)?
+}
+
+/// The keyring entry of a script's secret `name`.
+fn secret_entry(id: &str, name: &str) -> Result<keyring::Entry, HostError> {
+    if !scripts::valid_id(name) {
+        return Err(HostError::new(format!(
+            "`{name}` is not a secret's name: letters, digits, `-`, `_` and `.`"
+        )));
+    }
+    keyring::Entry::new(SECRETS, &format!("{id}/{name}"))
+        .map_err(|error| HostError::new(error.to_string()))
+}
+
+/// Forgets script `id`'s secret `name` — the Plugins screen's gesture.
+pub(super) fn forget_secret(id: &str, name: &str) {
+    if let Ok(entry) = secret_entry(id, name) {
+        if let Err(error) = entry.delete_credential() {
+            if !matches!(error, keyring::Error::NoEntry) {
+                log::warn!("forgetting a script's secret: {error}");
+            }
+        }
+    }
+}
+
+/// A value a script hands over, as JSON.
+fn to_json(value: &HostValue) -> serde_json::Value {
+    match value {
+        HostValue::Null => serde_json::Value::Null,
+        HostValue::Bool(flag) => serde_json::Value::Bool(*flag),
+        HostValue::Number(number) => serde_json::Number::from_f64(*number)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        HostValue::Str(text) => serde_json::Value::String(text.clone()),
+        HostValue::Array(items) => serde_json::Value::Array(items.iter().map(to_json).collect()),
+        HostValue::Object(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), to_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// JSON, as a value for a script.
+fn from_json(value: &serde_json::Value) -> HostValue {
+    match value {
+        serde_json::Value::Null => HostValue::Null,
+        serde_json::Value::Bool(flag) => HostValue::Bool(*flag),
+        serde_json::Value::Number(number) => HostValue::Number(number.as_f64().unwrap_or(0.)),
+        serde_json::Value::String(text) => HostValue::Str(text.clone()),
+        serde_json::Value::Array(items) => HostValue::Array(items.iter().map(from_json).collect()),
+        serde_json::Value::Object(fields) => HostValue::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), from_json(value)))
+                .collect(),
+        ),
+    }
+}
+
 /// A tab by the name a script gives it.
 fn tab_named(name: &str) -> Result<View, HostError> {
     Ok(match name {
@@ -939,7 +1401,7 @@ mod tests {
     /// module whose two halves differ, and it would refuse it at every mount.
     #[test]
     fn the_module_registers_what_it_declares() {
-        let module = module(WeakEntity::new_invalid(), Path::new("/w"), None);
+        let module = module(WeakEntity::new_invalid(), Path::new("/w"), "test", None);
         if let Err(error) = module.validate() {
             panic!("{}", error.message());
         }
@@ -957,10 +1419,18 @@ mod tests {
     #[test]
     fn the_shipped_scripts_load_against_the_module() {
         let root = std::env::temp_dir().join(format!("claudhub-scripts-{}", std::process::id()));
+        let keep = std::env::temp_dir().join("claudhub-scripts-kept");
         let _ = std::fs::remove_dir_all(&root);
-        assert!(scripts::seed(&root, EXAMPLES).unwrap());
-        // Seeded once: a folder that exists is the user's.
-        assert!(!scripts::seed(&root, EXAMPLES).unwrap());
+        assert_eq!(
+            scripts::seed(&root, EXAMPLES).unwrap(),
+            ["home-columns", "dashboard", "sentry"]
+        );
+        // Offered once: removed, an example does not come back.
+        std::fs::remove_dir_all(root.join("dashboard")).unwrap();
+        assert!(scripts::seed(&root, EXAMPLES).unwrap().is_empty());
+        assert!(!root.join("dashboard").exists());
+        std::fs::remove_file(root.join(".examples")).unwrap();
+        assert_eq!(scripts::seed(&root, EXAMPLES).unwrap(), ["dashboard"]);
         // And what « New script » writes, of either kind.
         for (kind, base) in [(Kind::Tab, "new-tab"), (Kind::Home, "new-home")] {
             let id = scripts::free_id(&root, base);
@@ -986,6 +1456,7 @@ mod tests {
                 ("home-columns", Kind::Home),
                 ("new-home", Kind::Home),
                 ("new-tab", Kind::Tab),
+                ("sentry", Kind::Tab),
             ]
         );
 
@@ -997,6 +1468,11 @@ mod tests {
             }
         }
         gpui_shell::policy::set_default(Policy::new());
+        // Kept on demand, to read the `gpui-kit.d.ts` the runtime wrote.
+        if std::env::var_os("CLAUDHUB_KEEP_SCRIPTS").is_some() {
+            let _ = std::fs::remove_dir_all(&keep);
+            let _ = std::fs::rename(&root, &keep);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

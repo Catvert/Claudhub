@@ -1,0 +1,15 @@
+{
+  "title": "Sentry",
+  "kind": "tab",
+  "icon": "triangle-alert",
+  "description": {
+    "fr": "Les erreurs Sentry du projet : la liste, la dernière occurrence de chacune avec sa trace, et l'envoi à l'agent. Écrit de bout en bout en plugin.",
+    "en": "The project's Sentry errors: the list, each one's latest event with its trace, and handing it to the agent. Written end to end as a plugin."
+  },
+  "permissions": {
+    "network": ["sentry.io"],
+    "secrets": [
+      { "name": "token", "label": { "fr": "Jeton d'API Sentry", "en": "Sentry API token" } }
+    ]
+  }
+}

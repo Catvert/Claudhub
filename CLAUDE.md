@@ -540,10 +540,20 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
 - **Pas de `ShellRoot`** : la racine de la fenêtre est celle de Kit, et les
   deux veulent l'être. Dialogues, toasts et tooltips d'un script ne
   s'affichent pas ; `notify()` passe par nos bulles.
-- **Aucune capacité** : ni fichiers, ni processus, ni réseau. Le dossier est
-  relu hors du thread toutes les demi-secondes ; une sauvegarde cassée laisse
-  la vue qui marchait, et l'erreur part en bulle. Les exemples
-  (`assets/scripts/`) ne sont écrits qu'à la création du dossier.
+- **Ce qu'un script peut au-delà de dessiner** : le **réseau** HTTPS vers
+  les hôtes que l'utilisateur a autorisés (`plugin_grants` des réglages ;
+  le manifeste ou `request_network` ne font que demander), et rien d'autre
+  — ni fichiers, ni processus, ni `localStorage`. Une autorisation est
+  figée dans la politique d'une vue : la changer la remonte. Son **stockage**
+  est dans le module (`storage_*`, `<config>/scripts-data/<id>.json`) et
+  non celui du Shell, qui lie un fichier à une `Policy` — deux tableaux, deux
+  caches, un fichier. Ses **secrets** sont dans le trousseau
+  (`claudhub-plugins`, `<id>/<nom>`).
+- Le dossier est relu hors du thread toutes les demi-secondes ; une
+  sauvegarde cassée laisse la vue qui marchait, et l'erreur part en bulle.
+  Chaque exemple (`assets/scripts/`) n'est écrit **qu'une fois**
+  (`.examples`) : supprimé, il ne revient pas. `sentry` est le portillon
+  d'acceptation : un panneau entier, réglages, jeton et requêtes compris.
 - **L'écran Plugins** (`ui::plugins_view`), ouvert du pied de la barre
   latérale à la place des tableaux : la liste, l'aperçu du script choisi sur
   un worktree qu'on choisit, et un agent lancé **dans le dossier des

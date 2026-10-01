@@ -1246,5 +1246,16 @@
   "plugins-agent": "Agent des plugins",
   "plugins-agent-help": "Un agent lancé dans le dossier des scripts, qui sait comment ils s’écrivent : demandez-lui un onglet, une carte, tout un accueil. Chaque sauvegarde recharge l’aperçu.",
   "plugins-agent-start": "Lancer l’agent",
-  "plugins-agent-none": "Aucun profil d’agent n’est configuré dans les réglages du terminal."
+  "plugins-agent-none": "Aucun profil d’agent n’est configuré dans les réglages du terminal.",
+  "plugins-network-asked": "Le plugin « %{title} » demande à joindre %{host} : autorisez-le dans Plugins.",
+  "plugins-waiting": "attend votre accord",
+  "plugins-network": "Réseau",
+  "plugins-allow": "Autoriser",
+  "plugins-revoke": "Retirer",
+  "plugins-allow-all": "Tout autoriser",
+  "plugins-secrets": "Secrets",
+  "plugins-forget-secrets": "Oublier",
+  "plugins-secrets-forgotten": "Les secrets du plugin ont été retirés du trousseau.",
+  "plugins-data": "Données",
+  "plugins-clear-data": "Effacer"
 }

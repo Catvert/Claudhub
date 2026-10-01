@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 4 -->
+<!-- claudhub-skill-version: 5 -->
 
 # Claudhub
 
@@ -144,10 +144,13 @@ One folder per script in `$CLAUDHUB_SCRIPTS/<id>/`; `<id>` is lower-case
 letters, digits, `-`, `_`, `.`. It holds:
 
 - `claudhub.json` — `{"title": "…", "kind": "tab" | "home", "icon": "…",
-  "entry": "main.js", "description": "…"}`. Only the file is required; the
-  title defaults to the id, the kind to `tab`, the entry to `main.js`. A
-  title or description can be `{"fr": "…", "en": "…"}`. `icon` is a Lucide
-  name.
+  "entry": "main.js", "description": "…", "permissions": {…}}`. Only the
+  file is required; the title defaults to the id, the kind to `tab`, the
+  entry to `main.js`. A title or description can be `{"fr": "…", "en": "…"}`.
+  `icon` is a Lucide name. `permissions` asks for what is below; asking
+  grants nothing — the user allows each host in the Plugins screen:
+  `{"network": ["api.example.com"], "secrets": [{"name": "token", "label":
+  "API token"}]}`. Hosts are bare names (HTTPS, port 443).
 - the entry, an ES module whose default export is a class extending `View`.
 
 Saving any file reloads the script on every board within a second. If it
@@ -199,9 +202,25 @@ export default class Example extends View {
   tab at most once per script.
 - There are **no dialogs, toasts or tooltips** in a script: say things with
   `notify(text)` or in the view itself.
-- A script has **no file, process or network access**: what it knows of
-  the worktree comes from the module. Never run git or shell commands from
-  it; ask the user, or use `send_to_agent`.
+- **Network**: the standard `fetch(url, {method, headers, body})` reaches
+  the hosts the user allowed — `granted_hosts()` lists them. Call it inside
+  `cx.spawn(async (cx) => { …; cx.notify(); })`. A host only known at run
+  time (a self-hosted instance) is asked for with `request_network(host)`:
+  the user is asked, and the script is mounted again once allowed.
+- **Storage**: `storage_get(key)`, `storage_set(key, json)`,
+  `storage_remove(key)`, `storage_keys()` — this script's data, kept across
+  restarts, shared by its views on every board. Key per-repository data by
+  `worktree().repository`. There is no `localStorage`.
+- **Secrets**: `await secret(name)` (null when unset), `await
+  set_secret(name, value)`, `await delete_secret(name)` — the system
+  keyring, per script. Declare them in `permissions.secrets`; never write a
+  secret to storage, to a file or to `notify`.
+- Also: `open_url(url)` (http/https), `copy_text(text)`.
+- No file, process or raw socket access, and never git or shell commands:
+  what a script knows of the worktree comes from the module; ask the user,
+  or use `send_to_agent`.
+- `$CLAUDHUB_SCRIPTS/sentry` is a complete example: settings in storage,
+  its token in the keyring, `fetch` to Sentry's API, a list and a detail.
 - Keep `render` cheap — it runs on every refresh. Split a large view into
   small helper functions; do not animate.
 - `$CLAUDHUB_SCRIPTS/home-columns` and `$CLAUDHUB_SCRIPTS/dashboard` are

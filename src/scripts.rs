@@ -44,6 +44,63 @@ pub struct Script {
     /// Relative to `dir`.
     pub entry: String,
     pub description: String,
+    /// What it asks for beyond drawing — see [`Permissions`].
+    pub permissions: Permissions,
+}
+
+/// What a script asks for beyond drawing, as its manifest declares it under
+/// `permissions`. Asking grants nothing: the hosts are reached only once
+/// the user has allowed each, in the Plugins screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Permissions {
+    /// The hosts it would send HTTPS requests to, lower-case.
+    pub network: Vec<String>,
+    /// The secrets it keeps in the system keyring, by name, with what the
+    /// user is told of each.
+    pub secrets: Vec<Secret>,
+}
+
+/// A secret a script declares: its name, and what it is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Secret {
+    pub name: String,
+    pub label: String,
+}
+
+/// Whether a text names a host, and nothing else: no scheme, no port, no
+/// path — a grant is per host, and `https` is the only scheme granted.
+pub fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && !host.contains("..")
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+}
+
+/// A host as a manifest or a script writes it: trimmed, lower-case, and a
+/// `https://` or a trailing `/` forgiven. `None` when it is not one.
+pub fn host_of(text: &str) -> Option<String> {
+    let text = text.trim();
+    let text = text.strip_prefix("https://").unwrap_or(text);
+    let host = text.trim_end_matches('/').to_ascii_lowercase();
+    valid_host(&host).then_some(host)
+}
+
+/// The hosts among `wanted` the user has not allowed, in order, once each.
+pub fn pending_hosts<'a>(
+    wanted: impl IntoIterator<Item = &'a String>,
+    granted: &[String],
+) -> Vec<String> {
+    let mut pending: Vec<String> = Vec::new();
+    for host in wanted {
+        if !granted.contains(host) && !pending.contains(host) {
+            pending.push(host.clone());
+        }
+    }
+    pending
 }
 
 /// Whether a folder name can be a script's id: what the settings retain,
@@ -107,7 +164,50 @@ pub fn parse(id: &str, dir: &Path, manifest: &str, language: &str) -> Result<Scr
         description: localized(&value, "description", language)
             .unwrap_or_default()
             .to_string(),
+        permissions: permissions(&value, language)?,
     })
+}
+
+/// The `permissions` of a manifest. A host that is not one is refused
+/// rather than dropped: the agent that wrote it is told, and fixes it.
+fn permissions(value: &Value, language: &str) -> Result<Permissions, String> {
+    let Some(asked) = value.get("permissions").filter(|asked| asked.is_object()) else {
+        return Ok(Permissions::default());
+    };
+    let mut network: Vec<String> = Vec::new();
+    for host in crate::json::items(asked, "network") {
+        let text = host.as_str().unwrap_or_default();
+        let host = host_of(text).ok_or_else(|| {
+            format!("{MANIFEST}: `{text}` is not a host — write `api.example.com`")
+        })?;
+        if !network.contains(&host) {
+            network.push(host);
+        }
+    }
+    let mut secrets: Vec<Secret> = Vec::new();
+    for secret in crate::json::items(asked, "secrets") {
+        // A name alone, or `{"name": …, "label": …}`.
+        let name = secret
+            .as_str()
+            .or_else(|| crate::json::string(secret, "name"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !valid_id(&name) {
+            return Err(format!(
+                "{MANIFEST}: the secret `{name}` needs a name of letters, digits, `-`, `_` and `.`"
+            ));
+        }
+        let label = localized(secret, "label", language)
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(&name)
+            .to_string();
+        if !secrets.iter().any(|known| known.name == name) {
+            secrets.push(Secret { name, label });
+        }
+    }
+    Ok(Permissions { network, secrets })
 }
 
 /// A text field written once, or once per language.
@@ -176,21 +276,50 @@ pub fn discover(root: &Path, language: &str) -> Found {
     found
 }
 
-/// Writes the shipped scripts into `root` when it does not exist yet: the
-/// first scripts one sees are examples to change. Once the folder is there
-/// it is the user's — nothing is written again, nothing comes back.
-pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<bool> {
-    if root.exists() {
-        return Ok(false);
-    }
+/// The file, at the scripts' root, naming the examples already written once.
+const OFFERED: &str = ".examples";
+
+/// Writes the shipped examples `root` has never been offered — `files` are
+/// `<id>/<path>` —, and says which. An example is offered once: deleted, it
+/// does not come back; a new one arrives with the version that ships it.
+pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<Vec<String>> {
+    let offered_path = root.join(OFFERED);
+    let offered = std::fs::read_to_string(&offered_path).unwrap_or_default();
+    let offered: Vec<&str> = offered.lines().map(str::trim).collect();
+    let mut written: Vec<String> = Vec::new();
     for (path, content) in files {
-        let path = root.join(path);
-        if let Some(parent) = path.parent() {
+        let Some((id, _)) = path.split_once('/') else {
+            continue;
+        };
+        if offered.contains(&id) {
+            continue;
+        }
+        // A folder of that name already there is the user's.
+        if !written.iter().any(|done| done == id) && root.join(id).exists() {
+            continue;
+        }
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, content)?;
+        std::fs::write(target, content)?;
+        if !written.iter().any(|done| done == id) {
+            written.push(id.to_string());
+        }
     }
-    Ok(true)
+    let mut ids: Vec<String> = offered.iter().map(|id| id.to_string()).collect();
+    for (path, _) in files {
+        if let Some((id, _)) = path.split_once('/') {
+            if !ids.iter().any(|known| known == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    if ids.len() != offered.len() {
+        std::fs::create_dir_all(root)?;
+        std::fs::write(offered_path, ids.join("\n") + "\n")?;
+    }
+    Ok(written)
 }
 
 /// The file, at the scripts' root, where Claudhub says how each script
@@ -212,7 +341,7 @@ pub enum Fared {
 /// The text of [`STATUS`]: each script and how it fared, the folders that
 /// are not scripts and why, and what the Plugins screen has selected.
 pub fn status_text(
-    scripts: &[(&Script, Fared)],
+    scripts: &[(&Script, Fared, Vec<String>)],
     broken: &[(String, String)],
     selected: Option<&str>,
     preview: Option<&str>,
@@ -231,7 +360,7 @@ pub fn status_text(
         out.push_str(&format!(", previewed on the worktree `{preview}`"));
     }
     out.push_str(".\n");
-    for (script, fared) in scripts {
+    for (script, fared, pending) in scripts {
         let kind = match script.kind {
             Kind::Tab => "tab",
             Kind::Home => "home",
@@ -248,6 +377,17 @@ pub fn status_text(
                 out.push_str(why.trim_end());
                 out.push_str("\n```\n");
             }
+        }
+        if !pending.is_empty() {
+            out.push_str(&format!(
+                "\nWaiting for the user to allow these hosts in the Plugins screen \
+                 (its `fetch` to them fails until then): {}.\n",
+                pending
+                    .iter()
+                    .map(|host| format!("`{host}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
     for (id, why) in broken {
@@ -329,7 +469,10 @@ pub fn editing_prompt(root: &Path, selected: Option<&str>) -> String {
          Work only inside this folder. Claudhub reloads a script within a second of a \
          save; after each save, wait a second and read {root}/{STATUS}, which says \
          whether it loaded and, if not, the error — fix it before saying you are done. \
-         Never edit {STATUS} or gpui-kit.d.ts: Claudhub writes them.{selected}"
+         Never edit {STATUS} or gpui-kit.d.ts: Claudhub writes them. A script that \
+         needs the network declares its hosts in `permissions.network` and keeps \
+         its credentials with `set_secret`: tell the user to allow the hosts in \
+         the Plugins screen — the status lists those still waiting.{selected}"
     )
 }
 
@@ -467,8 +610,8 @@ mod tests {
         let (tab, home) = (read("{}").unwrap(), read(r#"{"kind": "home"}"#).unwrap());
         let text = status_text(
             &[
-                (&tab, Fared::Loaded),
-                (&home, Fared::Failed("SyntaxError: x\n".into())),
+                (&tab, Fared::Loaded, vec!["sentry.io".into()]),
+                (&home, Fared::Failed("SyntaxError: x\n".into()), Vec::new()),
             ],
             &[("old".into(), "its entry `main.js` is missing".into())],
             Some("board"),
@@ -479,6 +622,8 @@ mod tests {
         assert!(text.contains("## `board` (tab) — board\n\nLoaded."));
         assert!(text.contains("**Failed to load:**\n\n```\nSyntaxError: x\n```"));
         assert!(text.contains("## `old` — not a script"));
+        assert!(text.contains("allow these hosts in the Plugins screen"));
+        assert!(text.contains("`sentry.io`"));
     }
 
     #[test]
@@ -490,6 +635,42 @@ mod tests {
             assert_eq!(script.kind, kind);
             assert!(entry.contains("export default class"));
         }
+    }
+
+    #[test]
+    fn the_permissions_are_read_and_hosts_forgiven_their_scheme() {
+        let script = read(
+            r#"{"permissions": {
+                "network": ["https://Sentry.io/", "us.sentry.io", "sentry.io"],
+                "secrets": ["token", {"name": "dsn", "label": {"fr": "Le DSN", "en": "DSN"}}]
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(script.permissions.network, ["sentry.io", "us.sentry.io"]);
+        let secrets: Vec<(&str, &str)> = script
+            .permissions
+            .secrets
+            .iter()
+            .map(|secret| (secret.name.as_str(), secret.label.as_str()))
+            .collect();
+        assert_eq!(secrets, [("token", "token"), ("dsn", "Le DSN")]);
+        assert_eq!(read("{}").unwrap().permissions, Permissions::default());
+    }
+
+    #[test]
+    fn a_host_that_is_not_one_is_refused() {
+        for host in ["http://x.io", "x.io:8080", "x.io/api", "*.x.io", "", "a..b"] {
+            let manifest = format!(r#"{{"permissions": {{"network": [{host:?}]}}}}"#);
+            assert!(read(&manifest).is_err(), "{host}");
+        }
+        assert!(read(r#"{"permissions": {"secrets": ["a/b"]}}"#).is_err());
+    }
+
+    #[test]
+    fn what_is_pending_is_what_was_not_allowed() {
+        let wanted = ["a.io".to_string(), "b.io".to_string(), "a.io".to_string()];
+        assert_eq!(pending_hosts(&wanted, &["b.io".to_string()]), ["a.io"]);
+        assert!(pending_hosts(&wanted, &wanted).is_empty());
     }
 
     #[test]

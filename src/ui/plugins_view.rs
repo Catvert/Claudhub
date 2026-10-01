@@ -158,6 +158,9 @@ impl ClaudhubApp {
             .flat_map(|kind| self.scripts.of_kind(kind))
             .map(|script| {
                 let lit = selected.as_deref() == Some(script.id.as_str());
+                // A host it waits for is said on its row: the screen is where
+                // it is allowed.
+                let waiting = !self.pending_hosts(&script.id, cx).is_empty();
                 let id = script.id.clone();
                 let kind = match script.kind {
                     Kind::Tab => tr!("settings-script-tab"),
@@ -198,7 +201,14 @@ impl ClaudhubApp {
                                     .font_family(theme.mono_font_family.clone())
                                     .child(SharedString::from(script.id.clone())),
                             )
-                            .child(kind),
+                            .child(kind)
+                            .when(waiting, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(theme.warning)
+                                        .child(tr!("plugins-waiting")),
+                                )
+                            }),
                     )
                     .into_any_element()
             })
@@ -438,8 +448,191 @@ impl ClaudhubApp {
                     .children(open_entry)
                     .child(picker),
             )
+            .children(
+                selected
+                    .as_deref()
+                    .and_then(|id| self.plugins_permissions(id, cx)),
+            )
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
+    }
+
+    /// What the selected script may do beyond drawing, and the gestures on
+    /// it: the hosts it asks for, allowed or to allow; its secrets, to
+    /// forget; its data, to clear. Nothing when it asks for nothing and
+    /// keeps nothing.
+    fn plugins_permissions(&mut self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let script = self.scripts.script(id)?.clone();
+        let granted = super::scripts::granted_hosts(id, cx);
+        // What it asks for, then what was allowed that it no longer asks
+        // for: still allowed, and withdrawn from here.
+        let mut hosts = self.wanted_hosts(id);
+        for host in &granted {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+            }
+        }
+        let has_data = !self.store_of(id).is_empty();
+        if hosts.is_empty() && script.permissions.secrets.is_empty() && !has_data {
+            return None;
+        }
+        let pending: Vec<String> = hosts
+            .iter()
+            .filter(|host| !granted.contains(host))
+            .cloned()
+            .collect();
+        let line = |label: SharedString| {
+            h_flex().w_full().gap_2().items_center().text_xs().child(
+                div()
+                    .flex_none()
+                    .w(px(90.))
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+        };
+        let host_rows = hosts.iter().map(|host| {
+            let allowed = granted.contains(host);
+            let (app, id, host_name) = (cx.entity().downgrade(), id.to_string(), host.clone());
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    icon(if allowed { "check" } else { "triangle-alert" })
+                        .xsmall()
+                        .text_color(if allowed {
+                            theme.success
+                        } else {
+                            theme.warning
+                        }),
+                )
+                .child(
+                    div()
+                        .font_family(theme.mono_font_family.clone())
+                        .child(SharedString::from(host.clone())),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plugins-host-{host}")))
+                        .ghost()
+                        .xsmall()
+                        .label(if allowed {
+                            tr!("plugins-revoke")
+                        } else {
+                            tr!("plugins-allow")
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = app.update(cx, |this, cx| {
+                                this.grant_host(&id, &host_name, !allowed, cx)
+                            });
+                        }),
+                )
+        });
+        let network = (!hosts.is_empty()).then(|| {
+            let (app, id, pending) = (cx.entity().downgrade(), id.to_string(), pending.clone());
+            line(tr!("plugins-network"))
+                .flex_wrap()
+                .children(host_rows)
+                .when(pending.len() > 1, |el| {
+                    el.child(
+                        Button::new("plugins-allow-all")
+                            .outline()
+                            .xsmall()
+                            .label(tr!("plugins-allow-all"))
+                            .on_click(move |_, _, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    for host in &pending {
+                                        this.grant_host(&id, host, true, cx);
+                                    }
+                                });
+                            }),
+                    )
+                })
+        });
+        let secrets = (!script.permissions.secrets.is_empty()).then(|| {
+            let names: Vec<(String, String)> = script
+                .permissions
+                .secrets
+                .iter()
+                .map(|secret| (secret.name.clone(), secret.label.clone()))
+                .collect();
+            let (id, forgotten) = (id.to_string(), names.clone());
+            let app = cx.entity().downgrade();
+            line(tr!("plugins-secrets"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(
+                            names
+                                .iter()
+                                .map(|(_, label)| label.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )),
+                )
+                .child(
+                    Button::new("plugins-forget-secrets")
+                        .ghost()
+                        .xsmall()
+                        .label(tr!("plugins-forget-secrets"))
+                        .on_click(move |_, _, cx| {
+                            for (name, _) in &forgotten {
+                                super::scripts::forget_secret(&id, name);
+                            }
+                            let _ = app.update(cx, |this, cx| {
+                                this.announce(tr!("plugins-secrets-forgotten"), cx)
+                            });
+                        }),
+                )
+        });
+        let data = has_data.then(|| {
+            let (app, id) = (cx.entity().downgrade(), id.to_string());
+            let path = Self::store_path(&id)
+                .map(|path| SharedString::from(path.display().to_string()))
+                .unwrap_or_default();
+            line(tr!("plugins-data"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .child(path),
+                )
+                .child(
+                    Button::new("plugins-clear-data")
+                        .ghost()
+                        .xsmall()
+                        .label(tr!("plugins-clear-data"))
+                        .on_click(move |_, _, cx| {
+                            let _ = app.update(cx, |this, cx| {
+                                this.clear_store(&id, cx);
+                                this.refresh_scripts(cx);
+                            });
+                        }),
+                )
+        });
+        Some(
+            v_flex()
+                .flex_none()
+                .w_full()
+                .gap_1p5()
+                .p_2()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(if pending.is_empty() {
+                    theme.border
+                } else {
+                    theme.warning
+                })
+                .bg(theme.background)
+                .children(network)
+                .children(secrets)
+                .children(data)
+                .into_any_element(),
+        )
     }
 
     /// The agent that edits the scripts: its terminal, or what starts it.

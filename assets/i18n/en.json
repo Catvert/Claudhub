@@ -1246,5 +1246,16 @@
   "plugins-agent": "Plugins agent",
   "plugins-agent-help": "An agent started in the scripts' folder, told how they are written: ask it for a tab, a card, a whole home. Each save reloads the preview.",
   "plugins-agent-start": "Start the agent",
-  "plugins-agent-none": "No agent profile is configured in the terminal settings."
+  "plugins-agent-none": "No agent profile is configured in the terminal settings.",
+  "plugins-network-asked": "The plugin “%{title}” asks to reach %{host}: allow it in Plugins.",
+  "plugins-waiting": "waits for your permission",
+  "plugins-network": "Network",
+  "plugins-allow": "Allow",
+  "plugins-revoke": "Withdraw",
+  "plugins-allow-all": "Allow all",
+  "plugins-secrets": "Secrets",
+  "plugins-forget-secrets": "Forget",
+  "plugins-secrets-forgotten": "The plugin's secrets were removed from the keyring.",
+  "plugins-data": "Data",
+  "plugins-clear-data": "Clear"
 }

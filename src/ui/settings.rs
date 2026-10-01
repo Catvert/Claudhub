@@ -547,6 +547,10 @@ pub struct Settings {
     /// behind it reads as empty, so a script removed by hand leaves the boards
     /// their home rather than an error.
     pub home_script: String,
+    /// The hosts each script may send HTTPS requests to, by its id, as the
+    /// user allowed them in the Plugins screen — see `ui::scripts`. What a
+    /// manifest asks for is only a request; this is the grant.
+    pub plugin_grants: std::collections::BTreeMap<String, Vec<String>>,
     /// The WSL distribution the workers run in, on Windows.
     ///
     /// Empty: it has not been chosen yet, and the interface asks for it on first
@@ -658,6 +662,7 @@ impl Default for Settings {
             vim_clipboard: false,
             notes_dir: String::new(),
             home_script: String::new(),
+            plugin_grants: Default::default(),
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             folded_panels: Vec::new(),
