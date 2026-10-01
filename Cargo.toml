@@ -212,6 +212,19 @@ winresource = { version = "0.1.31", default-features = false }
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
 # Patches applicatifs portés sur le tag upstream v0.7.0.
+# Ici la branche `claudhub-v0.7.0-gpui-fast` du fork : la série
+# `claudhub-v0.7.0`, plus ce que l'API de gpui-fast demande (`wrap_line`
+# prend un `IndentAdjustment`) et qui ne compile pas contre gpui-pre.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "f2a59fa62124e092c712e57437067b16b4a75b8f" }
-gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "f2a59fa62124e092c712e57437067b16b4a75b8f" }
+gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "fc039a51901377b6159b34543f5c7ce41f0b77d9" }
+gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "fc039a51901377b6159b34543f5c7ce41f0b77d9" }
+
+# Essai : GPUI en mode retenu (gpui-fast). Les crates de `compat/` portent les
+# noms et la version (=0.3.7) des instantanés gpui-pre que Kit épingle, et
+# réexportent ceux de gpui-fast. Quand Kit change de gpui-pre, le patch cesse
+# de s'appliquer, avec un simple avertissement de cargo.
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "92a9b0f7041c8701d4aef4c05534a603caff75d3" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "92a9b0f7041c8701d4aef4c05534a603caff75d3" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "92a9b0f7041c8701d4aef4c05534a603caff75d3" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "92a9b0f7041c8701d4aef4c05534a603caff75d3" }
+gpui-pre-web = { git = "https://github.com/longbridge/gpui-fast", rev = "92a9b0f7041c8701d4aef4c05534a603caff75d3" }
