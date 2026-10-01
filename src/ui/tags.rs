@@ -151,6 +151,13 @@ impl ClaudhubApp {
     }
 
     pub(super) fn tags_arrived(&mut self, main: PathBuf, tags: Vec<Tag>, cx: &mut Context<Self>) {
+        // A tag set or removed may be the last one now: what was listed
+        // since the last tag is asked again at the panel's next render.
+        for worktree in self.repos.worktree_paths(&main) {
+            if let Some(state) = self.review.get_mut(&worktree) {
+                state.files.remove(&crate::git::DiffRange::LastTag);
+            }
+        }
         self.tags.entry(main).or_default().list.arrived(tags);
         // The base selector offers them too, and is refilled with a window.
         self.base_changed = true;

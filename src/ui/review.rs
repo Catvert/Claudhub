@@ -480,6 +480,7 @@ impl ClaudhubApp {
             DiffRange::Dates { from, to } => {
                 format!("dates-{from}-{}", to.as_deref().unwrap_or("today"))
             }
+            DiffRange::LastTag => "last-tag".to_string(),
         };
 
         // No right-hand rule: it was the seam with the neighbouring diff, from
@@ -2479,7 +2480,8 @@ fn rows_for_repository(
         DiffRange::Branch { .. }
         | DiffRange::Commit { .. }
         | DiffRange::Since { .. }
-        | DiffRange::Dates { .. } => files
+        | DiffRange::Dates { .. }
+        | DiffRange::LastTag => files
             .iter()
             .filter(|f| keep(&f.path))
             .map(|f| {

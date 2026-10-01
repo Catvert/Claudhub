@@ -354,6 +354,9 @@ pub fn render_note(note: &Note) -> String {
                 front.insert("to", to.clone());
             }
         }
+        DiffRange::LastTag => {
+            front.insert("range", "last-tag".into());
+        }
     }
     front.insert("sent", note.sent.to_string());
     front.insert("done", note.done.to_string());
@@ -401,6 +404,7 @@ pub fn parse_note(text: &str) -> Option<Note> {
             from: front.get("from")?.clone(),
             to: front.get("to").cloned(),
         },
+        Some("last-tag") => DiffRange::LastTag,
         _ => DiffRange::Working,
     };
     let (excerpt, remark) = split_excerpt(body);
@@ -511,6 +515,7 @@ fn range_key(range: &DiffRange) -> String {
         DiffRange::Since { point } => format!("since {point}"),
         // `from..to`, or `from..` up to today: neither side holds a space.
         DiffRange::Dates { from, to } => format!("dates {from}..{}", to.as_deref().unwrap_or("")),
+        DiffRange::LastTag => "last-tag".into(),
     }
 }
 
@@ -518,6 +523,7 @@ fn range_of(key: &str) -> Option<DiffRange> {
     let (kind, rest) = key.split_once(' ').unwrap_or((key, ""));
     match kind {
         "working" => Some(DiffRange::Working),
+        "last-tag" => Some(DiffRange::LastTag),
         "branch" if !rest.is_empty() => Some(DiffRange::Branch {
             base: rest.to_string(),
         }),
@@ -737,6 +743,16 @@ mod tests {
         }
     }
 
+    /// And one taken since the last tag stays there, not on the working tree.
+    #[test]
+    fn a_note_taken_since_the_last_tag_keeps_it() {
+        let note = Note {
+            range: DiffRange::LastTag,
+            ..note()
+        };
+        assert_eq!(parse_note(&render_note(&note)), Some(note));
+    }
+
     /// The name carries only the id and the file: a note that slips by ten lines
     /// would otherwise have a different name on every write, and the vault's
     /// links would point into the void.
@@ -847,6 +863,12 @@ mod tests {
                 path: PathBuf::from("src/semaine.rs"),
                 added: 1,
                 removed: 1,
+            },
+            Reviewed {
+                range: DiffRange::LastTag,
+                path: PathBuf::from("src/version.rs"),
+                added: 3,
+                removed: 0,
             },
         ];
         let text = render_index(Path::new("/tmp/wt"), &reviewed);
