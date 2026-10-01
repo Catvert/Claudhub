@@ -143,7 +143,7 @@ impl ClaudhubApp {
     /// At render time, like the history and with the same guard: opening a
     /// worktree must not pay for a read nobody will look at, and a panel that
     /// asks on every frame asks a hundred times a second.
-    fn ensure_tags(&mut self, main: PathBuf, cx: &mut Context<Self>) {
+    pub(super) fn ensure_tags(&mut self, main: PathBuf, cx: &mut Context<Self>) {
         if self.tags.entry(main.clone()).or_default().list.ask() {
             self.git.send(Cmd::LoadTags { main });
             cx.notify();
@@ -152,6 +152,8 @@ impl ClaudhubApp {
 
     pub(super) fn tags_arrived(&mut self, main: PathBuf, tags: Vec<Tag>, cx: &mut Context<Self>) {
         self.tags.entry(main).or_default().list.arrived(tags);
+        // The base selector offers them too, and is refilled with a window.
+        self.base_changed = true;
         cx.notify();
     }
 

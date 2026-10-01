@@ -1559,13 +1559,10 @@ impl ClaudhubApp {
     /// built when the stamp moves.
     fn branch_touched(&mut self, worktree: &Path, cx: &mut Context<Self>) -> (u64, Vec<&Path>) {
         use std::hash::{Hash, Hasher};
-        let range = self.review.get(worktree).and_then(|state| {
-            super::review::branch_panel_range(
-                state.base.as_deref(),
-                state.review_point.as_ref(),
-                state.since_review,
-            )
-        });
+        let range = self
+            .review
+            .get(worktree)
+            .and_then(|state| state.branch_panel_range());
         if let Some(range) = range.clone() {
             self.ensure_files(range, cx);
         }

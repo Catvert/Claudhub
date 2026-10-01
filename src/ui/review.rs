@@ -12,6 +12,7 @@ use std::rc::Rc;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
+    date_picker::{DatePicker, DateRangePreset},
     h_flex,
     input::{Textarea, TextareaState},
     select::Select,
@@ -399,13 +400,9 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let range = self.active_review().and_then(|state| {
-            branch_panel_range(
-                state.base.as_deref(),
-                state.review_point.as_ref(),
-                state.since_review,
-            )
-        });
+        let range = self
+            .active_review()
+            .and_then(|state| state.branch_panel_range());
         match range {
             Some(range) => self.render_file_list(range, window, cx).into_any_element(),
             None => v_flex()
@@ -480,6 +477,9 @@ impl ClaudhubApp {
             DiffRange::Branch { base } => format!("branch-{base}"),
             DiffRange::Commit { id, .. } => format!("commit-{id}"),
             DiffRange::Since { point } => format!("since-{point}"),
+            DiffRange::Dates { from, to } => {
+                format!("dates-{from}-{}", to.as_deref().unwrap_or("today"))
+            }
         };
 
         // No right-hand rule: it was the seam with the neighbouring diff, from
@@ -886,6 +886,11 @@ impl ClaudhubApp {
     /// compares just as well against `dev`, against another working branch or
     /// against a remote.
     fn render_base_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The selector offers the tags: read when the bar is first drawn, like
+        // the tags panel's own list, and only once.
+        if let Some(main) = self.active_main() {
+            self.ensure_tags(main, cx);
+        }
         self.bar(cx)
             .child(self.tree_toggle(cx))
             // The select takes the room between the two buttons rather than
@@ -906,6 +911,7 @@ impl ClaudhubApp {
                         .menu_width(crate::ui::base_select::MENU_WIDTH),
                 ),
             )
+            .child(self.period_button())
             // Beside the selector whose first entry it feeds: "since my last
             // review" is read from here. The notes' sending sets a point too
             // (`notes_view::send_prompt`); this is for the round that ends
@@ -924,6 +930,38 @@ impl ClaudhubApp {
                     })),
             )
             .child(self.find_button(crate::ui::find::Pane::Branch, cx))
+    }
+
+    /// The calendar a period is picked in. Its own face is a calendar and
+    /// nothing else: the period it holds is read in the selector beside it,
+    /// as the selector's first entry.
+    ///
+    /// The presets end today, and a period ending today stays open
+    /// (`Compare::period`): "the last seven days" still means up to now
+    /// tomorrow.
+    fn period_button(&self) -> impl IntoElement {
+        let today = chrono::Local::now().date_naive();
+        let back = |days: u64| today - chrono::Days::new(days);
+        div()
+            .id("review-period")
+            .flex_none()
+            .w(px(26.))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tr!("range-period-pick"))
+                    .build(window, cx)
+            })
+            .child(
+                DatePicker::new(&self.period_picker)
+                    .xsmall()
+                    .appearance(false)
+                    .placeholder("")
+                    .presets(vec![
+                        DateRangePreset::range(tr!("range-period-today"), today, today),
+                        DateRangePreset::range(tr!("range-period-yesterday"), back(1), back(1)),
+                        DateRangePreset::range(tr!("range-period-week"), back(6), today),
+                        DateRangePreset::range(tr!("range-period-month"), back(29), today),
+                    ]),
+            )
     }
 
     fn bar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -2244,15 +2282,20 @@ fn submodule_commit_command(
 /// The range carries the point's **commit**: a new point is a new range, so
 /// its list, its ticks and its scroll start afresh, and nothing filed under
 /// the old one is taken for it.
+///
+/// A tag or a period (`compare`) comes next, before the base it stands in
+/// for; the selector never leaves both it and "since" chosen.
 pub(super) fn branch_panel_range(
     base: Option<&str>,
     point: Option<&crate::git::snapshot::Point>,
     since_review: bool,
+    compare: Option<&crate::ui::base_select::Compare>,
 ) -> Option<DiffRange> {
-    match point {
-        Some(point) if since_review => Some(DiffRange::Since {
+    match (point, compare) {
+        (Some(point), _) if since_review => Some(DiffRange::Since {
             point: point.commit.clone(),
         }),
+        (_, Some(compare)) => Some(compare.range()),
         _ => base.map(|base| DiffRange::Branch {
             base: base.to_string(),
         }),
@@ -2433,7 +2476,10 @@ fn rows_for_repository(
             }
             rows
         }
-        DiffRange::Branch { .. } | DiffRange::Commit { .. } | DiffRange::Since { .. } => files
+        DiffRange::Branch { .. }
+        | DiffRange::Commit { .. }
+        | DiffRange::Since { .. }
+        | DiffRange::Dates { .. } => files
             .iter()
             .filter(|f| keep(&f.path))
             .map(|f| {
@@ -3634,19 +3680,49 @@ mod tests {
         let branch = DiffRange::Branch { base: "dev".into() };
         // Asked for, and a point exists.
         assert_eq!(
-            branch_panel_range(Some("dev"), Some(&point), true),
+            branch_panel_range(Some("dev"), Some(&point), true, None),
             Some(since.clone())
         );
         // Even with no base to compare the branch against.
-        assert_eq!(branch_panel_range(None, Some(&point), true), Some(since));
+        assert_eq!(
+            branch_panel_range(None, Some(&point), true, None),
+            Some(since)
+        );
         // A point alone does not take the panel over.
         assert_eq!(
-            branch_panel_range(Some("dev"), Some(&point), false),
+            branch_panel_range(Some("dev"), Some(&point), false, None),
             Some(branch.clone())
         );
         // Asked for with no point: the branch, not an empty panel.
-        assert_eq!(branch_panel_range(Some("dev"), None, true), Some(branch));
-        assert_eq!(branch_panel_range(None, None, true), None);
+        assert_eq!(
+            branch_panel_range(Some("dev"), None, true, None),
+            Some(branch)
+        );
+        assert_eq!(branch_panel_range(None, None, true, None), None);
+    }
+
+    /// A tag or a period stands in for the base — with or without one — and
+    /// gives way to "since" only when that is asked and possible.
+    #[test]
+    fn a_tag_or_a_period_takes_the_place_of_the_base() {
+        use crate::ui::base_select::Compare;
+        let point = crate::git::snapshot::Point {
+            commit: "p1".into(),
+            at: 0,
+        };
+        let tag = Compare::Tag("v1".into());
+        assert_eq!(
+            branch_panel_range(Some("dev"), Some(&point), false, Some(&tag)),
+            Some(tag.range())
+        );
+        assert_eq!(
+            branch_panel_range(None, None, true, Some(&tag)),
+            Some(tag.range())
+        );
+        assert_eq!(
+            branch_panel_range(Some("dev"), Some(&point), true, Some(&tag)),
+            Some(DiffRange::Since { point: "p1".into() })
+        );
     }
 
     /// The rows since a point come from the list alone, like a commit's —

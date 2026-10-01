@@ -125,6 +125,9 @@ pub struct WorktreeState {
     /// branch against its base. A choice made in the base selector, kept for
     /// the reason `base` is.
     pub since_review: bool,
+    /// A tag or a period the branch review reads from instead of the base,
+    /// kept for the same reason.
+    pub compare: Option<crate::ui::base_select::Compare>,
 }
 
 /// One test's last known fate.

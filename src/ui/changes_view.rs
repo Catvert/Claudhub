@@ -478,15 +478,10 @@ impl ClaudhubApp {
         let app = cx.entity().downgrade();
         let on_show = self.active.as_deref() == Some(path);
         let sheet_open = self.commit_sheet;
-        let against = self.review.get(path).and_then(|state| {
-            match (state.since_review, state.review_point.as_ref()) {
-                (true, Some(_)) => Some(tr!("sheet-review-since")),
-                _ => state
-                    .base
-                    .clone()
-                    .map(|base| tr!("sheet-review-against", { base: base })),
-            }
-        });
+        let against = self
+            .review
+            .get(path)
+            .and_then(|state| state.review_against());
 
         let head = head.then(|| {
             h_flex()
@@ -633,11 +628,7 @@ impl ClaudhubApp {
         let Some(state) = self.review.get(worktree) else {
             return false;
         };
-        let Some(range) = super::review::branch_panel_range(
-            state.base.as_deref(),
-            state.review_point.as_ref(),
-            state.since_review,
-        ) else {
+        let Some(range) = state.branch_panel_range() else {
             return false;
         };
         if state.range == range && state.selected.is_some() {

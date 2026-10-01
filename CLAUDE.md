@@ -605,7 +605,10 @@ portée appartient à l'utilisateur. La base vient de git (`branch::guess_base`)
 la branche dont celle-ci a le moins divergé, les égalités départagées par
 **là où part le travail** (`branch::start_point` : `dev`/`develop`, sinon la
 branche d'intégration). Elle **n'est pas enregistrée** : le magasin garde ce
-qu'on a choisi, jamais une devinette.
+qu'on a choisi, jamais une devinette. Un **tag** ou une **période** (`base_select::Compare`)
+remplace la base dans la revue **sans la toucher** : la PR et l'intégration
+continuent de la lire. Une période se lit en commits du premier parent de HEAD
+(`DiffRange::Dates`) ; finie aujourd'hui, elle reste ouverte.
 
 **« Depuis ma dernière relecture »** (`DiffRange::Since`, `git::snapshot`) — le
 point est l'état du disque, construit dans un **index à nous**

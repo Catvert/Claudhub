@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::component::{
+    calendar::Date,
+    date_picker::{DatePickerEvent, DatePickerState},
     dock::{DockArea, DockSkin},
     h_flex,
     input::{EditorState, InputEvent, InputState},
@@ -26,7 +28,7 @@ use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status
 use crate::runtime::{self, Action, Cmd, Evt};
 use crate::tr;
 
-use crate::ui::base_select::BaseChoice;
+use crate::ui::base_select::{BaseChoice, Compare};
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
@@ -330,6 +332,9 @@ pub struct ReviewState {
     /// The branch review panel shows "since my last review" — see
     /// `review::branch_panel_range`.
     pub since_review: bool,
+    /// A tag or a period the panel reads from instead of the base — see
+    /// `base_select::Compare`. Never chosen together with `since_review`.
+    pub compare: Option<crate::ui::base_select::Compare>,
     /// The history and its graph, loaded on demand — opening a worktree must not
     /// pay for a `git log` nobody will look at.
     pub history: Option<std::rc::Rc<History>>,
@@ -450,6 +455,30 @@ impl ReviewState {
         self.home_changes = None;
         self.home_review = None;
     }
+
+    /// What the branch review panel lists — `review::branch_panel_range`.
+    pub fn branch_panel_range(&self) -> Option<DiffRange> {
+        crate::ui::review::branch_panel_range(
+            self.base.as_deref(),
+            self.review_point.as_ref(),
+            self.since_review,
+            self.compare.as_ref(),
+        )
+    }
+
+    /// The words for what the review is against, for a board or a sheet:
+    /// read off the same choice as the range, in the same order.
+    pub fn review_against(&self) -> Option<SharedString> {
+        if self.since_review && self.review_point.is_some() {
+            return Some(tr!("sheet-review-since"));
+        }
+        if let Some(compare) = &self.compare {
+            return Some(compare.words());
+        }
+        self.base
+            .clone()
+            .map(|base| tr!("sheet-review-against", { base: base }))
+    }
 }
 
 /// Which end a file opened with the keyboard starts from.
@@ -522,6 +551,7 @@ impl Default for ReviewState {
             base_asked: false,
             review_point: None,
             since_review: false,
+            compare: None,
             history: None,
             // The current branch: what one asks a history first. The whole
             // graph is one click away.
@@ -697,6 +727,8 @@ pub struct ClaudhubApp {
     /// dozens of branches, and scrolling a list of seventy entries to find one
     /// whose name you already know is exactly what a search field saves.
     pub(super) base_select: Entity<SelectState<SearchableVec<BaseChoice>>>,
+    /// The calendar beside the base selector: a period of days to review.
+    pub(super) period_picker: Entity<DatePickerState>,
     /// The branch picker's surface, kept from one opening to the next: it holds
     /// the filter field, whose `InputState` may not be rebuilt at every frame.
     pub(super) branch_picker: Entity<crate::ui::branch_picker::BranchPicker>,
@@ -1475,9 +1507,27 @@ impl ClaudhubApp {
             };
             if base.as_ref() == crate::ui::base_select::SINCE_REVIEW {
                 this.show_since_review(cx);
+            } else if base.as_ref() == crate::ui::base_select::PERIOD {
+                // The period already shown: nothing to change.
+            } else if let Some(tag) = crate::ui::base_select::Compare::tag_of(base) {
+                this.set_compare(tag, cx);
             } else {
                 this.set_base(base.to_string(), cx);
             }
+        })
+        .detach();
+        let period_picker = cx.new(|cx| {
+            DatePickerState::range(window, cx)
+                .date_format("")
+                .first_day_of_week(chrono::Weekday::Mon)
+        });
+        cx.subscribe(&period_picker, |this, _, event, cx| {
+            let DatePickerEvent::Change(picked) = event;
+            let (Some(start), Some(end)) = (picked.start(), picked.end()) else {
+                return;
+            };
+            let today = chrono::Local::now().date_naive();
+            this.set_compare(Compare::period(start.date(), end.date(), today), cx);
         })
         .detach();
 
@@ -1556,6 +1606,7 @@ impl ClaudhubApp {
             chats: Vec::new(),
             commit_input,
             base_select,
+            period_picker,
             branch_picker,
             branches_dock,
             worktree_picker,
@@ -4240,18 +4291,37 @@ impl ClaudhubApp {
         let point = state
             .and_then(|state| state.review_point.as_ref())
             .map(|point| BaseChoice::since_review(point.at, now));
+        // The period has no entry of its own until one is picked: it is
+        // picked in the calendar, and an entry would only say "open it".
+        let period = state
+            .and_then(|state| state.compare.as_ref())
+            .filter(|compare| matches!(compare, Compare::Dates { .. }))
+            .map(BaseChoice::period);
+        // The tags after the local branches and before the remote ones: what
+        // one compares against is close by, and a remote list runs long.
+        let tags: Vec<BaseChoice> = self
+            .tags
+            .get(&repo.main)
+            .map(|tags| tags.list.items.iter().map(BaseChoice::tag).collect())
+            .unwrap_or_default();
+        let (local, remote): (Vec<_>, Vec<_>) = repo
+            .branches
+            .iter()
+            .map(|branch| BaseChoice::of(branch, &worktree))
+            .partition(|choice| !choice.remote);
         let choices: Vec<BaseChoice> = point
             .into_iter()
-            .chain(
-                repo.branches
-                    .iter()
-                    .map(|branch| BaseChoice::of(branch, &worktree)),
-            )
+            .chain(period)
+            .chain(local)
+            .chain(tags)
+            .chain(remote)
             .collect();
         let current = state
             .and_then(|state| {
                 if state.since_review && state.review_point.is_some() {
                     Some(crate::ui::base_select::SINCE_REVIEW.to_string())
+                } else if let Some(compare) = &state.compare {
+                    Some(compare.value())
                 } else {
                     state.base.clone()
                 }
@@ -4262,6 +4332,24 @@ impl ClaudhubApp {
             select.set_items(SearchableVec::new(choices), window, cx);
             if let Some(current) = current {
                 select.set_selected_value(&current, window, cx);
+            }
+        });
+        // The calendar opens on the period shown, this worktree's — or on
+        // nothing, rather than on the one another worktree reviews.
+        let days = match state.and_then(|state| state.compare.as_ref()) {
+            Some(Compare::Dates { from, to }) => {
+                let day = |text: &str| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok();
+                let end = to
+                    .as_deref()
+                    .and_then(day)
+                    .unwrap_or_else(|| chrono::Local::now().date_naive());
+                Date::Range(day(from), Some(end))
+            }
+            _ => Date::Range(None, None),
+        };
+        self.period_picker.update(cx, |picker, cx| {
+            if picker.date() != days {
+                picker.set_date(days, window, cx);
             }
         });
     }
@@ -4279,8 +4367,10 @@ impl ClaudhubApp {
             return;
         };
         // Choosing a branch — here or from a branch row's "compare with" — is
-        // leaving "since my last review", even for the base already set.
-        let left_since = std::mem::replace(&mut state.since_review, false);
+        // leaving "since my last review", or a tag, or a period, even for the
+        // base already set.
+        let left_since =
+            std::mem::replace(&mut state.since_review, false) | state.compare.take().is_some();
         if state.base.as_deref() == Some(base.as_str()) {
             if left_since {
                 self.persist_review(&worktree, cx);
@@ -4320,6 +4410,28 @@ impl ClaudhubApp {
             return;
         }
         state.since_review = true;
+        state.compare = None;
+        self.persist_review(&worktree, cx);
+        self.base_changed = true;
+        cx.notify();
+    }
+
+    /// Turns the branch review panel to a tag or a period.
+    ///
+    /// The base stays what it was: the pull request and the merge go on
+    /// reading it, and choosing a branch again is choosing it back.
+    pub(super) fn set_compare(&mut self, compare: Compare, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        if state.compare.as_ref() == Some(&compare) && !state.since_review {
+            return;
+        }
+        state.since_review = false;
+        state.compare = Some(compare);
         self.persist_review(&worktree, cx);
         self.base_changed = true;
         cx.notify();
@@ -4405,6 +4517,7 @@ impl ClaudhubApp {
             state.base = saved.base;
             state.review_point = saved.review_point;
             state.since_review = saved.since_review;
+            state.compare = saved.compare;
             state.lsp = saved.lsp;
             state.collapsed = saved.collapsed.into_iter().collect();
             // A file written before this field existed carries zero, and a note
@@ -4457,11 +4570,13 @@ impl ClaudhubApp {
         collapsed.sort();
         let (base, next_note, lsp) = (state.base.clone(), state.next_note, state.lsp);
         let (review_point, since_review) = (state.review_point.clone(), state.since_review);
+        let compare = state.compare.clone();
         Store::update_global(cx, |store| {
             let saved = store.worktree_mut(worktree, &main);
             saved.base = base;
             saved.review_point = review_point;
             saved.since_review = since_review;
+            saved.compare = compare;
             saved.collapsed = collapsed;
             saved.next_note = next_note;
             saved.lsp = lsp;

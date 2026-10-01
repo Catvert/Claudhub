@@ -265,13 +265,11 @@ impl ClaudhubApp {
         // and CI, its review's list —, asked for here as their panels would.
         if self.active.as_deref() == Some(path) {
             self.ensure_github(cx);
-            if let Some(range) = self.review.get(path).and_then(|state| {
-                super::review::branch_panel_range(
-                    state.base.as_deref(),
-                    state.review_point.as_ref(),
-                    state.since_review,
-                )
-            }) {
+            if let Some(range) = self
+                .review
+                .get(path)
+                .and_then(|state| state.branch_panel_range())
+            {
                 self.ensure_files(range, cx);
             }
         }
@@ -314,13 +312,10 @@ impl ClaudhubApp {
         }
         let range = match face {
             GitFace::Changes => Some(crate::git::DiffRange::Working),
-            GitFace::Review => self.review.get(path).and_then(|state| {
-                super::review::branch_panel_range(
-                    state.base.as_deref(),
-                    state.review_point.as_ref(),
-                    state.since_review,
-                )
-            }),
+            GitFace::Review => self
+                .review
+                .get(path)
+                .and_then(|state| state.branch_panel_range()),
             GitFace::History | GitFace::Pr => None,
         };
         if let Some(range) = range {
@@ -1528,11 +1523,7 @@ impl ClaudhubApp {
         path: &Path,
     ) -> Option<(std::rc::Rc<Vec<focus::ReviewRow>>, usize, usize, usize)> {
         let state = self.review.get_mut(path)?;
-        let range = super::review::branch_panel_range(
-            state.base.as_deref(),
-            state.review_point.as_ref(),
-            state.since_review,
-        )?;
+        let range = state.branch_panel_range()?;
         let files = state.files.get(&range)?;
         let empty = std::collections::HashSet::new();
         let toggled = self.home_review_toggled.get(path).unwrap_or(&empty);
