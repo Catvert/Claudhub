@@ -1582,7 +1582,21 @@ impl ClaudhubApp {
 
         let mut app = Self {
             git,
-            repos: crate::ui::repos::Repos::default(),
+            repos: {
+                // The sidebar's order, given before any repository answers.
+                let store = crate::ui::store::Store::global(cx);
+                let mut repos = crate::ui::repos::Repos::default();
+                repos.set_order(
+                    store.session.focus_order.clone(),
+                    store
+                        .repos
+                        .iter()
+                        .filter(|(_, repo)| !repo.focus_order.is_empty())
+                        .map(|(main, repo)| (main.clone(), repo.focus_order.clone()))
+                        .collect(),
+                );
+                repos
+            },
             server_state: super::server::ServerState::default(),
             wsl_prompt: None,
             server_wsl: false,

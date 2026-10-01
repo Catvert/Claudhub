@@ -257,6 +257,10 @@ pub struct Session {
     pub focus_rail: bool,
     /// The projects folded to their name in its sidebar, by main checkout.
     pub focus_folded: Vec<PathBuf>,
+    /// The projects in the order the hand gave the sidebar, by main
+    /// checkout — `repos::Repos::move_project`. A sequence, not a set: never
+    /// sorted.
+    pub focus_order: Vec<PathBuf>,
     /// **Legacy**: where the work stood, back when there was one place for the
     /// whole window. Poured into its worktree's entry once, then cleared —
     /// the path `migrate_sentry` and the notes' recovery already take.
@@ -286,6 +290,9 @@ pub struct RepoState {
     pub home_size: Option<(f32, f32)>,
     /// The git node folded to its head.
     pub home_collapsed: bool,
+    /// Its worktrees in the order the hand gave the home screen's sidebar —
+    /// `repos::Repos::move_worktree`.
+    pub focus_order: Vec<PathBuf>,
     /// Where the last new worktree of this repository started: the next one
     /// starts there too, unless told otherwise.
     pub last_start: Option<String>,
@@ -684,6 +691,10 @@ impl Store {
         // moment we know for sure, and the pin carries no repository of its own
         // to be judged on later.
         self.pinned.retain(|path| !gone.contains(path));
+        // And its place in the sidebar, for the same reason.
+        if let Some(state) = self.repos.get_mut(repo) {
+            state.focus_order.retain(|path| alive.contains(path));
+        }
     }
 
     pub fn is_pinned(&self, path: &Path) -> bool {
