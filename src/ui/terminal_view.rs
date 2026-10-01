@@ -2317,6 +2317,8 @@ impl ClaudhubApp {
             run: None,
             stopping: false,
         });
+        self.last_opened
+            .insert(worktree.clone(), view.entity_id().as_u64());
         let id = panel.entity_id();
         self.dock_terminal(
             &worktree,

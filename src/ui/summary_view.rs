@@ -400,7 +400,13 @@ impl ClaudhubApp {
 
     /// Goes to a terminal to answer it: the home, that terminal under its
     /// sub-tabs, and the keys in it.
-    fn reply_to(&mut self, path: &Path, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn reply_to(
+        &mut self,
+        path: &Path,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.home_terminal.insert(path.to_path_buf(), id);
         self.show_board_view(path, View::Home, cx);
         if let Some(view) = self.terminal(id).map(|terminal| terminal.view.clone()) {
@@ -714,16 +720,54 @@ impl ClaudhubApp {
         };
         let (id, view) = (open.id(), open.view.clone());
         self.home_terminal.insert(worktree.to_path_buf(), id);
-        if !matches!(self.board_view(worktree, cx), View::Home | View::Terminals) {
-            self.show_board_view(worktree, View::Home, cx);
-        }
+        self.show_board_view(worktree, View::Home, cx);
         super::dialogs::focus_field(&view, window, cx);
         cx.notify();
     }
 
+    /// `Ctrl+T` on the home: back to the terminal or chat the worktree
+    /// opened last, under its sub-tab on the board's home, the keys in its
+    /// field — failing that the one the board shows, and failing any a shell
+    /// opened for it.
+    ///
+    /// On the plan, a terminal is brought into view where it is; a chat has
+    /// no node there, and is shown on the focus view as `open_home_chat`
+    /// shows one.
+    pub(super) fn reply_to_last(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open: Vec<(u64, bool)> = self
+            .terminals_of(worktree)
+            .map(|terminal| (terminal.view.entity_id().as_u64(), false))
+            .chain(self.chats_of(worktree).map(|chat| (chat.id(), false)))
+            .collect();
+        let last = self
+            .last_opened
+            .get(worktree)
+            .copied()
+            .filter(|id| open.iter().any(|(open, _)| open == id))
+            .or_else(|| focus::shown_terminal(self.home_terminal.get(worktree).copied(), &open));
+        let Some(id) = last else {
+            self.open_home_terminal(worktree, window, cx);
+            return;
+        };
+        if self.home_mode == overview::HomeMode::Canvas {
+            if self.terminal(id).is_some() {
+                self.overview_reveal = Some(Node::Terminal(id));
+            } else {
+                self.set_home_mode(overview::HomeMode::Focus, cx);
+            }
+        }
+        self.reply_to(worktree, id, window, cx);
+        cx.notify();
+    }
+
     /// Opens a shell from the home and shows it there, the keys in it: under
-    /// its sub-tab — the board brought back to its home unless it shows its
-    /// terminals already —, or on the plane, brought into view. The `+` of
+    /// its sub-tab — the board brought back to its home, where one types —,
+    /// or on the plane, brought into view. The `+` of
     /// the sub-tabs and `Ctrl+Maj+T`: a terminal opened behind another tab
     /// was one to go looking for.
     pub(super) fn open_home_terminal(
@@ -745,11 +789,7 @@ impl ClaudhubApp {
         let id = view.entity_id().as_u64();
         self.home_terminal.insert(worktree.to_path_buf(), id);
         match self.home_mode {
-            overview::HomeMode::Focus => {
-                if !matches!(self.board_view(worktree, cx), View::Home | View::Terminals) {
-                    self.show_board_view(worktree, View::Home, cx);
-                }
-            }
+            overview::HomeMode::Focus => self.show_board_view(worktree, View::Home, cx),
             overview::HomeMode::Canvas => self.overview_reveal = Some(Node::Terminal(id)),
         }
         super::dialogs::focus_field(&view, window, cx);

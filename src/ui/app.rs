@@ -1195,6 +1195,9 @@ pub struct ClaudhubApp {
     /// The terminal each board's home shows under its sub-tabs, once one
     /// was pressed — see `focus::shown_terminal`; not kept.
     pub(super) home_terminal: HashMap<PathBuf, u64>,
+    /// The terminal or chat each worktree opened last, the restored ones
+    /// included — what `Ctrl+T` goes back to on the home; not kept.
+    pub(super) last_opened: HashMap<PathBuf, u64>,
     /// The face each board's git tab shows — see `focus::GitFace`; not kept.
     pub(super) git_face: HashMap<PathBuf, crate::ui::focus::GitFace>,
     /// The face each board's notes tab shows; not kept.
@@ -1727,6 +1730,7 @@ impl ClaudhubApp {
             focus_note_shown: HashMap::new(),
             home_review_toggled: HashMap::new(),
             home_terminal: HashMap::new(),
+            last_opened: HashMap::new(),
             git_face: HashMap::new(),
             notes_face: HashMap::new(),
             board_splits: HashMap::new(),
