@@ -26,6 +26,8 @@
   "chat-compaction-cancelled": "Compaction cancelled",
   "chat-subagent": "Subagent",
   "chat-subagent-calls": "%{count} call(s)",
+  "chat-subagent-asking": "waiting for an answer",
+  "chat-prompt-copy": "Copy the prompt",
   "chat-finished-in": "%{chat} finished in %{worktree}",
   "chat-waiting-in": "%{chat} is waiting for you in %{worktree}",
   "chat-form-answer": "Answer",

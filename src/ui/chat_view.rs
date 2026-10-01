@@ -146,6 +146,13 @@ const MENTIONS: usize = 50;
 /// The timeline's width, unfolded.
 const TIMELINE_WIDTH: f32 = 200.;
 
+/// The hover group of a prompt's bubble, which shows its copy button.
+const PROMPT_GROUP: &str = "chat-prompt";
+
+/// Past this height the pinned subagents scroll: a fan-out of twenty does
+/// not push the transcript out.
+const PINNED_SUBAGENTS_HEIGHT: f32 = 132.;
+
 /// How many diff rows a tool call shows before it stops.
 const DIFF_ROWS: usize = 200;
 
@@ -1521,6 +1528,89 @@ impl ChatView {
         )
     }
 
+    /// The subagents of the turn, pinned above the composer — see
+    /// `Chat::pinned_subagents` —: one line each, how it stands, and a press
+    /// that brings its card into view. Their work is on the card.
+    fn render_pinned_subagents(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pinned = self.chat.pinned_subagents();
+        if pinned.is_empty() || self.history_open {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let rows = pinned.into_iter().enumerate().map(|(n, (entry, agent))| {
+            let asking = agent.permission.is_some()
+                || agent
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Tool(tool) if tool.permission.is_some()));
+            let (glyph, color) = match agent.state.as_deref() {
+                _ if asking => ("triangle-alert", theme.warning),
+                Some("completed") => ("check", theme.success),
+                Some("failed" | "disconnected") => ("circle-x", theme.danger),
+                Some(_) => ("circle-stop", theme.muted_foreground),
+                None => ("loader-circle", theme.warning),
+            };
+            let calls = agent
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Tool(_)))
+                .count();
+            let name = if agent.name.is_empty() {
+                tr!("chat-subagent")
+            } else {
+                SharedString::from(agent.name.clone())
+            };
+            h_flex()
+                .id(("chat-pinned-subagent", n))
+                .flex_none()
+                .gap_2()
+                .py(px(2.))
+                .items_center()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .hover(|el| el.text_color(theme.foreground))
+                .child(icon(glyph).xsmall().text_color(color))
+                .child(div().flex_none().text_color(theme.foreground).child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(agent.task.clone())),
+                )
+                .when(asking, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.warning)
+                            .child(tr!("chat-subagent-asking")),
+                    )
+                })
+                .when(calls > 0, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .child(tr!("chat-subagent-calls", { count: calls })),
+                    )
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.jump_to(entry, cx)))
+        });
+        Some(
+            v_flex()
+                .id("chat-pinned-subagents")
+                .flex_none()
+                .max_h(px(PINNED_SUBAGENTS_HEIGHT))
+                .overflow_y_scroll()
+                .border_t_1()
+                .border_color(theme.border)
+                .px_3()
+                .py_1()
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
     /// The line that says the agent is at work, and the way to stop it —
     /// steady, see the module.
     fn render_working(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2303,6 +2393,7 @@ impl Render for ChatView {
             )
             .children(self.render_form(cx))
             .children(self.render_plan(cx))
+            .children(self.render_pinned_subagents(cx))
             .children(self.render_working(cx))
             .child(self.render_composer(cx))
     }
@@ -2348,16 +2439,41 @@ fn render_row(view: &Entity<ChatView>, ix: usize, _: &mut Window, cx: &mut App) 
         Entry::User { text, images, .. } => row
             .child(
                 v_flex()
+                    .relative()
+                    .group(PROMPT_GROUP)
                     .gap_1()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.muted_foreground.opacity(0.06))
-                    .px_3()
+                    .pl_3()
+                    .pr_8()
                     .py_2()
                     .text_sm()
                     .when(!text.is_empty(), |el| {
-                        el.child(SharedString::from(text.clone()))
+                        // The whole prompt, as it was sent, in one press: a
+                        // selection across a bubble is not one.
+                        let copied = text.clone();
+                        el.child(SharedString::from(text.clone())).child(
+                            div()
+                                .absolute()
+                                .top_1()
+                                .right_1()
+                                .opacity(0.)
+                                .group_hover(PROMPT_GROUP, |style| style.opacity(1.))
+                                .child(
+                                    Button::new(("chat-prompt-copy", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(icon("copy"))
+                                        .tooltip(tr!("chat-prompt-copy"))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copied.clone(),
+                                            ));
+                                        }),
+                                ),
+                        )
                     })
                     .when(*images > 0, |el| {
                         el.child(

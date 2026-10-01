@@ -968,6 +968,28 @@ impl Chat {
             .collect()
     }
 
+    /// The subagents pinned above the composer, each with the index of its
+    /// card in [`Chat::entries`]: those still running, and while a turn is
+    /// under way, those it launched — since the last prompt — even ended,
+    /// so that a fan-out of five reads as five until the turn is over.
+    pub fn pinned_subagents(&self) -> Vec<(usize, &Subagent)> {
+        let last_prompt = self
+            .prompts()
+            .last()
+            .map_or(0, |prompt| prompt.entry);
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(entry, item)| match item {
+                Entry::Subagent(session) => Some((entry, self.subagent(session)?)),
+                _ => None,
+            })
+            .filter(|(entry, agent)| {
+                agent.state.is_none() || self.is_busy() && *entry > last_prompt
+            })
+            .collect()
+    }
+
     /// A subagent, by its session id.
     pub fn subagent(&self, session: &str) -> Option<&Subagent> {
         self.subagents.iter().find(|agent| agent.session == session)
@@ -1069,7 +1091,11 @@ impl Chat {
             (Pending::Authenticate, Ok(_)) => vec![self.open_session()],
             (Pending::Resume(replayed), Ok(result)) => {
                 self.resume = None;
-                if !replayed {
+                if replayed {
+                    // What the history left running belonged to a process
+                    // that is gone.
+                    self.close_abandoned_calls();
+                } else {
                     self.entries
                         .push(Entry::Notice(Notice::ResumedWithoutHistory));
                 }
@@ -1325,6 +1351,13 @@ impl Chat {
     /// started again, under a new id, with nothing ever closing the first —
     /// seen against claude-agent-acp 0.84. Left as it is, it spins for good.
     fn close_abandoned_calls(&mut self) {
+        // A subagent too: pinned above the composer while it runs, it would
+        // stay there for good.
+        for agent in &mut self.subagents {
+            if agent.state.is_none() {
+                agent.state = Some("cancelled".to_string());
+            }
+        }
         let entries = self.entries.iter_mut().chain(
             self.subagents
                 .iter_mut()
@@ -3310,6 +3343,45 @@ mod tests {
         assert!(chat.subagent("toolu_A").unwrap().permission.is_some());
         assert_eq!(chat.entries.len(), 2);
         assert_eq!(sent(&chat.answer("toolu_A", "y").unwrap())["id"], 42);
+    }
+
+    #[test]
+    fn the_turns_subagents_are_pinned_until_it_ends() {
+        let mut chat = ready_like_claude();
+        let agent_call = |id: &str, status: Option<&str>| {
+            let mut call = json!({ "sessionUpdate": "tool_call", "toolCallId": id,
+                "title": "Task", "rawInput": { "description": id },
+                "_meta": { "claudeCode": { "toolName": "Agent" } } });
+            if let Some(status) = status {
+                call["sessionUpdate"] = json!("tool_call_update");
+                call["status"] = json!(status);
+            }
+            call
+        };
+        let first = sent(&chat.prompt("one").unwrap());
+        update(&mut chat, agent_call("old", None));
+        update(&mut chat, agent_call("old", Some("completed")));
+        let done = |id: &Value| {
+            json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" } })
+                .to_string()
+        };
+        chat.receive(&done(&first["id"]));
+        assert!(chat.pinned_subagents().is_empty(), "the turn is over");
+        let second = sent(&chat.prompt("two").unwrap());
+        update(&mut chat, agent_call("a", None));
+        update(&mut chat, agent_call("b", None));
+        update(&mut chat, agent_call("a", Some("completed")));
+        // Ended or not, the turn's own stay, in the order they started.
+        let pinned: Vec<(usize, &str)> = chat
+            .pinned_subagents()
+            .into_iter()
+            .map(|(entry, agent)| (entry, agent.session.as_str()))
+            .collect();
+        assert_eq!(pinned, [(3, "a"), (4, "b")]);
+        // One the turn left running is closed with it.
+        chat.receive(&done(&second["id"]));
+        assert!(chat.pinned_subagents().is_empty());
+        assert_eq!(chat.subagent("b").unwrap().state.as_deref(), Some("cancelled"));
     }
 
     #[test]
