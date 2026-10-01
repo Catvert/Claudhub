@@ -2766,6 +2766,7 @@ impl ClaudhubApp {
             self.close_consoles_of(worktree, window, cx);
             self.close_files_of(worktree, window, cx);
             self.summaries.remove(worktree);
+            self.drop_scripts_of(worktree);
             self.forget_finders(worktree);
         }
         if self

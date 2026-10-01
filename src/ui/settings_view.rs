@@ -53,13 +53,14 @@ pub(super) enum Page {
     Lsp,
     Sentry,
     Databases,
+    Scripts,
     Logs,
 }
 
 impl Page {
     /// The sidebar's order, and the only place that knows it: the form is built
     /// by walking this list, so a page cannot be added to one and not the other.
-    const ORDER: [Page; 9] = [
+    const ORDER: [Page; 10] = [
         Page::Appearance,
         Page::Terminal,
         Page::Review,
@@ -68,6 +69,7 @@ impl Page {
         Page::Lsp,
         Page::Sentry,
         Page::Databases,
+        Page::Scripts,
         Page::Logs,
     ];
 
@@ -87,6 +89,7 @@ impl Page {
             Page::Lsp => tr!("settings-page-lsp"),
             Page::Sentry => tr!("settings-page-sentry"),
             Page::Databases => tr!("settings-page-databases"),
+            Page::Scripts => tr!("settings-page-scripts"),
             Page::Logs => tr!("settings-page-logs"),
         }
     }
@@ -280,6 +283,7 @@ impl ClaudhubApp {
                 Page::Lsp => lsp_page(),
                 Page::Sentry => sentry_page(),
                 Page::Databases => databases_page(),
+                Page::Scripts => scripts_page(self.scripts_listing()),
                 // The ring itself is behind an `Rc`: what is cloned here is
                 // three words.
                 Page::Logs => logs_page(logs.clone()),
@@ -1643,6 +1647,162 @@ fn sentry_page() -> SettingPage {
                 )
                 .description(tr!("settings-sentry-intro-help")),
             ),
+    )
+}
+
+/// What the scripts page shows of the scripts' folder, read from the
+/// application when the form is built.
+struct ScriptsListing {
+    /// The home's menu: Claudhub's own, then each script of the `home` kind.
+    homes: Choices,
+    /// `(title, id, kind)` of each script found.
+    found: Vec<(SharedString, SharedString, SharedString)>,
+    /// `(id, why)` of each folder that meant to be one.
+    broken: Vec<(SharedString, SharedString)>,
+}
+
+impl ClaudhubApp {
+    fn scripts_listing(&self) -> ScriptsListing {
+        use crate::scripts::Kind;
+        let homes = std::iter::once((SharedString::default(), tr!("settings-home-builtin")))
+            .chain(self.scripts.of_kind(Kind::Home).map(|script| {
+                (
+                    SharedString::from(script.id.clone()),
+                    SharedString::from(script.title.clone()),
+                )
+            }))
+            .collect();
+        let found = [Kind::Home, Kind::Tab]
+            .into_iter()
+            .flat_map(|kind| self.scripts.of_kind(kind))
+            .map(|script| {
+                let kind = match script.kind {
+                    Kind::Home => tr!("settings-script-home"),
+                    Kind::Tab => tr!("settings-script-tab"),
+                };
+                (
+                    SharedString::from(script.title.clone()),
+                    SharedString::from(script.id.clone()),
+                    kind,
+                )
+            })
+            .collect();
+        let broken = self
+            .scripts
+            .broken()
+            .iter()
+            .map(|(id, why)| {
+                (
+                    SharedString::from(id.clone()),
+                    SharedString::from(why.clone()),
+                )
+            })
+            .collect();
+        ScriptsListing {
+            homes,
+            found,
+            broken,
+        }
+    }
+}
+
+/// The focus view's scripts: which one is the home, and where they are.
+fn scripts_page(listing: ScriptsListing) -> SettingPage {
+    let ScriptsListing {
+        homes,
+        found,
+        broken,
+    } = listing;
+    SettingPage::new(Page::Scripts.title()).group(
+        SettingGroup::new()
+            .item(
+                SettingItem::new(
+                    tr!("settings-home-script"),
+                    text!(homes, home_script, SharedString::default()),
+                )
+                .description(tr!("settings-home-script-help")),
+            )
+            .item(SettingItem::render(move |_, _window, cx| {
+                let theme = cx.theme().clone();
+                let folder = crate::ui::scripts::root();
+                let shown = folder
+                    .as_ref()
+                    .map(|folder| SharedString::from(folder.display().to_string()))
+                    .unwrap_or_default();
+                let rows = found.iter().map(|(title, id, kind)| {
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().child(title.clone()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.muted_foreground)
+                                .child(id.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(kind.clone()),
+                        )
+                });
+                let broken = broken.iter().map(|(id, why)| {
+                    div()
+                        .w_full()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(SharedString::from(format!("{id} — {why}")))
+                });
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(tr!("settings-scripts-help")),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .child(shown),
+                            )
+                            .child(
+                                Button::new("scripts-folder")
+                                    .outline()
+                                    .small()
+                                    .icon(icon("folder-open"))
+                                    .label(tr!("settings-scripts-open"))
+                                    .disabled(folder.is_none())
+                                    .on_click(move |_, _, cx| {
+                                        let Some(folder) = &folder else {
+                                            return;
+                                        };
+                                        // Made on demand: the folder is where
+                                        // one drops the first script.
+                                        if let Err(error) = std::fs::create_dir_all(folder) {
+                                            log::warn!("scripts folder: {error}");
+                                        }
+                                        cx.open_with_system(folder);
+                                    }),
+                            ),
+                    )
+                    .children(rows)
+                    .children(broken)
+                    .into_any_element()
+            })),
     )
 }
 

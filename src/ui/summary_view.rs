@@ -95,6 +95,7 @@ impl ClaudhubApp {
         &mut self,
         path: &Path,
         view: View,
+        script: Option<&str>,
         at_work: &overview::AtWork,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -108,11 +109,12 @@ impl ClaudhubApp {
                 .filter_map(|id| at_work.terminals.get(id).copied())
                 .chain(self.chats_of(path).map(|chat| chat.doing)),
         );
+        let script_tabs = self.script_tabs(path, script, cx);
         let tabs: Vec<AnyElement> = View::ALL
             .into_iter()
             .map(|tab| {
                 let (glyph, title) = tab_name(tab);
-                let lit = tab == view;
+                let lit = script.is_none() && tab == view;
                 let count = match tab {
                     View::Git => self
                         .summaries
@@ -177,9 +179,11 @@ impl ClaudhubApp {
                 .children(signal.map(|tint| div().flex_none().size(px(6.)).rounded_full().bg(tint)))
                 .into_any_element()
             })
+            .chain(script_tabs)
             .collect();
         let detail = self.view_detail(path, view, cx);
         let add = match view {
+            _ if script.is_some() => None,
             View::Terminals => {
                 let worktree = path.to_path_buf();
                 Some(
@@ -234,7 +238,7 @@ impl ClaudhubApp {
                     .overflow_hidden()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .children(detail.filter(|_| view != View::Home)),
+                    .children(detail.filter(|_| view != View::Home && script.is_none())),
             )
             .children(add)
             .child(
@@ -251,6 +255,54 @@ impl ClaudhubApp {
                 }),
             )
             .into_any_element()
+    }
+
+    /// The scripts' tabs, after the board's own — see `ui::scripts`.
+    fn script_tabs(
+        &mut self,
+        path: &Path,
+        shown: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let tabs: Vec<(String, String, String)> = self
+            .scripts
+            .of_kind(crate::scripts::Kind::Tab)
+            .map(|script| {
+                // A name the shipped icons do not have would draw nothing.
+                let glyph = script
+                    .icon
+                    .clone()
+                    .filter(|name| super::Assets::get(&format!("icons/{name}.svg")).is_some())
+                    .unwrap_or_else(|| "layout-dashboard".to_string());
+                (script.id.clone(), script.title.clone(), glyph)
+            })
+            .collect();
+        tabs.into_iter()
+            .map(|(id, title, glyph)| {
+                let lit = shown == Some(id.as_str());
+                let board = path.to_path_buf();
+                tab_pill(
+                    h_flex()
+                        .id(SharedString::from(format!("focus-script-{id}")))
+                        .flex_none()
+                        .h(super::theme::bar_height(cx))
+                        .px_3(),
+                    lit,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_board_script(&board, &id, cx);
+                }))
+                .child(
+                    icon(&glyph)
+                        .xsmall()
+                        .when(lit, |icon| icon.text_color(theme.ring)),
+                )
+                .child(SharedString::from(title))
+                .into_any_element()
+            })
+            .collect()
     }
 
     /// The home: the strip of what waits, then the two columns.
@@ -420,7 +472,7 @@ impl ClaudhubApp {
     /// the dot and the word — and the one chosen under them, to type in.
     /// At the right of the sub-tabs, what opens another, and the way to
     /// them all side by side.
-    fn home_terminals(
+    pub(super) fn home_terminals(
         &mut self,
         path: &Path,
         at_work: &overview::AtWork,
@@ -798,7 +850,7 @@ impl ClaudhubApp {
 
     /// The to-do list: its open tasks, ticked here, how many are done, and
     /// — on the worktree on show — the field that adds one.
-    fn home_tasks(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_tasks(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let todo = self.review.get(path).and_then(|state| state.todo.clone());
         let on_show = self.active.as_deref() == Some(path);
@@ -868,7 +920,7 @@ impl ClaudhubApp {
 
     /// The principal note: its title and its first lines, the headings
     /// standing out. Without a note, the button that writes one.
-    fn home_note(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_note(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let (glyph, title) = view_name(View::Notes);
         let Some(note) = self.principal_note(path, cx) else {
@@ -951,7 +1003,7 @@ impl ClaudhubApp {
     /// The branch: its name and base, how far from its remote — with pull
     /// and push —, the commits it adds and the way to merge them; on the
     /// worktree on show, its pull request and its last CI run.
-    fn home_branch(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_branch(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let worktree = self.repos.worktree(path);
@@ -1074,7 +1126,7 @@ impl ClaudhubApp {
     /// review, threads still open — and its last CI run; without one, the
     /// button that opens one. For the worktree on show, the one the GitHub
     /// state reads for.
-    fn home_pr(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_pr(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let (glyph, title) = view_name(View::Pr);
         let on_show = self.active.as_deref() == Some(path);
         // Without a pull request, the button that opens one stands at the
@@ -1252,7 +1304,7 @@ impl ClaudhubApp {
 
     /// What waits for a commit: its files, the first few, and the way to
     /// the git tab where it is committed.
-    fn home_to_commit(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_to_commit(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         // Borrowed: the card shows a handful, and the status can list
         // thousands.
@@ -1349,7 +1401,7 @@ impl ClaudhubApp {
 
     /// The review: its size, its files by their place in the project, when
     /// it was last read and what remarks are still open.
-    fn home_review(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_review(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let diff = super::theme::DiffColors::of(cx);
@@ -1593,7 +1645,7 @@ impl ClaudhubApp {
     /// its ↻ and ■. `None` when nothing runs — what can be started is the
     /// board title's widget, and a card listing thirty recipes said less
     /// than its selector.
-    fn home_run(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn home_run(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
         let configs: Vec<_> = self
             .run_configs(path)
             .into_iter()

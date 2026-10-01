@@ -92,6 +92,7 @@ impl ClaudhubApp {
     ) -> AnyElement {
         let shown = &frame.shown;
         let at_work = self.prepare_laid_out(shown, &frame.doings, cx);
+        self.scripts.at_work = at_work.clone();
         let gap = window.rem_size() * 0.75;
         let sidebar = self.render_focus_sidebar(shown, &frame.doings, cx);
         let main: AnyElement = match self.overview_zoomed.clone() {
@@ -1080,11 +1081,9 @@ impl ClaudhubApp {
             None => {}
         }
         super::store::Store::update_global(cx, |store| {
-            store
-                .worktrees
-                .entry(path.to_path_buf())
-                .or_default()
-                .focus_view = Some(view);
+            let state = store.worktrees.entry(path.to_path_buf()).or_default();
+            state.focus_view = Some(view);
+            state.focus_script = None;
         });
         self.overview_zoomed = None;
         cx.notify();
@@ -1106,11 +1105,18 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = self.board_view(path, cx);
+        // A script's tab, chosen, stands in the place of the view; a home
+        // script, in the place of the home.
+        let script = self.board_script(path, cx);
+        let shown_script = script
+            .clone()
+            .or_else(|| (view == View::Home).then(|| self.home_script(cx)).flatten());
         let column_min = super::settings::Settings::global(cx).terminal.column_min;
         // Never narrower than what its view lays side by side: under it, the
         // view ran over the next board. The terminals' tab scrolls its
         // terminals, not the board.
         let least_width = match view {
+            _ if shown_script.is_some() => column_min,
             View::Home => super::summary_view::HOME_LEAST,
             View::Git | View::Review | View::Pr => {
                 match self.git_face.get(path).copied().unwrap_or_default() {
@@ -1152,8 +1158,11 @@ impl ClaudhubApp {
             .h(super::theme::toolbar_height(cx))
             .items_center()
             .child(self.board_title(path, actions, run, cx));
-        let tabs = self.render_board_tabs(path, view, at_work, cx);
-        let shown = self.render_board_view(path, view, at_work, window, cx);
+        let tabs = self.render_board_tabs(path, view, script.as_deref(), at_work, cx);
+        let shown = match shown_script {
+            Some(id) => self.script_element(path, &id, window, cx),
+            None => self.render_board_view(path, view, at_work, window, cx),
+        };
         v_flex()
             .relative()
             // Its own id, under which its ids are told apart from the next
@@ -1238,7 +1247,7 @@ impl ClaudhubApp {
     /// left the branch, how far it is from its remote and from its base —
     /// with the way to merge it there — and the commits it adds, over the
     /// Changes panel and its commit box; the diff on the right.
-    fn render_git_view(
+    pub(super) fn render_git_view(
         &mut self,
         path: &Path,
         window: &mut Window,
@@ -1295,7 +1304,7 @@ impl ClaudhubApp {
 
     /// The notes tab: its two faces — the notes, and the to-do list —, the
     /// face's count beside its name.
-    fn render_notes_tab(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_notes_tab(&mut self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
         let face = self.notes_face.get(path).copied().unwrap_or_default();
         let open_tasks = self
             .review
@@ -1644,7 +1653,7 @@ impl ClaudhubApp {
     /// The tests view — the editor's two panels side by side: the tree of
     /// the suites, filtered by default to the tests the branch touched, and
     /// the run being followed. The worktree on show's, as those panels are.
-    fn render_tests_view(
+    pub(super) fn render_tests_view(
         &mut self,
         path: &Path,
         window: &mut Window,
@@ -1732,7 +1741,7 @@ impl ClaudhubApp {
 
     /// The terminals view: every terminal of the worktree side by side,
     /// scrolling sideways when they outgrow it.
-    fn render_terminals_view(
+    pub(super) fn render_terminals_view(
         &self,
         path: &Path,
         at_work: &overview::AtWork,

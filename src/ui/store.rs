@@ -52,6 +52,9 @@ pub struct WorktreeState {
     /// What the right of its board shows in the home screen's focus view,
     /// once chosen — see `ui::focus`.
     pub focus_view: Option<crate::ui::focus::View>,
+    /// The script tab its board shows instead, by the script's id — see
+    /// `ui::scripts`. A view chosen afterwards clears it.
+    pub focus_script: Option<String>,
     /// The note its board's home shows as its principal one.
     pub pinned_note: Option<PathBuf>,
     /// The terminals that were open, in order, to open again — see

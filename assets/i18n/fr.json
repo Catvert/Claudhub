@@ -1221,5 +1221,17 @@
   "generate-diagram-placeholder": "Ce qu'il doit montrer — « le flux de connexion »…",
   "generate-no-agent": "Aucun profil d'agent n'est réglé.",
   "generate-note-running": "✦ Note en cours…",
-  "generate-diagram-running": "✦ Diagramme en cours…"
+  "generate-diagram-running": "✦ Diagramme en cours…",
+  "scripts-broken": "Le script « %{id} » ne peut pas être chargé : %{why}",
+  "scripts-missing": "Aucun script nommé « %{id} » dans le dossier des scripts.",
+  "scripts-failed": "Le script « %{title} » n’a pas démarré : %{why}",
+  "scripts-unavailable": "Ce script ne peut pas être affiché",
+  "settings-page-scripts": "Scripts",
+  "settings-home-builtin": "Accueil de Claudhub",
+  "settings-home-script": "Accueil des tableaux",
+  "settings-home-script-help": "Un script de type « home » peut prendre la place de l’Accueil de chaque tableau, et disposer ses cartes autrement.",
+  "settings-script-home": "accueil",
+  "settings-script-tab": "onglet",
+  "settings-scripts-help": "Chaque dossier qui contient un claudhub.json est un script : un accueil, ou un onglet de plus sur les tableaux. Une modification de ses fichiers le recharge.",
+  "settings-scripts-open": "Ouvrir le dossier"
 }

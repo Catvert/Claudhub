@@ -43,6 +43,7 @@ pub mod lsp;
 pub mod outside;
 pub mod release;
 pub mod runtime;
+pub mod scripts;
 pub mod sentry;
 pub mod skill;
 pub mod suite;

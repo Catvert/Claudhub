@@ -540,6 +540,13 @@ pub struct Settings {
     /// written, and it has no business being locked in a state JSON nothing else
     /// can read.
     pub notes_dir: String,
+    /// The script that takes the place of the boards' home, by its folder's
+    /// name under `<config>/scripts/` — see `ui::scripts`.
+    ///
+    /// Empty: Claudhub's own home. A name with no script of the `home` kind
+    /// behind it reads as empty, so a script removed by hand leaves the boards
+    /// their home rather than an error.
+    pub home_script: String,
     /// The WSL distribution the workers run in, on Windows.
     ///
     /// Empty: it has not been chosen yet, and the interface asks for it on first
@@ -650,6 +657,7 @@ impl Default for Settings {
             vim_mode: false,
             vim_clipboard: false,
             notes_dir: String::new(),
+            home_script: String::new(),
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             folded_panels: Vec::new(),

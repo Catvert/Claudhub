@@ -2161,6 +2161,13 @@ impl ClaudhubApp {
                     .to_string(),
             );
         }
+        // Where the focus view's scripts are: the agent is who writes them
+        // (`ui::scripts`).
+        if let Some(scripts) = crate::ui::scripts::root() {
+            launch
+                .env
+                .insert("CLAUDHUB_SCRIPTS".into(), scripts.display().to_string());
+        }
         // A pty we cannot open is a system problem: descriptor limit reached,
         // `/dev/pts` missing. We give the terminal up and say so, rather than
         // panic in the middle of a render — which is what this code used to do,

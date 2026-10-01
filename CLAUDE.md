@@ -95,6 +95,7 @@ src/
   suite.rs      les suites de tests (Pest, Vitest, Jest) : relevé, filtre exact,
                 run suivi, prompt d'un échec — pur
   canvas.rs     un nœud de l'accueil sur disque : l'en-tête, le nom — pur
+  scripts.rs    les scripts de la vue Focus : manifeste, relevé du dossier — pur
   skill.rs      la skill Claude Code livrée : où, quelle version, l'installer
   agent.rs      les agents dans `/proc`, et le suivi (travaille, fini, attend)
   agent_hooks.rs  les hooks de Claude Code : la ligne shell, le fichier lu, la
@@ -150,6 +151,8 @@ src/
     focus.rs         l'accueil, vue Focus : quels worktrees, quelle vue, quelle
                      note principale — pur
     focus_view.rs    la barre latérale des worktrees, les tableaux et leurs vues
+    scripts.rs       les scripts lancés : runtime gpui-shell, module `claudhub`,
+                     montage, rechargement
     summary_view.rs  les onglets d'un tableau, et son Accueil
     pr_view.rs       l'onglet PR : le formulaire, ou la PR, ses vérifications,
                      ses fils de revue et ses gestes
@@ -514,6 +517,33 @@ parent centré sur ses enfants.
   pid**, puis le mot des hooks, puis la devinette par le processeur. **Rien
   n'y est animé** : chaque image d'une animation re-rendait l'accueil entier.
 
+**Les scripts de la vue Focus** (`crate::scripts`, `ui::scripts`) : un dossier
+par script sous `<config>/scripts/` (`$CLAUDHUB_SCRIPTS`), un `claudhub.json`
+(`kind` : `tab`, un onglet de plus sur les tableaux ; `home`, l'Accueil que les
+réglages nomment) et un module JavaScript lancé par **gpui-shell** (QuickJS),
+du fork de Kit. Le script dispose, Rust peint et agit : le module `claudhub`
+lit l'application, ses actions sont nos méthodes (un `Cmd`, jamais git), ses
+composants sont nos cartes et nos onglets (`HostModule::component`).
+
+- **Une vue par script et par tableau**, chacune née sous sa propre `Policy`,
+  dont le module est lié au worktree : une fonction hôte ne sait pas quelle
+  vue l'appelle. La politique est posée en défaut le temps du chargement et du
+  montage, puis remise à vide.
+- **Monter exécute `init`, qui lit l'application** : jamais depuis son rendu,
+  où elle est empruntée — `Window::defer`. Une action attend que l'appel se
+  déroule (`App::defer`), puis prend la fenêtre.
+- **Un composant lit l'application avant de peindre** : en mode retenu, une
+  vue qui ne l'a pas lue garde sa mise en page et ses cartes périmées.
+  Après chaque lot d'événements, les vues sont rafraîchies (`ScriptView::refresh`,
+  le script retourne).
+- **Pas de `ShellRoot`** : la racine de la fenêtre est celle de Kit, et les
+  deux veulent l'être. Dialogues, toasts et tooltips d'un script ne
+  s'affichent pas ; `notify()` passe par nos bulles.
+- **Aucune capacité** : ni fichiers, ni processus, ni réseau. Le dossier est
+  relu hors du thread toutes les demi-secondes ; une sauvegarde cassée laisse
+  la vue qui marchait, et l'erreur part en bulle. Les exemples
+  (`assets/scripts/`) ne sont écrits qu'à la création du dossier.
+
 **Les nœuds de l'accueil sont des fichiers** (`crate::canvas`,
 `ui::canvas_view`) : un Markdown à en-tête plat par nœud, dans
 `.claudhub/notes/` du checkout (**versionné**) ou dans le coffre du worktree
@@ -570,7 +600,9 @@ l'accueil relit les projets affichés toutes les deux secondes ; la main n'y
   un autre nom.
 
 **Le fork de GPUI Kit** : seuls `gpui-base` et `gpui-component` sont patchés
-(`Cargo.toml`), la façade `gpui-kit` vient de crates.io. **GPUI vient de
+(`Cargo.toml`), la façade `gpui-kit` vient de crates.io ; `gpui-shell`, que
+Kit ne publie pas, est pris dans le fork **au même `rev`**, avec le patch
+`rquickjs` que le workspace de Kit pose à sa racine. **GPUI vient de
 gpui-fast** (mode retenu) : les crates `compat/` de ce dépôt portent les noms et
 la version des `gpui-pre` que Kit épingle ; le fork est donc épinglé sur sa
 branche `claudhub-v0.7.0-gpui-fast`, qui suit l'API de gpui-fast — un correctif
@@ -704,8 +736,9 @@ seulement peint**. Une PR s'ouvre dans un worktree par le dialogue de création
 la PR d'un fork est récupérée dans `pr/<n>`.
 
 **`outside.rs`** — une liste fermée de ce qu'on fait hors du dépôt, chacun avec
-sa file. Le système d'extension est le `justfile`, le `wt.toml` et les commandes
-des réglages ; il n'y a pas de plugins. Tout programme autre que `git` se lance
+sa file. Le système d'extension est le `justfile`, le `wt.toml`, les commandes
+des réglages et les scripts de la vue Focus, sans capacité ; il n'y a pas de
+plugins natifs. Tout programme autre que `git` se lance
 par `outside::Bounded` (stdin fermé, deux sorties lues, plafond,
 `wsl::no_console`) ; `LC_ALL=C` s'y **demande** (`in_english`), parce qu'une
 sortie lue par l'utilisateur ne doit pas perdre ses accents.
@@ -875,5 +908,6 @@ là où une régression donne une liste plausible mais fausse. Le même motif
 partout : **la décision vit dans un module pur, devant la vue qui la peint**
 (`notes.rs`, `focus.rs`, `inflight.rs`, `vim.rs`, `motion.rs`, `jumps.rs`,
 `merge.rs`, `hunks.rs`, `quick.rs`, `db/scope.rs`…).
-`watch::tests::a_real_write_reaches_the_receiver` est le seul test qui touche
-le système de fichiers ; `tests/server_wire.rs` lance le vrai serveur.
+`watch::tests::a_real_write_reaches_the_receiver` et
+`ui::scripts::tests::the_shipped_scripts_load_against_the_module` (un dossier
+temporaire) sont les seuls tests qui touchent le système de fichiers ; `tests/server_wire.rs` lance le vrai serveur.

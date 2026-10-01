@@ -1,0 +1,9 @@
+{
+  "title": { "fr": "Tableau de bord", "en": "Dashboard" },
+  "kind": "tab",
+  "icon": "bot",
+  "description": {
+    "fr": "Un onglet écrit de bout en bout : les agents du worktree, ce qui attend un commit, les tâches ouvertes.",
+    "en": "A tab written end to end: the worktree's agents, what waits for a commit, the open tasks."
+  }
+}

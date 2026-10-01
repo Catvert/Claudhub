@@ -1,0 +1,332 @@
+//! The scripts that dress the focus view: a folder each, a `claudhub.json`
+//! saying what it is, and a JavaScript entry the gpui-shell runtime loads.
+//!
+//! A script is either a **tab** — one more view under a board's tabs, beside
+//! the git, tests and notes ones — or a **home**, which takes the place of
+//! the board's own when the settings name it. Both are written mostly by
+//! the agents, so a manifest is read leniently, field by field: a field
+//! missing or of another type falls back, and only what makes the folder
+//! meaningless — an entry that is not there — refuses it.
+//!
+//! Pure but for [`discover`] and [`stamp`], which read a folder: the UI
+//! calls both off its thread.
+
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde_json::Value;
+
+/// The file a script's folder is recognised by.
+pub const MANIFEST: &str = "claudhub.json";
+
+/// The entry a manifest that names none is loaded from.
+pub const DEFAULT_ENTRY: &str = "main.js";
+
+/// Where a script stands in a board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// One more tab under a board's.
+    Tab,
+    /// The board's home, when the settings name it.
+    Home,
+}
+
+/// A script found on disk, not yet run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Script {
+    /// Its folder's name: what the settings and the store retain.
+    pub id: String,
+    pub dir: PathBuf,
+    pub title: String,
+    /// A Lucide icon name, as the interface's own icons are named.
+    pub icon: Option<String>,
+    pub kind: Kind,
+    /// Relative to `dir`.
+    pub entry: String,
+    pub description: String,
+}
+
+/// Whether a folder name can be a script's id: what the settings retain,
+/// and what names its data — so nothing that could leave a folder.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// A manifest read: the script, or why the folder is not one. `language`
+/// picks the title and the description when they are written per language
+/// — `{"fr": "…", "en": "…"}` —, English failing that, then any.
+pub fn parse(id: &str, dir: &Path, manifest: &str, language: &str) -> Result<Script, String> {
+    if !valid_id(id) {
+        return Err(format!(
+            "`{id}` is not a script name: letters, digits, `-`, `_` and `.` only"
+        ));
+    }
+    let value: Value =
+        serde_json::from_str(manifest).map_err(|error| format!("{MANIFEST}: {error}"))?;
+    if !value.is_object() {
+        return Err(format!("{MANIFEST} is not a JSON object"));
+    }
+    let title = localized(&value, "title", language)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(id)
+        .to_string();
+    let kind = match crate::json::string(&value, "kind").map(str::trim) {
+        Some("home") => Kind::Home,
+        Some("tab") | None => Kind::Tab,
+        Some(other) => {
+            return Err(format!(
+                "{MANIFEST}: unknown kind `{other}` (`tab` or `home`)"
+            ))
+        }
+    };
+    let entry = crate::json::string(&value, "entry")
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .unwrap_or(DEFAULT_ENTRY)
+        .to_string();
+    if !inside(&entry) {
+        return Err(format!(
+            "{MANIFEST}: the entry `{entry}` must be a path inside the script's folder"
+        ));
+    }
+    Ok(Script {
+        id: id.to_string(),
+        dir: dir.to_path_buf(),
+        title,
+        icon: crate::json::string(&value, "icon")
+            .map(str::trim)
+            .filter(|icon| !icon.is_empty())
+            .map(str::to_string),
+        kind,
+        entry,
+        description: localized(&value, "description", language)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// A text field written once, or once per language.
+fn localized<'a>(value: &'a Value, key: &str, language: &str) -> Option<&'a str> {
+    match value.get(key)? {
+        Value::String(text) => Some(text),
+        Value::Object(texts) => [language, "en"]
+            .iter()
+            .find_map(|language| texts.get(*language).and_then(Value::as_str))
+            .or_else(|| texts.values().find_map(Value::as_str)),
+        _ => None,
+    }
+}
+
+/// A relative path that stays under its folder: no root, no `..`.
+fn inside(entry: &str) -> bool {
+    let path = Path::new(entry);
+    !path.is_absolute()
+        && !entry.starts_with('/')
+        && !entry.starts_with('\\')
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// The scripts of a folder, and the folders that meant to be one but are
+/// not — `(id, why)` —, each sorted by id.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Found {
+    pub scripts: Vec<(Script, Stamp)>,
+    pub broken: Vec<(String, String)>,
+}
+
+/// Every script under `root`, one folder deep. A folder without a manifest
+/// is not a script and says nothing; one whose manifest does not read, or
+/// whose entry is missing, is listed as broken — the agent that wrote it
+/// is told why.
+pub fn discover(root: &Path, language: &str) -> Found {
+    let mut found = Found::default();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    let mut dirs: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
+        .filter(|(name, _)| !name.starts_with('.'))
+        .collect();
+    dirs.sort();
+    for (id, dir) in dirs {
+        let Ok(manifest) = std::fs::read_to_string(dir.join(MANIFEST)) else {
+            continue;
+        };
+        match parse(&id, &dir, &manifest, language) {
+            Ok(script) if !dir.join(&script.entry).is_file() => {
+                let why = format!("its entry `{}` is missing", script.entry);
+                found.broken.push((id, why));
+            }
+            Ok(script) => {
+                let stamp = stamp(&dir);
+                found.scripts.push((script, stamp));
+            }
+            Err(why) => found.broken.push((id, why)),
+        }
+    }
+    found
+}
+
+/// Writes the shipped scripts into `root` when it does not exist yet: the
+/// first scripts one sees are examples to change. Once the folder is there
+/// it is the user's — nothing is written again, nothing comes back.
+pub fn seed(root: &Path, files: &[(&str, &str)]) -> std::io::Result<bool> {
+    if root.exists() {
+        return Ok(false);
+    }
+    for (path, content) in files {
+        let path = root.join(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)?;
+    }
+    Ok(true)
+}
+
+/// What a script's sources look like from outside: a change to one of them
+/// changes this, which is what a reload waits for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stamp {
+    newest: Option<SystemTime>,
+    files: usize,
+    bytes: u64,
+}
+
+/// How deep a script's sources are looked for.
+const STAMP_DEPTH: usize = 6;
+/// Past this many sources, a folder is not stamped further.
+const STAMP_FILES: usize = 2048;
+
+/// The stamp of a script's folder: its `.js`, `.mjs` and manifest, without
+/// `node_modules` nor hidden folders — the runtime writes `gpui-kit.d.ts`
+/// in it at every load, which must not reload it again.
+pub fn stamp(dir: &Path) -> Stamp {
+    let mut stamp = Stamp::default();
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((folder, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth < STAMP_DEPTH && name != "node_modules" {
+                    pending.push((entry.path(), depth + 1));
+                }
+                continue;
+            }
+            if !is_source(&name) || stamp.files >= STAMP_FILES {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            stamp.files += 1;
+            stamp.bytes = stamp.bytes.saturating_add(metadata.len());
+            if let Ok(modified) = metadata.modified() {
+                stamp.newest = stamp.newest.max(Some(modified));
+            }
+        }
+    }
+    stamp
+}
+
+fn is_source(name: &str) -> bool {
+    name == MANIFEST || name.ends_with(".js") || name.ends_with(".mjs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(manifest: &str) -> Result<Script, String> {
+        parse("board", Path::new("/scripts/board"), manifest, "fr")
+    }
+
+    #[test]
+    fn a_title_per_language_is_read_in_the_interfaces() {
+        let manifest = r#"{"title": {"en": "Agents", "fr": "Les agents"},
+                           "description": {"de": "Nur Deutsch"}}"#;
+        let script = read(manifest).unwrap();
+        assert_eq!(script.title, "Les agents");
+        assert_eq!(script.description, "Nur Deutsch");
+        let english = parse("board", Path::new("/b"), manifest, "it").unwrap();
+        assert_eq!(english.title, "Agents");
+    }
+
+    #[test]
+    fn an_empty_manifest_is_a_tab_named_after_its_folder() {
+        let script = read("{}").unwrap();
+        assert_eq!(script.title, "board");
+        assert_eq!(script.kind, Kind::Tab);
+        assert_eq!(script.entry, DEFAULT_ENTRY);
+        assert_eq!(script.icon, None);
+    }
+
+    #[test]
+    fn the_fields_are_read_one_by_one() {
+        let script = read(
+            r#"{"title": " CI ", "kind": "home", "icon": "activity",
+                "entry": "src/app.js", "description": null, "extra": 1}"#,
+        )
+        .unwrap();
+        assert_eq!(script.title, "CI");
+        assert_eq!(script.kind, Kind::Home);
+        assert_eq!(script.icon.as_deref(), Some("activity"));
+        assert_eq!(script.entry, "src/app.js");
+        assert_eq!(script.description, "");
+    }
+
+    #[test]
+    fn a_field_of_another_type_falls_back() {
+        let script = read(r#"{"title": 3, "icon": "", "entry": false}"#).unwrap();
+        assert_eq!(script.title, "board");
+        assert_eq!(script.icon, None);
+        assert_eq!(script.entry, DEFAULT_ENTRY);
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused_rather_than_guessed() {
+        assert!(read(r#"{"kind": "panel"}"#).unwrap_err().contains("panel"));
+    }
+
+    #[test]
+    fn an_entry_cannot_leave_its_folder() {
+        for entry in ["../x.js", "/etc/x.js", "a/../../x.js", "\\\\host\\x.js"] {
+            let manifest = format!(r#"{{"entry": {entry:?}}}"#);
+            assert!(read(&manifest).is_err(), "{entry}");
+        }
+        assert!(read(r#"{"entry": "lib/main.mjs"}"#).is_ok());
+    }
+
+    #[test]
+    fn a_manifest_that_is_not_an_object_is_refused() {
+        assert!(read("[]").is_err());
+        assert!(read("not json").is_err());
+    }
+
+    #[test]
+    fn an_id_names_one_folder_and_nothing_else() {
+        assert!(valid_id("ci-board_2.1"));
+        for id in ["", ".hidden", "a/b", "a b", "..", "é"] {
+            assert!(!valid_id(id), "{id}");
+        }
+    }
+}

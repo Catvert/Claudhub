@@ -1200,6 +1200,9 @@ pub struct ClaudhubApp {
     pub(super) last_opened: HashMap<PathBuf, u64>,
     /// The face each board's git tab shows — see `focus::GitFace`; not kept.
     pub(super) git_face: HashMap<PathBuf, crate::ui::focus::GitFace>,
+    /// The focus view's scripts: found, mounted, and their runtime — see
+    /// `ui::scripts`.
+    pub(super) scripts: crate::ui::scripts::Scripts,
     /// The face each board's notes tab shows; not kept.
     pub(super) notes_face: HashMap<PathBuf, crate::ui::focus::NotesFace>,
     /// The dividers of each board's two-sided views, by board and view —
@@ -1732,6 +1735,7 @@ impl ClaudhubApp {
             home_terminal: HashMap::new(),
             last_opened: HashMap::new(),
             git_face: HashMap::new(),
+            scripts: Default::default(),
             notes_face: HashMap::new(),
             board_splits: HashMap::new(),
             pr_form: None,
@@ -2196,6 +2200,8 @@ impl ClaudhubApp {
                         for evt in batch {
                             app.handle_event(evt, window, cx);
                         }
+                        // What the scripts read may have changed with them.
+                        app.refresh_scripts(cx);
                     })
                     .is_ok();
                 if !alive {

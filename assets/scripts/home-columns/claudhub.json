@@ -1,0 +1,9 @@
+{
+  "title": { "fr": "Accueil en colonnes", "en": "Home in columns" },
+  "kind": "home",
+  "icon": "layout-grid",
+  "description": {
+    "fr": "L'Accueil de Claudhub réarrangé : la branche à gauche, la revue et les tâches au milieu, les terminaux à droite.",
+    "en": "Claudhub's home rearranged: the branch on the left, the review and the tasks in the middle, the terminals on the right."
+  }
+}

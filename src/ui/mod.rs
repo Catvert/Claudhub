@@ -62,6 +62,7 @@ mod review;
 mod revive;
 mod run;
 mod run_view;
+mod scripts;
 mod scroll;
 mod search;
 mod search_view;
@@ -177,6 +178,10 @@ pub fn run(
     // Kit opens the matching native GPUI platform and initializes its layers.
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
+        // The scripts' runtime — see `scripts`: its style table, and the base
+        // layer it builds on, which `gpui_kit::init` set up already and which
+        // this leaves as it is. Before the keymap takes its snapshot.
+        gpui_shell::init(cx);
         app::Frame::register(cx);
         highlight::register_languages();
         install_fonts(cx);

@@ -1,8 +1,8 @@
 ---
 name: claudhub
-description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes live on disk and the exact file format.
+description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 2 -->
+<!-- claudhub-skill-version: 3 -->
 
 # Claudhub
 
@@ -20,6 +20,8 @@ reviews, which are plain Markdown files** you can read and write.
   when asked about the environment. Never write to it.
 - `$CLAUDHUB_TODO` — the worktree's task list (Markdown checkboxes). You may
   tick and add tasks.
+- `$CLAUDHUB_SCRIPTS` — the folder of the focus view's scripts: see
+  [Scripts](#scripts).
 
 ## Where nodes live
 
@@ -130,3 +132,74 @@ A caption: what the diagram shows, and what it leaves out.
   a `viewBox` and a sensible width and height; Claudhub scales it to its node.
 - When a diagramming skill produces the drawing, save its SVG output here
   rather than only in a scratch folder.
+
+## Scripts
+
+The home screen's **focus view** shows one board per worktree, with tabs
+(Home, Git, Tests, Notes, Terminals). A **script** adds a tab to every board,
+or replaces the boards' Home. Scripts are JavaScript run by Claudhub's
+embedded runtime (gpui-shell, QuickJS) — not a browser, not Node.
+
+One folder per script in `$CLAUDHUB_SCRIPTS/<id>/`; `<id>` is lower-case
+letters, digits, `-`, `_`, `.`. It holds:
+
+- `claudhub.json` — `{"title": "…", "kind": "tab" | "home", "icon": "…",
+  "entry": "main.js", "description": "…"}`. Only the file is required; the
+  title defaults to the id, the kind to `tab`, the entry to `main.js`. A
+  title or description can be `{"fr": "…", "en": "…"}`. `icon` is a Lucide
+  name.
+- the entry, an ES module whose default export is a class extending `View`.
+
+Saving any file reloads the script on every board within a second. If it
+fails to load, the previous version stays on screen and Claudhub shows the
+error in a bubble — read it, fix, save again. A `home` script is used once
+the user picks it in Settings → Scripts. Claudhub writes `gpui-kit.d.ts`
+beside the entry at each load: **read it** for the exact element, style and
+module signatures before writing code.
+
+```js
+import { View, div } from "gpui-kit";
+import { h_flex, v_flex, Button, Checkbox } from "gpui-base";
+import { worktree, tasks, open_tab, BranchCard } from "claudhub";
+
+export default class Example extends View {
+  init(props, cx) { this.expanded = false; }   // once; no constructor
+  render(cx) {                                  // returns one element
+    const colors = cx.theme().colors;          // follows the user's theme
+    return v_flex().size_full().gap(12).overflow_y_scrollbar()
+      .child(div().text_size(16).font_semibold().child(worktree().name))
+      .child(BranchCard.new("branch"))          // a card Claudhub paints
+      .child(Button.new("git").child("Git").on_click(() => open_tab("git")));
+  }
+}
+```
+
+- Builders are GPUI's, in `snake_case`: `.gap(8)`, `.p(12)`, `.text_size(12)`,
+  `.bg(colors.surface)`, `.border(1)`, `.rounded(8)`, `.flex_1()`, `.min_w_0()`,
+  `.when(cond, el => …)`, `.child(x)`, `.children([…])`. Colors:
+  `colors.background`, `foreground`, `surface`, `muted`, `muted_foreground`,
+  `primary`, `destructive`, `border`.
+- State is plain fields on `this`; after changing one in an event, call
+  `cx.notify()`. There are no hooks and no signals.
+- The `claudhub` module answers for the board's worktree. It **reads**
+  `worktree()`, `changes()`, `tasks()`, `terminals()`, `scripts()`,
+  `language()` — Claudhub runs `render` again when they may have changed —
+  and **acts**: `open_tab(name)`, `open_script(id)`,
+  `toggle_task(line, done)`, `open_terminal()`, `send_to_agent(text)`,
+  `notify(text)`.
+- Its **components** are Claudhub's own pieces, to rearrange rather than
+  rewrite: `BranchCard`, `PullRequestCard`, `ChangesCard`, `ReviewCard`,
+  `TasksCard`, `NoteCard`, `RunCard`, `Terminals`, `DefaultHome`, `GitTab`,
+  `TestsTab`, `NotesTab`, `TerminalsTab` — each `X.new("an-id")`. Use each
+  tab at most once per script.
+- There are **no dialogs, toasts or tooltips** in a script: say things with
+  `notify(text)` or in the view itself.
+- A script has **no file, process or network access**: what it knows of
+  the worktree comes from the module. Never run git or shell commands from
+  it; ask the user, or use `send_to_agent`.
+- Keep `render` cheap — it runs on every refresh. Split a large view into
+  small helper functions; do not animate.
+- `$CLAUDHUB_SCRIPTS/home-columns` and `$CLAUDHUB_SCRIPTS/dashboard` are
+  examples written at first launch: a home rearranged from the cards, and a
+  tab built from the module's data.
+
