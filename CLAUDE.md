@@ -926,7 +926,8 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   `notify`**, et tout ce qui n'est pas une vue en cache se re-rend avec elle.
   Un rendu ne lit donc pas les vues de terminal (elles notifient à chaque
   sortie) : il lit les copies d'`OpenTerminal` (`label`, `child`, `focus`,
-  `exited`, `place`). Sur l'accueil, peint tout entier par la racine, un
+  `exited`, `place`) et d'`OpenChat` — le focus compris :
+  `view.focus_handle(cx)` **lit** la vue (`ui::home_render_tests`). Sur l'accueil, peint tout entier par la racine, un
   seul Claude caché le redessinait à la cadence de l'écran.
 - **Un handle de focus survit à l'élément qui le portait**, et la fenêtre
   devient sourde à toutes nos liaisons ; `app::reclaim_stranded_focus`, en tête

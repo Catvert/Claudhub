@@ -25,6 +25,9 @@ pub struct OpenChat {
     /// Refreshed by the application whenever the chat moves (`refresh`).
     pub label: gpui_kit::SharedString,
     pub doing: crate::ui::overview::Doing,
+    /// Its field's focus, fixed for the view's life: a frame asks whether it
+    /// holds the focus without reading the view.
+    pub focus: gpui_kit::FocusHandle,
     /// When the chat was last written to: what `send_to_agent` hands text
     /// to, among a worktree's chats.
     pub last_used: std::time::Instant,
@@ -162,6 +165,7 @@ impl ClaudhubApp {
             chat,
             label: gpui_kit::SharedString::default(),
             doing: crate::ui::overview::Doing::Rest,
+            focus: gpui_kit::Focusable::focus_handle(view.read(cx), cx),
             last_used: std::time::Instant::now(),
         });
         self.last_opened

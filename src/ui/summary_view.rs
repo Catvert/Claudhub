@@ -21,7 +21,7 @@ use gpui_kit::component::{
     menu::DropdownMenu as _,
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
 };
-use gpui_kit::{div, prelude::*, px, AnyElement, Context, Focusable as _, SharedString, Window};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -634,7 +634,7 @@ impl ClaudhubApp {
             // A chat under its sub-tab, framed like a terminal.
             None if chat.is_some() => {
                 let chat = chat.expect("matched just above");
-                chat_frame(&chat.view, chat.doing, window, &theme, cx)
+                chat_frame(chat, window, &theme, cx)
             }
             // Bare: its name is its sub-tab's, and a window round a
             // terminal that fills the column had nothing to fold or move.
@@ -645,7 +645,9 @@ impl ClaudhubApp {
                     .get(&view.entity_id().as_u64())
                     .copied()
                     .unwrap_or(Doing::Rest);
-                let focused = view.focus_handle(cx).contains_focused(window, cx);
+                // The copy, never the view: read during the draw, a terminal
+                // redraws the whole window at each of its notifies.
+                let focused = terminal.focus.contains_focused(window, cx);
                 div()
                     .relative()
                     .size_full()
@@ -1726,13 +1728,15 @@ impl ClaudhubApp {
 /// outlined by what its agent is doing. **Cached**, for the terminals' reason:
 /// the chat notifies at every chunk, and only it must redraw.
 pub(super) fn chat_frame(
-    view: &gpui_kit::Entity<super::chat_view::ChatView>,
-    doing: Doing,
+    chat: &super::chats::OpenChat,
     window: &gpui_kit::Window,
     theme: &gpui_kit::component::Theme,
     cx: &gpui_kit::App,
 ) -> AnyElement {
-    let focused = view.focus_handle(cx).contains_focused(window, cx);
+    // What `OpenChat` copied, never the view: read during the draw, a chat
+    // redraws the whole window at each chunk its agent streams.
+    let (view, doing) = (&chat.view, chat.doing);
+    let focused = chat.focus.contains_focused(window, cx);
     div()
         .relative()
         .size_full()

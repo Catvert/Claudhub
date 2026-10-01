@@ -320,3 +320,41 @@ mod i18n_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod home_render_tests {
+    //! The home screen is drawn by the root, whose render may not read a
+    //! terminal or a chat view: an entity read during a draw redraws the
+    //! window at each of its notifies, and those notify at every chunk their
+    //! program writes. The question a frame asks of them most often is
+    //! whether they hold the focus — asked of the copy (`OpenTerminal::focus`,
+    //! `OpenChat::focus`), never of the view. Twice it was asked of the view,
+    //! and the window rendered at the pace of Claude's spinner.
+
+    const DRAWN: [(&str, &str); 6] = [
+        ("focus_view.rs", include_str!("focus_view.rs")),
+        ("summary_view.rs", include_str!("summary_view.rs")),
+        ("overview_view.rs", include_str!("overview_view.rs")),
+        ("plugins_view.rs", include_str!("plugins_view.rs")),
+        ("scripts.rs", include_str!("scripts.rs")),
+        ("script_kit.rs", include_str!("script_kit.rs")),
+    ];
+
+    #[test]
+    fn the_home_asks_the_focus_of_copies() {
+        let caught: Vec<String> = DRAWN
+            .iter()
+            .flat_map(|(name, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains("focus_handle(cx).contains_focused"))
+                    .map(move |(no, line)| format!("{name}:{}: {}", no + 1, line.trim()))
+            })
+            .collect();
+        assert!(
+            caught.is_empty(),
+            "a view read for its focus while the home draws:\n{}",
+            caught.join("\n")
+        );
+    }
+}

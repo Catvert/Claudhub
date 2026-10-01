@@ -640,14 +640,9 @@ impl ClaudhubApp {
     /// agents one can talk to, to pick one.
     fn plugins_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let chat = self
-            .scripts
-            .screen
-            .agent
-            .and_then(|id| self.chat_by_id(id))
-            .map(|chat| (chat.view.clone(), chat.doing));
-        if let Some((view, doing)) = chat {
-            return super::summary_view::chat_frame(&view, doing, window, &theme, cx);
+        let chat = self.scripts.screen.agent.and_then(|id| self.chat_by_id(id));
+        if let Some(chat) = chat {
+            return super::summary_view::chat_frame(chat, window, &theme, cx);
         }
         let agents = super::settings::Settings::global(cx).terminal.chat_agents();
         let offers: Vec<AnyElement> = if agents.is_empty() {

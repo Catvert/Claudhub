@@ -1905,9 +1905,7 @@ impl ClaudhubApp {
                     .flex_1()
                     .min_w(px(column_min))
                     .h_full()
-                    .child(super::summary_view::chat_frame(
-                        &chat.view, chat.doing, window, &theme, cx,
-                    ))
+                    .child(super::summary_view::chat_frame(chat, window, &theme, cx))
                     .into_any_element()
             })
             .collect();
