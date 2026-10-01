@@ -18,6 +18,8 @@
 //! apart from the base, which the pull request and the merge go on using. A
 //! tag is an entry among the branches; a period is picked in the calendar
 //! beside the selector, and while it is the one shown it heads the list.
+//! « Since the last tag » heads the tags: the choice of a release cycle, which
+//! follows the next tag without being chosen again (`DiffRange::LastTag`).
 
 use gpui_kit::component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
 use gpui_kit::{div, prelude::*, px, App, IntoElement, SharedString, Window};
@@ -40,6 +42,9 @@ const TAG_PREFIX: &str = ":tag:";
 /// The value of the period's entry.
 pub const PERIOD: &str = ":period";
 
+/// The value of the « since the last tag » entry.
+const LAST_TAG: &str = ":last-tag";
+
 /// What the branch review reads from when it is neither the base nor the
 /// review point.
 ///
@@ -52,6 +57,8 @@ pub enum Compare {
     Tag(String),
     /// A period of days, `YYYY-MM-DD`; no end is "up to today".
     Dates { from: String, to: Option<String> },
+    /// From the nearest tag behind HEAD, whichever it is at each reading.
+    LastTag,
 }
 
 impl Compare {
@@ -68,6 +75,7 @@ impl Compare {
                 from: from.clone(),
                 to: to.clone(),
             },
+            Self::LastTag => DiffRange::LastTag,
         }
     }
 
@@ -76,11 +84,15 @@ impl Compare {
         match self {
             Self::Tag(tag) => format!("{TAG_PREFIX}{tag}"),
             Self::Dates { .. } => PERIOD.to_string(),
+            Self::LastTag => LAST_TAG.to_string(),
         }
     }
 
-    /// The tag a selector value names, if it names one.
+    /// The tag a selector value names — or the last one —, if it names one.
     pub fn tag_of(value: &str) -> Option<Self> {
+        if value == LAST_TAG {
+            return Some(Self::LastTag);
+        }
         value
             .strip_prefix(TAG_PREFIX)
             .filter(|tag| !tag.is_empty())
@@ -108,6 +120,7 @@ impl Compare {
     pub fn words(&self) -> SharedString {
         match self {
             Self::Tag(tag) => tr!("range-since-tag", { tag: tag }),
+            Self::LastTag => tr!("range-since-last-tag"),
             Self::Dates { from, to: None } => tr!("range-dates-since", { from: from }),
             Self::Dates { from, to: Some(to) } if from == to => {
                 tr!("range-dates-on", { day: from })
@@ -214,6 +227,20 @@ impl BaseChoice {
             remote: false,
             is_head: false,
             kind: Kind::Period,
+        }
+    }
+
+    /// « Since the last tag », at the head of the tags.
+    pub fn last_tag() -> Self {
+        Self {
+            name: SharedString::from(LAST_TAG),
+            label: Some(Compare::LastTag.words()),
+            subject: tr!("range-last-tag-detail"),
+            author: SharedString::default(),
+            date: SharedString::default(),
+            remote: false,
+            is_head: false,
+            kind: Kind::Tag,
         }
     }
 
@@ -388,6 +415,16 @@ mod tests {
         assert_eq!(Compare::tag_of(SINCE_REVIEW), None);
         assert_eq!(Compare::tag_of(PERIOD), None);
         assert_eq!(Compare::tag_of(":tag:"), None);
+        // The last tag is no tag of that name: one can be called `last-tag`.
+        assert_eq!(
+            Compare::tag_of(&Compare::LastTag.value()),
+            Some(Compare::LastTag)
+        );
+        assert_eq!(
+            Compare::tag_of(&Compare::Tag("last-tag".into()).value()),
+            Some(Compare::Tag("last-tag".into()))
+        );
+        assert_eq!(Compare::LastTag.range(), DiffRange::LastTag);
     }
 
     #[test]

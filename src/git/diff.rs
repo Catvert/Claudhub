@@ -68,6 +68,14 @@ pub enum Range {
     /// Nothing before `from` is the empty tree: a period that starts before
     /// the first commit shows everything written since.
     Dates { from: String, to: Option<String> },
+    /// What the branch wrote since the last tag along HEAD — the nearest,
+    /// as `git describe --tags` finds it — compared like a `Branch`.
+    ///
+    /// The choice and not the tag it resolves to, as a period is kept: a new
+    /// release tagged, the range reads from it at the next list, without
+    /// being chosen again. No tag behind HEAD is the empty tree: everything
+    /// written is since the last tag, there having been none.
+    LastTag,
 }
 
 impl Range {
@@ -106,6 +114,10 @@ impl Range {
                     .map(|side| side.unwrap_or_else(|| EMPTY_TREE.to_string()))
                     .collect())
             }
+            (Self::LastTag, _) => Ok(match last_tag(dir) {
+                Some(tag) => vec![format!("refs/tags/{tag}...HEAD")],
+                None => vec![EMPTY_TREE.to_string(), "HEAD".to_string()],
+            }),
             _ => Ok(self.args()),
         }
     }
@@ -116,8 +128,8 @@ impl Range {
             // Never asked: `resolve` answers for it. Were it asked, the point
             // against the index would be the nearest honest reading.
             Self::Since { point } => vec![point.clone()],
-            // Never asked either: the days resolve to commits there.
-            Self::Dates { .. } => vec!["HEAD".into()],
+            // Never asked either: the days and the tag resolve there.
+            Self::Dates { .. } | Self::LastTag => vec!["HEAD".into()],
             Self::Branch { base } => vec![format!("{base}...HEAD")],
             Self::Commit { id, parent } => match parent {
                 Some(parent) => vec![parent.clone(), id.clone()],
@@ -217,6 +229,15 @@ fn last_before(dir: &Path, day: &str, through: bool) -> Result<Option<String>> {
     )?;
     let commit = out.trim();
     Ok((!commit.is_empty()).then(|| commit.to_string()))
+}
+
+/// The nearest tag behind HEAD, `None` when there is none — `describe`
+/// fails then, which is the answer and not an error. Lightweight tags count:
+/// a release tagged by hand is often one.
+fn last_tag(dir: &Path) -> Option<String> {
+    let out = super::git_opt(dir, &["describe", "--tags", "--abbrev=0", "HEAD"])?;
+    let tag = out.trim();
+    (!tag.is_empty()).then(|| tag.to_string())
 }
 
 /// Lists the review range's files with their volume.
@@ -915,6 +936,35 @@ index 1234567..89abcde 100644
             to: None,
         };
         assert!(files(&dir, &wrong).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The last tag is the nearest one behind HEAD, and a new one moves the
+    /// range without anything being chosen again; with none, everything.
+    #[test]
+    fn since_the_last_tag_reads_from_the_nearest_one() {
+        let dir = scratch("last-tag");
+        let commit = |name: &str| {
+            std::fs::write(dir.join(name), format!("{name}\n")).unwrap();
+            sh(&dir, &["add", name]);
+            sh(&dir, &["commit", "-q", "-m", name]);
+        };
+        let listed = || -> Vec<String> {
+            files(&dir, &Range::LastTag)
+                .unwrap()
+                .into_iter()
+                .map(|file| file.path.display().to_string())
+                .collect()
+        };
+        commit("a.txt");
+        assert_eq!(listed(), ["a.txt"]);
+        sh(&dir, &["tag", "v1"]);
+        commit("b.txt");
+        assert_eq!(listed(), ["b.txt"]);
+        // Annotated or not, the newest behind HEAD wins.
+        sh(&dir, &["tag", "-a", "-m", "two", "v2"]);
+        commit("c.txt");
+        assert_eq!(listed(), ["c.txt"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

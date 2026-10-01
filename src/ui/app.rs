@@ -4316,12 +4316,18 @@ impl ClaudhubApp {
             .filter(|compare| matches!(compare, Compare::Dates { .. }))
             .map(BaseChoice::period);
         // The tags after the local branches and before the remote ones: what
-        // one compares against is close by, and a remote list runs long.
-        let tags: Vec<BaseChoice> = self
+        // one compares against is close by, and a remote list runs long. The
+        // last tag heads them when there are any — or when it is the choice
+        // shown, the tags not read yet.
+        let mut tags: Vec<BaseChoice> = self
             .tags
             .get(&repo.main)
             .map(|tags| tags.list.items.iter().map(BaseChoice::tag).collect())
             .unwrap_or_default();
+        let last_chosen = state.is_some_and(|state| state.compare == Some(Compare::LastTag));
+        if !tags.is_empty() || last_chosen {
+            tags.insert(0, BaseChoice::last_tag());
+        }
         let (local, remote): (Vec<_>, Vec<_>) = repo
             .branches
             .iter()

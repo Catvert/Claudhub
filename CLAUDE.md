@@ -615,7 +615,9 @@ branche d'intégration). Elle **n'est pas enregistrée** : le magasin garde ce
 qu'on a choisi, jamais une devinette. Un **tag** ou une **période** (`base_select::Compare`)
 remplace la base dans la revue **sans la toucher** : la PR et l'intégration
 continuent de la lire. Une période se lit en commits du premier parent de HEAD
-(`DiffRange::Dates`) ; finie aujourd'hui, elle reste ouverte.
+(`DiffRange::Dates`) ; finie aujourd'hui, elle reste ouverte. « Depuis le
+dernier tag » est un choix et non un tag (`DiffRange::LastTag`) : le worker le
+résout à chaque liste, et un tag posé le déplace sans qu'on choisisse à nouveau.
 
 **« Depuis ma dernière relecture »** (`DiffRange::Since`, `git::snapshot`) — le
 point est l'état du disque, construit dans un **index à nous**
