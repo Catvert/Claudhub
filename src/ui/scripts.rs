@@ -188,7 +188,7 @@ pub(crate) struct Scripts {
     status: String,
     /// Each script's data — `storage_*` —, by its id: one map whatever the
     /// boards it is drawn on, read from disk at its first use.
-    stores: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    stores: HashMap<String, Store>,
     /// Where the stores' writes queue, one after the other — two written
     /// side by side could land in the wrong order.
     writer: Option<async_channel::Sender<(PathBuf, String)>>,
@@ -198,6 +198,35 @@ pub(crate) struct Scripts {
 /// a script, or the agent editing it, never reaches its data.
 fn data_root() -> Option<PathBuf> {
     super::settings::config_dir().map(|dir| dir.join("scripts-data"))
+}
+
+/// One script's data — `storage_*`.
+type Store = serde_json::Map<String, serde_json::Value>;
+
+/// The data of the scripts `found` whose data is not `known` yet, read off
+/// the thread with the folder: a script is mounted only once found, so its
+/// data is there before its first `storage_get`. Missing or unreadable, it
+/// is empty.
+fn read_stores(found: &scripts::Found, known: &HashSet<String>) -> Vec<(String, Store)> {
+    let root = data_root();
+    found
+        .scripts
+        .iter()
+        .map(|(script, _)| &script.id)
+        .filter(|id| !known.contains(*id))
+        .map(|id| {
+            let store = root
+                .as_ref()
+                .and_then(|root| std::fs::read_to_string(root.join(format!("{id}.json"))).ok())
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|value| match value {
+                    serde_json::Value::Object(map) => Some(map),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            (id.clone(), store)
+        })
+        .collect()
 }
 
 /// One scroll area a script view drew, and its smoothing — see
@@ -340,17 +369,24 @@ impl ClaudhubApp {
             loop {
                 let (folder, shipped) = (root.clone(), builtins.clone());
                 let language = rust_i18n::locale().to_string();
-                let found = cx
+                let Ok(known) = this.update(cx, |app, _| {
+                    app.scripts.stores.keys().cloned().collect::<HashSet<_>>()
+                }) else {
+                    break;
+                };
+                let (found, stores) = cx
                     .background_executor()
                     .spawn(async move {
-                        scripts::merge(
+                        let found = scripts::merge(
                             scripts::discover(&shipped, &language),
                             scripts::discover(&folder, &language),
-                        )
+                        );
+                        let stores = read_stores(&found, &known);
+                        (found, stores)
                     })
                     .await;
                 if this
-                    .update(cx, |app, cx| app.scripts_found(found, cx))
+                    .update(cx, |app, cx| app.scripts_found(found, stores, cx))
                     .is_err()
                 {
                     break;
@@ -361,7 +397,16 @@ impl ClaudhubApp {
         .detach();
     }
 
-    fn scripts_found(&mut self, found: scripts::Found, cx: &mut Context<Self>) {
+    fn scripts_found(
+        &mut self,
+        found: scripts::Found,
+        stores: Vec<(String, Store)>,
+        cx: &mut Context<Self>,
+    ) {
+        // What was read meanwhile does not overwrite what a script wrote.
+        for (id, store) in stores {
+            self.scripts.stores.entry(id).or_insert(store);
+        }
         if self.scripts.found == found.scripts && self.scripts.broken == found.broken {
             return;
         }
@@ -493,16 +538,23 @@ impl ClaudhubApp {
             }
         });
         if !enabled {
-            self.scripts.mounted.retain(|(_, of), mounted| {
-                let kept = *of != id;
-                if !kept {
-                    forget_tracks(mounted.view.entity_id());
-                }
-                kept
-            });
+            self.let_go(&id);
         }
         self.write_scripts_status(cx);
         cx.notify();
+    }
+
+    /// Lets go of every view of script `id`: each one observes the
+    /// application, shown or not.
+    fn let_go(&mut self, id: &str) {
+        self.scripts.mounted.retain(|(_, of), mounted| {
+            let kept = of != id;
+            if !kept {
+                forget_tracks(mounted.view.entity_id());
+            }
+            kept
+        });
+        self.scripts.failed.retain(|(_, of), _| of != id);
     }
 
     /// Forks builtin `id` into the user's folder, off the thread: the copy
@@ -560,6 +612,108 @@ impl ClaudhubApp {
                     cx.notify();
                 }
                 Err(error) => app.announce_error(SharedString::from(error.to_string()), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Removes the user's script `id`, off the thread: its folder put away
+    /// under `scripts::REMOVED`, never deleted. Its data and secrets stay,
+    /// for the folder to come back as it was.
+    pub(super) fn remove_script(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(root) = root() else {
+            return;
+        };
+        let id = id.to_string();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        cx.spawn(async move |this, cx| {
+            let of = id.clone();
+            let removed = cx
+                .background_executor()
+                .spawn(async move { scripts::remove(&root, &of, stamp) })
+                .await;
+            let _ = this.update(cx, |app, cx| match removed {
+                Ok(path) => {
+                    if app.scripts.screen.selected.as_deref() == Some(id.as_str()) {
+                        app.scripts.screen.selected = None;
+                    }
+                    app.let_go(&id);
+                    app.announce(
+                        tr!("plugins-removed", { id: id, path: path.display().to_string() }),
+                        cx,
+                    );
+                    app.write_scripts_status(cx);
+                    cx.notify();
+                }
+                Err(error) => app.announce_error(SharedString::from(error.to_string()), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Renames the user's script `from` to `to`, off the thread. Its data
+    /// and its declared secrets go with it — both are filed by id —, and so
+    /// does what the settings and the store say of it.
+    pub(super) fn rename_script(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        let (Some(root), Some(data)) = (root(), data_root()) else {
+            return;
+        };
+        let (from, to) = (from.to_string(), to.trim().to_string());
+        if from == to {
+            return;
+        }
+        let secrets: Vec<String> = self
+            .scripts
+            .script(&from)
+            .map(|script| {
+                script
+                    .permissions
+                    .secrets
+                    .iter()
+                    .map(|secret| secret.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let (old, new) = (from.clone(), to.clone());
+            let renamed = cx
+                .background_executor()
+                .spawn(async move { rename_with_data(&root, &data, &old, &new, &secrets) })
+                .await;
+            let _ = this.update(cx, |app, cx| match renamed {
+                Ok(()) => {
+                    if let Some(store) = app.scripts.stores.remove(&from) {
+                        app.scripts.stores.insert(to.clone(), store);
+                    }
+                    app.let_go(&from);
+                    super::settings::Settings::update_global(cx, |settings| {
+                        for off in &mut settings.disabled_plugins {
+                            if *off == from {
+                                off.clone_from(&to);
+                            }
+                        }
+                        settings.disabled_plugins.sort();
+                        if settings.home_script.trim() == from {
+                            settings.home_script.clone_from(&to);
+                        }
+                    });
+                    super::store::Store::update_global(cx, |store| {
+                        for state in store.worktrees.values_mut() {
+                            if state.focus_script.as_deref() == Some(from.as_str()) {
+                                state.focus_script = Some(to.clone());
+                            }
+                        }
+                    });
+                    if app.scripts.screen.selected.as_deref() == Some(from.as_str()) {
+                        app.scripts.screen.selected = Some(to.clone());
+                    }
+                    app.announce(tr!("plugins-renamed", { from: from, to: to }), cx);
+                    app.write_scripts_status(cx);
+                    cx.notify();
+                }
+                Err(error) => app.announce_error(SharedString::from(error), cx),
             });
         })
         .detach();
@@ -693,30 +847,21 @@ impl ClaudhubApp {
             .map(|(_, why)| why.as_str())
     }
 
-    /// Script `id`'s data, read from disk the first time.
-    pub(super) fn store_of(&mut self, id: &str) -> &mut serde_json::Map<String, serde_json::Value> {
+    /// Script `id`'s data — read with the folder (`read_stores`), never here.
+    pub(super) fn store_of(&mut self, id: &str) -> &mut Store {
+        self.scripts.stores.entry(id.to_string()).or_default()
+    }
+
+    /// Whether script `id` keeps anything — for a render, which changes nothing.
+    pub(super) fn has_store(&self, id: &str) -> bool {
         self.scripts
             .stores
-            .entry(id.to_string())
-            .or_insert_with(|| {
-                data_root()
-                    .and_then(|root| std::fs::read_to_string(root.join(format!("{id}.json"))).ok())
-                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                    .and_then(|value| match value {
-                        serde_json::Value::Object(map) => Some(map),
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-            })
+            .get(id)
+            .is_some_and(|store| !store.is_empty())
     }
 
     /// Changes script `id`'s data, and queues it to be written.
-    fn store_update(
-        &mut self,
-        id: &str,
-        change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
-        cx: &mut Context<Self>,
-    ) {
+    fn store_update(&mut self, id: &str, change: impl FnOnce(&mut Store), cx: &mut Context<Self>) {
         let store = self.store_of(id);
         change(store);
         let text = serde_json::to_string_pretty(&*store).unwrap_or_default();
@@ -728,11 +873,7 @@ impl ClaudhubApp {
             cx.background_executor()
                 .spawn(async move {
                     while let Ok((path, text)) = receiver.recv().await {
-                        let written = path
-                            .parent()
-                            .map_or(Ok(()), std::fs::create_dir_all)
-                            .and_then(|()| std::fs::write(&path, text));
-                        if let Err(error) = written {
+                        if let Err(error) = crate::files::write_atomic(&path, &text) {
                             log::warn!("writing {}: {error}", path.display());
                         }
                     }
@@ -741,6 +882,27 @@ impl ClaudhubApp {
             sender
         });
         let _ = writer.try_send((root.join(format!("{id}.json")), text));
+    }
+
+    /// The views of script `id` on the boards other than `path`'s run again:
+    /// its data changed under them. Deferred — the script that wrote is still
+    /// running, and the runtime is the same.
+    fn refresh_elsewhere(&self, id: &str, path: &Path, cx: &mut Context<Self>) {
+        let views: Vec<Entity<ScriptView>> = self
+            .scripts
+            .mounted
+            .iter()
+            .filter(|((worktree, of), _)| of == id && worktree != path)
+            .map(|(_, mounted)| mounted.view.clone())
+            .collect();
+        if views.is_empty() {
+            return;
+        }
+        cx.defer(move |cx| {
+            for view in views {
+                view.update(cx, |view, cx| view.refresh(cx));
+            }
+        });
     }
 
     /// Forgets script `id`'s data, on disk too.
@@ -1162,35 +1324,43 @@ fn module(
                 })
             }
         })
+        // A write that changes nothing is not one: a script that stores in
+        // its render would otherwise run the others, which run it again.
         .function("storage_set", {
-            let (app, id) = (app.clone(), id.clone());
+            let (app, id, path) = (app.clone(), id.clone(), path.to_path_buf());
             move |arguments| {
                 let key = arguments.string(0)?.to_string();
                 let value = to_json(arguments.value(1)?);
                 change(&app, |this, cx| {
-                    this.store_update(
-                        &id,
-                        |store| {
-                            store.insert(key, value);
-                        },
-                        cx,
-                    );
+                    if this.store_of(&id).get(&key) != Some(&value) {
+                        this.store_update(
+                            &id,
+                            |store| {
+                                store.insert(key, value);
+                            },
+                            cx,
+                        );
+                        this.refresh_elsewhere(&id, &path, cx);
+                    }
                     Ok(HostValue::Null)
                 })
             }
         })
         .function("storage_remove", {
-            let (app, id) = (app.clone(), id.clone());
+            let (app, id, path) = (app.clone(), id.clone(), path.to_path_buf());
             move |arguments| {
                 let key = arguments.string(0)?.to_string();
                 change(&app, |this, cx| {
-                    this.store_update(
-                        &id,
-                        |store| {
-                            store.remove(&key);
-                        },
-                        cx,
-                    );
+                    if this.store_of(&id).contains_key(&key) {
+                        this.store_update(
+                            &id,
+                            |store| {
+                                store.remove(&key);
+                            },
+                            cx,
+                        );
+                        this.refresh_elsewhere(&id, &path, cx);
+                    }
                     Ok(HostValue::Null)
                 })
             }
@@ -1408,6 +1578,56 @@ fn secret_entry(id: &str, name: &str) -> Result<keyring::Entry, HostError> {
     }
     keyring::Entry::new(SECRETS, &format!("{id}/{name}"))
         .map_err(|error| HostError::new(error.to_string()))
+}
+
+/// Renames script `from`'s folder, data file and declared secrets to `to`.
+/// The data of a script once named `to` is not written over: refused.
+fn rename_with_data(
+    root: &Path,
+    data: &Path,
+    from: &str,
+    to: &str,
+    secrets: &[String],
+) -> Result<(), String> {
+    let (old, new) = (
+        data.join(format!("{from}.json")),
+        data.join(format!("{to}.json")),
+    );
+    if old.exists() && new.exists() {
+        return Err(format!(
+            "{} holds the data of an earlier `{to}`: move it away first",
+            new.display()
+        ));
+    }
+    let builtins = scripts::ids_of(BUILTINS);
+    scripts::rename(root, from, to, &builtins).map_err(|error| error.to_string())?;
+    if old.exists() {
+        std::fs::rename(&old, &new).map_err(|error| error.to_string())?;
+    }
+    for name in secrets {
+        if let Err(error) = move_secret(from, to, name) {
+            log::warn!("script {from}: moving its secret {name}: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Moves a script's secret `name` from id `from` to id `to`.
+fn move_secret(from: &str, to: &str, name: &str) -> Result<(), String> {
+    let said = |error: HostError| error.message().to_string();
+    let (old, new) = (
+        secret_entry(from, name).map_err(said)?,
+        secret_entry(to, name).map_err(said)?,
+    );
+    match old.get_password() {
+        Ok(secret) => {
+            new.set_password(&secret)
+                .map_err(|error| error.to_string())?;
+            old.delete_credential().map_err(|error| error.to_string())
+        }
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Forgets script `id`'s secret `name` — the Plugins screen's gesture.
@@ -1729,6 +1949,38 @@ mod tests {
             }
         }
         gpui_shell::policy::set_default(Policy::new());
+
+        // A script of the user's is renamed, but never to a builtin's name —
+        // it would become its fork — nor over another; and removed, it is
+        // put away, not deleted.
+        let builtin_ids = scripts::ids_of(BUILTINS);
+        assert!(scripts::rename(&root, "new-tab", "sentry", &builtin_ids).is_err());
+        assert!(scripts::rename(&root, "new-tab", "new-home", &builtin_ids).is_err());
+        assert!(scripts::rename(&root, "new-tab", "../out", &builtin_ids).is_err());
+        scripts::rename(&root, "new-tab", "mine", &builtin_ids).unwrap();
+        let removed = scripts::remove(&root, "mine", 7).unwrap();
+        assert!(removed.starts_with(root.join(scripts::REMOVED)));
+        assert!(removed.join(scripts::MANIFEST).is_file());
+        let ids: Vec<String> = scripts::discover(&root, "fr")
+            .scripts
+            .into_iter()
+            .map(|(script, _)| script.id)
+            .collect();
+        assert_eq!(ids, ["dashboard", "home-columns", "new-home"]);
+        let mut stored = Store::new();
+        stored.insert("kept".into(), serde_json::Value::Bool(true));
+        let data = root.join("data.json");
+        crate::files::write_atomic(&data, &serde_json::to_string(&stored).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .filter(|entry| { entry.file_name().to_string_lossy().ends_with(".tmp") })
+                .count(),
+            0
+        );
+        assert!(std::fs::read_to_string(&data).unwrap().contains("kept"));
+
         // Kept on demand, to read the `gpui-kit.d.ts` the runtime wrote.
         if std::env::var_os("CLAUDHUB_KEEP_SCRIPTS").is_some() {
             let _ = std::fs::remove_dir_all(&keep);

@@ -576,7 +576,11 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   portillon d'acceptation : un panneau entier, réglages, jeton et requêtes.
 - **Un script se désactive** (`disabled_plugins` des réglages, la liste de
   ce qui est éteint : un nouveau est allumé) : aucun tableau ne le montre,
-  ses vues sont lâchées, l'écran Plugins l'aperçoit encore.
+  ses vues sont lâchées, l'écran Plugins l'aperçoit encore. **Retiré**, il
+  part dans `.removed/`, jamais effacé ; **renommé**, ses données, ses
+  secrets, les réglages et le magasin le suivent — jamais sous le nom d'un
+  intégré, dont il deviendrait le fork. Ses données sont lues **avec le
+  dossier**, hors du thread, et écrites d'un bloc (`files::write_atomic`).
 - **Ce que Claudhub prête** (`ui::script_kit`) : des pièces peintes par
   nous — `CodeBlock` et `CodeLine` (coloration mise en cache : un composant
   est rebâti à chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se

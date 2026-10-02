@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 8 -->
+<!-- claudhub-skill-version: 9 -->
 
 # Claudhub
 
@@ -149,7 +149,10 @@ letters, digits, `-`, `_`, `.`. It holds:
   entry to `main.js`. A title or description can be `{"fr": "…", "en": "…"}`.
   `icon` is a Lucide name. `permissions` declares the secrets it keeps:
   `{"secrets": [{"name": "token", "label": "API token"}]}`. The network
-  needs no declaring.
+  needs no declaring. `"version": "1.0.0"` is the script's own, shown to
+  the user; `"claudhub": "0.16.0"` is the oldest Claudhub it runs on —
+  an older one lists the script as not loadable and says why. Set it when
+  the script uses something of the `claudhub` module that is new.
 - the entry, an ES module whose default export is a class extending `View`.
 
 Saving any file reloads the script on every board within a second. If it

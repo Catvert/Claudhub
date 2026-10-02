@@ -25,7 +25,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{div, prelude::*, px, AnyElement, Context, SharedString, Window};
 
-use crate::scripts::{Kind, Origin};
+use crate::scripts::{Kind, Origin, Script};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
@@ -232,6 +232,9 @@ impl ClaudhubApp {
                                     .child(SharedString::from(script.id.clone())),
                             )
                             .child(kind)
+                            .children(script.version.as_ref().map(|version| {
+                                div().child(tr!("plugins-version", { version: version.clone() }))
+                            }))
                             .children(origin.map(|origin| {
                                 div()
                                     .text_color(if script.origin == Origin::Fork {
@@ -311,13 +314,21 @@ impl ClaudhubApp {
             .tooltip(tr!("settings-scripts-open"))
             .disabled(root.is_none())
             .on_click(move |_, _, cx| {
-                let Some(root) = &root else {
+                let Some(root) = root.clone() else {
                     return;
                 };
-                if let Err(error) = std::fs::create_dir_all(root) {
-                    log::warn!("scripts folder: {error}");
-                }
-                cx.open_with_system(root);
+                cx.spawn(async move |cx| {
+                    let made = root.clone();
+                    let made = cx
+                        .background_executor()
+                        .spawn(async move { std::fs::create_dir_all(made) })
+                        .await;
+                    if let Err(error) = made {
+                        log::warn!("scripts folder: {error}");
+                    }
+                    cx.update(|cx| cx.open_with_system(&root));
+                })
+                .detach();
             });
         v_flex()
             .flex_none()
@@ -428,7 +439,11 @@ impl ClaudhubApp {
                     .on_click(move |_, _, cx| cx.open_with_system(&entry));
                 let id = script.id.clone();
                 match script.origin {
-                    Origin::User => vec![open.into_any_element()],
+                    Origin::User => vec![
+                        open.into_any_element(),
+                        self.plugins_rename_button(script, cx),
+                        self.plugins_remove_button(script, cx),
+                    ],
                     Origin::Builtin => vec![Button::new("plugins-fork")
                         .ghost()
                         .xsmall()
@@ -517,13 +532,66 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
+    /// Renaming a script of the user's: its folder, which is its id.
+    fn plugins_rename_button(&self, script: &Script, cx: &mut Context<Self>) -> AnyElement {
+        let (id, title) = (script.id.clone(), script.title.clone());
+        Button::new("plugins-rename")
+            .ghost()
+            .xsmall()
+            .icon(icon("pencil"))
+            .tooltip(tr!("plugins-rename"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let from = id.clone();
+                this.open_text_dialog_with(
+                    tr!("plugins-rename-title", { title: title.clone() }),
+                    SharedString::from(id.clone()),
+                    id.clone(),
+                    window,
+                    cx,
+                    move |this, to, _, cx| this.rename_script(&from, &to, cx),
+                );
+            }))
+            .into_any_element()
+    }
+
+    /// Removing a script of the user's, asked first.
+    fn plugins_remove_button(&self, script: &Script, cx: &mut Context<Self>) -> AnyElement {
+        let (id, title) = (script.id.clone(), script.title.clone());
+        let aside = crate::ui::scripts::root()
+            .map(|root| root.join(crate::scripts::REMOVED).display().to_string())
+            .unwrap_or_default();
+        Button::new("plugins-remove")
+            .ghost()
+            .xsmall()
+            .icon(icon("trash-2"))
+            .tooltip(tr!("plugins-remove"))
+            .on_click(cx.listener(move |_, _, window, cx| {
+                let (id, aside) = (id.clone(), aside.clone());
+                super::dialogs::ask(
+                    cx.entity(),
+                    tr!("plugins-remove-title", { title: title.clone() }),
+                    move || {
+                        div()
+                            .text_sm()
+                            .child(tr!("plugins-remove-body", { path: aside.clone() }))
+                            .into_any_element()
+                    },
+                    super::dialogs::confirm,
+                    move |this, _, cx| this.remove_script(&id, cx),
+                    window,
+                    cx,
+                );
+            }))
+            .into_any_element()
+    }
+
     /// What the selected script keeps, and the gestures on it: its secrets,
     /// to forget; its data, to clear. Nothing when it keeps nothing. The
     /// network is every script's, and asks nothing.
     fn plugins_permissions(&mut self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         let script = self.scripts.script(id)?.clone();
-        let has_data = !self.store_of(id).is_empty();
+        let has_data = self.has_store(id);
         if script.permissions.secrets.is_empty() && !has_data {
             return None;
         }
@@ -565,12 +633,21 @@ impl ClaudhubApp {
                         .xsmall()
                         .label(tr!("plugins-forget-secrets"))
                         .on_click(move |_, _, cx| {
-                            for (name, _) in &forgotten {
-                                super::scripts::forget_secret(&id, name);
-                            }
-                            let _ = app.update(cx, |this, cx| {
-                                this.announce(tr!("plugins-secrets-forgotten"), cx)
-                            });
+                            // The keyring may answer slowly: never in a click.
+                            let (id, forgotten, app) = (id.clone(), forgotten.clone(), app.clone());
+                            cx.spawn(async move |cx| {
+                                cx.background_executor()
+                                    .spawn(async move {
+                                        for (name, _) in &forgotten {
+                                            super::scripts::forget_secret(&id, name);
+                                        }
+                                    })
+                                    .await;
+                                let _ = app.update(cx, |this, cx| {
+                                    this.announce(tr!("plugins-secrets-forgotten"), cx)
+                                });
+                            })
+                            .detach();
                         }),
                 )
         });
@@ -688,16 +765,38 @@ impl ClaudhubApp {
             return;
         };
         // The folder is made with the examples the first time it is read;
-        // an agent started before that would start nowhere.
+        // an agent started before that would start nowhere. Off the thread,
+        // and the chat after.
         let builtins = crate::ui::scripts::builtin_root().unwrap_or_else(|| root.clone());
-        super::scripts::prepare(&root, &builtins);
-        if let Err(error) = crate::scripts::write_instructions(&root, &builtins) {
-            log::warn!("preparing the scripts' folder: {error}");
-        }
+        cx.spawn_in(window, async move |this, cx| {
+            let folder = root.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    super::scripts::prepare(&folder, &builtins);
+                    if let Err(error) = crate::scripts::write_instructions(&folder, &builtins) {
+                        log::warn!("preparing the scripts' folder: {error}");
+                    }
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_plugins_chat(&root, agent, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The chat of the Plugins screen, opened in the prepared folder `root`.
+    fn open_plugins_chat(
+        &mut self,
+        root: &Path,
+        agent: crate::acp::Agent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.write_scripts_status(cx);
         let placement = super::settings::Settings::global(cx).terminal.placement;
         let before = self.chats.len();
-        self.open_chat(&root, agent, placement, None, window, cx);
+        self.open_chat(root, agent, placement, None, window, cx);
         if self.chats.len() == before {
             return;
         }

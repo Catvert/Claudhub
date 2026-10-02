@@ -337,6 +337,23 @@ pub fn write_at(full: &Path, text: &str, expect: Option<u64>) -> Result<()> {
     std::fs::write(full, text).with_context(|| format!("cannot write {}", full.display()))
 }
 
+/// Writes a file whole or not at all: beside it first, then renamed over it.
+/// For what Claudhub alone writes and reads back as a whole — a file cut
+/// short by a crash would read as nothing, and the next write would make
+/// that nothing for good.
+pub fn write_atomic(full: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut name = full.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let beside = full.with_file_name(name);
+    std::fs::write(&beside, text)?;
+    std::fs::rename(&beside, full).inspect_err(|_| {
+        let _ = std::fs::remove_file(&beside);
+    })
+}
+
 /// The `expect` of a file one believes **is not there yet**.
 ///
 /// `None` writes blind, and that is what "I have not read anything" used to

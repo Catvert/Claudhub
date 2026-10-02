@@ -53,6 +53,8 @@ pub struct Script {
     /// What it asks for beyond drawing — see [`Permissions`].
     pub permissions: Permissions,
     pub origin: Origin,
+    /// Its own version, as its author writes it: said, never compared.
+    pub version: Option<String>,
 }
 
 /// Where a script comes from.
@@ -66,6 +68,10 @@ pub enum Origin {
     /// The user's copy of a builtin, standing in its place.
     Fork,
 }
+
+/// The Claudhub this is, against which a manifest's `claudhub` — the version
+/// it needs at least — is read.
+pub const RUNNING: &str = env!("CARGO_PKG_VERSION");
 
 /// What a script declares beyond drawing, under its manifest's
 /// `permissions`. The network needs no declaring: every script may send
@@ -133,6 +139,15 @@ pub fn parse(id: &str, dir: &Path, manifest: &str, language: &str) -> Result<Scr
             "{MANIFEST}: the entry `{entry}` must be a path inside the script's folder"
         ));
     }
+    // A script written against a newer `claudhub` module fails to link with
+    // an error about an import; the version it needs says why.
+    if let Some(needed) = crate::json::string(&value, "claudhub").map(str::trim) {
+        if crate::release::is_newer(needed, RUNNING) {
+            return Err(format!(
+                "needs Claudhub {needed} or later, and this is {RUNNING}"
+            ));
+        }
+    }
     Ok(Script {
         id: id.to_string(),
         dir: dir.to_path_buf(),
@@ -148,6 +163,10 @@ pub fn parse(id: &str, dir: &Path, manifest: &str, language: &str) -> Result<Scr
             .to_string(),
         permissions: permissions(&value, language)?,
         origin: Origin::User,
+        version: crate::json::string(&value, "version")
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -439,10 +458,51 @@ pub fn fork(root: &Path, id: &str, files: &[(&str, &str)]) -> std::io::Result<Pa
 /// folder the reading passes by, so nothing written is lost.
 pub const SET_ASIDE: &str = ".forks";
 
+/// Where a script the user removes goes: hidden too, and never emptied by
+/// Claudhub — a removal is undone by moving the folder back.
+pub const REMOVED: &str = ".removed";
+
 /// Moves the user's folder `id` out of the way — under [`SET_ASIDE`], named
 /// with `stamp` — and says where.
 pub fn set_aside(root: &Path, id: &str, stamp: u64) -> std::io::Result<PathBuf> {
-    let aside = root.join(SET_ASIDE);
+    put_away(root, SET_ASIDE, id, stamp)
+}
+
+/// Removes the user's script `id`: moved under [`REMOVED`], named with
+/// `stamp`, and said where.
+pub fn remove(root: &Path, id: &str, stamp: u64) -> std::io::Result<PathBuf> {
+    put_away(root, REMOVED, id, stamp)
+}
+
+/// Renames the user's script `from` to `to`. Refused when `to` is no id,
+/// is taken, or is one of `reserved` — a builtin's: the folder would become
+/// its fork, and inherit its data and secrets.
+pub fn rename(root: &Path, from: &str, to: &str, reserved: &[&str]) -> std::io::Result<()> {
+    let refused = |kind, why: String| Err(std::io::Error::new(kind, why));
+    if !valid_id(to) {
+        return refused(
+            std::io::ErrorKind::InvalidInput,
+            format!("`{to}` is not a script name: letters, digits, `-`, `_` and `.` only"),
+        );
+    }
+    if reserved.contains(&to) {
+        return refused(
+            std::io::ErrorKind::AlreadyExists,
+            format!("`{to}` is a builtin's name"),
+        );
+    }
+    let target = root.join(to);
+    if target.exists() {
+        return refused(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists already", target.display()),
+        );
+    }
+    std::fs::rename(root.join(from), target)
+}
+
+fn put_away(root: &Path, into: &str, id: &str, stamp: u64) -> std::io::Result<PathBuf> {
+    let aside = root.join(into);
     std::fs::create_dir_all(&aside)?;
     let target = (1..)
         .map(|n| match n {
@@ -879,6 +939,17 @@ mod tests {
             assert!(read(&manifest).is_err(), "{entry}");
         }
         assert!(read(r#"{"entry": "lib/main.mjs"}"#).is_ok());
+    }
+
+    #[test]
+    fn a_version_is_said_and_a_newer_claudhub_needed_refuses() {
+        let script = read(r#"{"version": " 1.2.0 ", "claudhub": "0.0.1"}"#).unwrap();
+        assert_eq!(script.version.as_deref(), Some("1.2.0"));
+        assert_eq!(read("{}").unwrap().version, None);
+        let why = read(r#"{"claudhub": "999.0.0"}"#).unwrap_err();
+        assert!(why.contains("999.0.0") && why.contains(RUNNING), "{why}");
+        // Unreadable, it asks nothing: the script is let through.
+        assert!(read(r#"{"claudhub": "soon"}"#).is_ok());
     }
 
     #[test]
