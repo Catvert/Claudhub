@@ -47,6 +47,8 @@ fn is_network(cmd: &Cmd) -> bool {
             | Cmd::Pull { .. }
             | Cmd::AutoFetch { .. }
             | Cmd::ReleaseCheck
+            // A marketplace's clone: a round trip, an authentication maybe.
+            | Cmd::FetchMarket { .. }
             // An agent writing a message takes ten to thirty seconds: exactly
             // the profile of the commands that made the network move out of the
             // read queue.
@@ -912,6 +914,15 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         }
         Cmd::AutoFetch { main } => auto_fetch(main),
         Cmd::ReleaseCheck => release_check(),
+        Cmd::FetchMarket {
+            source,
+            url,
+            branch,
+            known,
+        } => vec![Evt::MarketFetched {
+            fetched: crate::market::fetch(&url, branch.as_deref(), known.as_deref()),
+            source,
+        }],
         Cmd::Fetch { worktree } => {
             write_then_refresh(worktree, Action::Fetch, |dir| repo::fetch(dir, true))
         }
@@ -2736,6 +2747,13 @@ mod tests {
             Queue::Network
         );
         assert_eq!(queue_of(&Cmd::ReleaseCheck), Queue::Network);
+        let market = Cmd::FetchMarket {
+            source: "acme/plugins".into(),
+            url: "https://github.com/acme/plugins.git".into(),
+            branch: None,
+            known: None,
+        };
+        assert_eq!(queue_of(&market), Queue::Network);
         // A review point is a local write of milliseconds, and it is what the
         // notes' sending waits on before the agent starts rewriting the tree.
         assert_eq!(

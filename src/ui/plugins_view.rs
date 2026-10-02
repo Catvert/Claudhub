@@ -136,7 +136,16 @@ impl ClaudhubApp {
             self.write_scripts_status(cx);
         }
         let list = self.plugins_list(cx);
-        let preview = self.plugins_preview(live, preview_on.as_deref(), window, cx);
+        let catalog = self
+            .scripts
+            .screen
+            .catalog
+            .clone()
+            .filter(|_| self.scripts.screen.selected.is_none());
+        let preview = match catalog {
+            Some((slug, folder)) => self.market_card(&slug, &folder, window, cx),
+            None => self.plugins_preview(live, preview_on.as_deref(), window, cx),
+        };
         let agent = self.plugins_agent(window, cx);
         let sides = match crate::ui::scripts::root() {
             Some(root) => self.two_sides(&root, "plugins", PREVIEW_START, preview, agent, cx),
@@ -170,6 +179,7 @@ impl ClaudhubApp {
                     Origin::User => None,
                     Origin::Builtin => Some(tr!("plugins-builtin")),
                     Origin::Fork => Some(tr!("plugins-fork")),
+                    Origin::Market => Some(tr!("plugins-market")),
                 };
                 let switch = Switch::new(SharedString::from(format!("plugins-on-{id}")))
                     .xsmall()
@@ -202,6 +212,7 @@ impl ClaudhubApp {
                     .when(!lit, |el| el.hover(|style| style.bg(theme.list_hover)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.scripts.screen.selected = Some(id.clone());
+                        this.scripts.screen.catalog = None;
                         this.write_scripts_status(cx);
                         cx.notify();
                     }))
@@ -368,7 +379,8 @@ impl ClaudhubApp {
                     .overflow_y_scroll()
                     .children(rows)
                     .children(broken)
-                    .children(empty),
+                    .children(empty)
+                    .child(self.market_list(cx)),
             )
             .into_any_element()
     }
@@ -465,6 +477,7 @@ impl ClaudhubApp {
                             )
                             .into_any_element(),
                     ],
+                    Origin::Market => self.plugins_market_gestures(script, cx),
                 }
             })
             .unwrap_or_default();
@@ -530,6 +543,75 @@ impl ClaudhubApp {
             )
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
+    }
+
+    /// What is done to a plugin installed from a marketplace: brought up to
+    /// the catalog's version, forked, uninstalled — asked first, its data
+    /// and secrets going with it.
+    fn plugins_market_gestures(&self, script: &Script, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let id = script.id.clone();
+        let mut gestures = Vec::new();
+        if let Some(from) = self.plugin_provenance(&id) {
+            gestures.push(
+                div()
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(cx.theme().muted_foreground)
+                    .child(from)
+                    .into_any_element(),
+            );
+        }
+        if let Some((slug, folder)) = self.plugin_update(&id) {
+            gestures.push(
+                Button::new("plugins-market-update")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("download"))
+                    .label(tr!("market-update"))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.install_plugin(&slug, &folder, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let fork = id.clone();
+        gestures.push(
+            Button::new("plugins-fork")
+                .ghost()
+                .xsmall()
+                .icon(icon("git-fork"))
+                .label(tr!("plugins-fork-action"))
+                .tooltip(tr!("market-fork-help"))
+                .on_click(cx.listener(move |this, _, _, cx| this.fork_script(&fork, cx)))
+                .into_any_element(),
+        );
+        let title = script.title.clone();
+        gestures.push(
+            Button::new("plugins-uninstall")
+                .ghost()
+                .xsmall()
+                .icon(icon("trash-2"))
+                .tooltip(tr!("market-uninstall"))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    let id = id.clone();
+                    super::dialogs::ask(
+                        cx.entity(),
+                        tr!("market-uninstall-title", { title: title.clone() }),
+                        || {
+                            div()
+                                .text_sm()
+                                .child(tr!("market-uninstall-body"))
+                                .into_any_element()
+                        },
+                        super::dialogs::confirm,
+                        move |this, _, cx| this.uninstall_plugin(&id, cx),
+                        window,
+                        cx,
+                    );
+                }))
+                .into_any_element(),
+        );
+        gestures
     }
 
     /// Renaming a script of the user's: its folder, which is its id.

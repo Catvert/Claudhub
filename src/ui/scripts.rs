@@ -186,6 +186,9 @@ pub(crate) struct Scripts {
     /// The last text written to the status file: written again only when it
     /// says something else.
     status: String,
+    /// The marketplaces: their catalogs, what is installed from them, and
+    /// their fetches — see `ui::market`.
+    pub(super) markets: super::market::Markets,
     /// Each script's data — `storage_*` —, by its id: one map whatever the
     /// boards it is drawn on, read from disk at its first use.
     stores: HashMap<String, Store>,
@@ -317,6 +320,9 @@ pub(crate) struct Screen {
     pub preview_on: Option<PathBuf>,
     /// The chat of the agent that edits the scripts, by its view's id.
     pub agent: Option<u64>,
+    /// The marketplace entry shown in the preview's place — `(slug,
+    /// folder)` —, when one of the catalog is chosen rather than a script.
+    pub catalog: Option<(String, String)>,
 }
 
 struct Mounted {
@@ -358,6 +364,7 @@ impl ClaudhubApp {
         if std::mem::replace(&mut self.scripts.watching, true) {
             return;
         }
+        self.reload_markets(cx);
         let (Some(root), Some(builtins)) = (root(), builtin_root()) else {
             return;
         };
@@ -368,6 +375,7 @@ impl ClaudhubApp {
                 .await;
             loop {
                 let (folder, shipped) = (root.clone(), builtins.clone());
+                let installed = super::market::installed_root();
                 let language = rust_i18n::locale().to_string();
                 let Ok(known) = this.update(cx, |app, _| {
                     app.scripts.stores.keys().cloned().collect::<HashSet<_>>()
@@ -378,6 +386,10 @@ impl ClaudhubApp {
                     .background_executor()
                     .spawn(async move {
                         let found = scripts::merge(
+                            installed
+                                .as_deref()
+                                .map(|installed| scripts::discover(installed, &language))
+                                .unwrap_or_default(),
                             scripts::discover(&shipped, &language),
                             scripts::discover(&folder, &language),
                         );
@@ -564,11 +576,32 @@ impl ClaudhubApp {
             return;
         };
         let id = id.to_string();
+        // An installed plugin is copied from its folder, a builtin from the
+        // binary.
+        let installed = self
+            .scripts
+            .script(&id)
+            .filter(|script| script.origin == scripts::Origin::Market)
+            .map(|script| script.dir.clone());
         cx.spawn(async move |this, cx| {
             let (folder, of) = (root.clone(), id.clone());
             let forked = cx
                 .background_executor()
-                .spawn(async move { scripts::fork(&folder, &of, BUILTINS) })
+                .spawn(async move {
+                    match installed {
+                        Some(from) => {
+                            let into = folder.join(&of);
+                            if into.exists() {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::AlreadyExists,
+                                    format!("{} exists already", into.display()),
+                                ));
+                            }
+                            crate::market::copy_dir(&from, &into, 0).map(|()| into)
+                        }
+                        None => scripts::fork(&folder, &of, BUILTINS),
+                    }
+                })
                 .await;
             let _ = this.update(cx, |app, cx| match forked {
                 Ok(dir) => {
@@ -615,6 +648,31 @@ impl ClaudhubApp {
             });
         })
         .detach();
+    }
+
+    /// Forgets script `id` once its folder is gone for good: its views, its
+    /// data in memory, and what the settings and the store say of it.
+    pub(super) fn forget_script(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.let_go(id);
+        self.scripts.stores.remove(id);
+        super::settings::Settings::update_global(cx, |settings| {
+            settings.disabled_plugins.retain(|off| off != id);
+            if settings.home_script.trim() == id {
+                settings.home_script.clear();
+            }
+        });
+        super::store::Store::update_global(cx, |store| {
+            for state in store.worktrees.values_mut() {
+                if state.focus_script.as_deref() == Some(id) {
+                    state.focus_script = None;
+                }
+            }
+        });
+        if self.scripts.screen.selected.as_deref() == Some(id) {
+            self.scripts.screen.selected = None;
+        }
+        self.write_scripts_status(cx);
+        cx.notify();
     }
 
     /// Removes the user's script `id`, off the thread: its folder put away
@@ -1079,6 +1137,7 @@ impl ClaudhubApp {
                                 scripts::Origin::User => "user",
                                 scripts::Origin::Builtin => "builtin",
                                 scripts::Origin::Fork => "fork",
+                                scripts::Origin::Market => "market",
                             },
                         )
                         .into()
@@ -1136,6 +1195,7 @@ fn mount(
         app.downgrade(),
         path,
         &script.id,
+        script.origin != scripts::Origin::Market,
         Some(window.window_handle()),
     );
     let policy = Policy::new()
@@ -1207,8 +1267,8 @@ export interface ScriptInfo {
   kind: "tab" | "home";
   /** Off, no board shows it. */
   enabled: boolean;
-  /** Shipped with Claudhub, the user's own, or the user's copy of a builtin. */
-  origin: "builtin" | "user" | "fork";
+  /** Shipped with Claudhub, the user's own, the user's copy of a shipped one, or installed from a marketplace. */
+  origin: "builtin" | "user" | "fork" | "market";
 }
 export type Tab = "home" | "git" | "review" | "pr" | "tests" | "notes" | "todo" | "terminals";
 /** A piece of the board painted by Claudhub: `Card.new("id")`. */
@@ -1269,10 +1329,15 @@ export const TerminalsTab: HostComponent;
 "#;
 
 /// The `claudhub` module, for the board of `path`.
+///
+/// A plugin installed from a marketplace is not `trusted`: what it hands the
+/// agent is shown to the user first, as `ask_agent` does — an agent acts, and
+/// someone else's code is not to prompt it unseen.
 fn module(
     app: WeakEntity<ClaudhubApp>,
     path: &Path,
     id: &str,
+    trusted: bool,
     window: Option<AnyWindowHandle>,
 ) -> HostModule {
     let id = id.to_string();
@@ -1466,7 +1531,11 @@ fn module(
                 let text = arguments.string(0)?.to_string();
                 let path = path.clone();
                 later(&app, window, move |this, window, cx| {
-                    this.send_to_agent(&path, text, window, cx)
+                    if trusted {
+                        this.send_to_agent(&path, text, window, cx)
+                    } else {
+                        this.confirm_agent_prompt(path, text, window, cx)
+                    }
                 })
             }
         })
@@ -1784,7 +1853,13 @@ mod tests {
     /// module whose two halves differ, and it would refuse it at every mount.
     #[test]
     fn the_module_registers_what_it_declares() {
-        let module = module(WeakEntity::new_invalid(), Path::new("/w"), "test", None);
+        let module = module(
+            WeakEntity::new_invalid(),
+            Path::new("/w"),
+            "test",
+            true,
+            None,
+        );
         if let Err(error) = module.validate() {
             panic!("{}", error.message());
         }
@@ -1900,6 +1975,7 @@ mod tests {
         assert!(forked.join(scripts::MANIFEST).is_file());
         assert!(!scripts::retire(&legacy, "http-client", &[], &[]).unwrap());
         let merged = scripts::merge(
+            scripts::Found::default(),
             scripts::discover(&builtins, "fr"),
             scripts::discover(&legacy, "fr"),
         );
@@ -1920,6 +1996,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&legacy);
 
         let found = scripts::merge(
+            scripts::Found::default(),
             scripts::discover(&builtins, "fr"),
             scripts::discover(&root, "fr"),
         );

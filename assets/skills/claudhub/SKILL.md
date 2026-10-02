@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 9 -->
+<!-- claudhub-skill-version: 10 -->
 
 # Claudhub
 
@@ -216,6 +216,14 @@ export default class Example extends View {
   keyring, per script. Declare them in `permissions.secrets`; never write a
   secret to storage, to a file or to `notify`.
 - Also: `open_url(url)` (http/https), `copy_text(text)`.
+- **Sharing**: a marketplace is a GitHub repository whose top-level folders
+  are scripts, each as in `$CLAUDHUB_SCRIPTS`. The user adds it in the
+  Plugins screen (`owner/repo`, `#branch` optional; a private one works
+  through their git access) and installs plugins one by one. An installed
+  plugin's id is `<owner>.<repo>.<folder>`; it is read-only, and its
+  `send_to_agent` shows the text to the user before sending. Keep each
+  folder self-contained, set `version`, and set `claudhub` when using
+  something recent of the module.
 - **Pieces Claudhub draws for you**, to match its own panels: `CodeBlock`
   (`{path, lines: [{line, text}], mark}` — coloured by the path's language,
   numbered, one line marked), `Icon` (`{name, size, tone}`, Claudhub's

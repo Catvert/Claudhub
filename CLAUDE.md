@@ -96,6 +96,8 @@ src/
                 run suivi, prompt d'un échec — pur
   canvas.rs     un nœud de l'accueil sur disque : l'en-tête, le nom — pur
   scripts.rs    les scripts de la vue Focus : manifeste, relevé du dossier — pur
+  market.rs     les marketplaces de plugins : source, clone par `git`, catalogue,
+                installation épinglée
   skill.rs      la skill Claude Code livrée : où, quelle version, l'installer
   agent.rs      les agents dans `/proc`, et le suivi (travaille, fini, attend)
   agent_hooks.rs  les hooks de Claude Code : la ligne shell, le fichier lu, la
@@ -154,6 +156,8 @@ src/
     scripts.rs       les scripts lancés : runtime gpui-shell, module `claudhub`,
                      montage, rechargement
     plugins_view.rs  l'écran Plugins : la liste, l'aperçu, l'agent qui écrit
+    market.rs        les marketplaces dans l'écran Plugins : catalogues, fiche,
+                     installer, mettre à jour, désinstaller
     summary_view.rs  les onglets d'un tableau, et son Accueil
     pr_view.rs       l'onglet PR : le formulaire, ou la PR, ses vérifications,
                      ses fils de revue et ses gestes
@@ -231,7 +235,7 @@ table qu'un test verrouille : une commande mal rangée n'échoue pas, elle atten
 
 - **Lectures** (trois workers) : statut, diff, branches, écritures locales.
 - **Réseau** (un) : `fetch`, `pull`, `push`, Sentry, message rédigé par un
-  agent. Un seul : deux `fetch` se disputeraient le verrou des références.
+  agent, le clone d'une marketplace. Un seul : deux `fetch` se disputeraient le verrou des références.
 - **Hooks du projet** (un) : `wt new/rm/up/down`.
 - **Fond** (un) : résumés, aperçus de l'accueil, agents, `wt`, `just`, `gh`.
   Ne doit jamais passer devant un diff qu'on vient de demander. Un relevé
@@ -581,6 +585,22 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   secrets, les réglages et le magasin le suivent — jamais sous le nom d'un
   intégré, dont il deviendrait le fork. Ses données sont lues **avec le
   dossier**, hors du thread, et écrites d'un bloc (`files::write_atomic`).
+- **Les marketplaces** (`crate::market`, `ui::market`) : un dépôt GitHub dont
+  chaque dossier racine est un script, nommé dans les réglages
+  (`plugin_markets`, aucune par défaut). Il est cloné par le **`git` de
+  l'utilisateur** dans la file réseau — ses accès ouvrent un dépôt privé, et
+  sous Windows c'est le worker WSL qui clone — ; le fil ne rapporte que le
+  texte des fichiers, que l'interface écrit en **catalogue**
+  (`<config>/plugin-markets/`), lu et jamais monté. Installer copie un
+  dossier dans `<config>/scripts-market/`, **épinglé** à son commit
+  (`.installed.json`) ; une version nouvelle du catalogue est proposée,
+  jamais prise. **L'id installé est `<owner>.<repo>.<dossier>`** : données,
+  secrets et réglages sont rangés par id, et un propriétaire GitHub n'a pas
+  de point — un plugin ne prend jamais la place d'un intégré (il hériterait
+  de son jeton) ni d'un autre propriétaire. La fiche du catalogue dit ce que
+  le plugin pourra faire, et Installer en est le consentement ; son
+  `send_to_agent` passe par le dialogue de relecture. Désinstaller emporte
+  données et secrets.
 - **Ce que Claudhub prête** (`ui::script_kit`) : des pièces peintes par
   nous — `CodeBlock` et `CodeLine` (coloration mise en cache : un composant
   est rebâti à chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se
@@ -975,4 +995,5 @@ partout : **la décision vit dans un module pur, devant la vue qui la peint**
 `merge.rs`, `hunks.rs`, `quick.rs`, `db/scope.rs`…).
 `watch::tests::a_real_write_reaches_the_receiver` et
 `ui::scripts::tests::the_shipped_scripts_load_against_the_module` (un dossier
-temporaire) sont les seuls tests qui touchent le système de fichiers ; `tests/server_wire.rs` lance le vrai serveur.
+temporaire), `market::tests::a_marketplace_is_fetched_written_and_installed`
+(un vrai dépôt) sont les seuls tests qui touchent le système de fichiers ; `tests/server_wire.rs` lance le vrai serveur.

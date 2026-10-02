@@ -65,8 +65,12 @@ pub enum Origin {
     User,
     /// Shipped inside Claudhub, and brought up to date with it.
     Builtin,
-    /// The user's copy of a builtin, standing in its place.
+    /// The user's copy of a builtin or of an installed plugin, standing in
+    /// its place.
     Fork,
+    /// Installed from a marketplace — see `crate::market` —: someone
+    /// else's code, pinned to a commit, brought up to date by a gesture.
+    Market,
 }
 
 /// The Claudhub this is, against which a manifest's `claudhub` — the version
@@ -268,30 +272,43 @@ pub fn discover(root: &Path, language: &str) -> Found {
     found
 }
 
-/// The builtins and the user's scripts as one list, by id. A folder of the
-/// user's named after a builtin — a script or not — takes its place: it is
-/// a fork, and a fork whose manifest breaks is said broken rather than
-/// silently replaced by what it forked.
-pub fn merge(builtins: Found, user: Found) -> Found {
-    let taken: Vec<String> = user
-        .scripts
-        .iter()
-        .map(|(script, _)| script.id.clone())
-        .chain(user.broken.iter().map(|(id, _)| id.clone()))
-        .collect();
-    let taken = |id: &str| taken.iter().any(|known| known == id);
-    let shipped: Vec<String> = builtins
-        .scripts
-        .iter()
-        .map(|(script, _)| script.id.clone())
-        .chain(builtins.broken.iter().map(|(id, _)| id.clone()))
-        .collect();
+/// The installed plugins, the builtins and the user's scripts as one list,
+/// by id. A folder of the user's named after a builtin or an installed
+/// plugin — a script or not — takes its place: it is a fork, and a fork
+/// whose manifest breaks is said broken rather than silently replaced by
+/// what it forked. A builtin takes the place of a plugin of the same id,
+/// which an installed id's owner and repository make impossible anyway.
+pub fn merge(market: Found, builtins: Found, user: Found) -> Found {
+    let ids = |found: &Found| -> Vec<String> {
+        found
+            .scripts
+            .iter()
+            .map(|(script, _)| script.id.clone())
+            .chain(found.broken.iter().map(|(id, _)| id.clone()))
+            .collect()
+    };
+    let (by_user, by_builtin) = (ids(&user), ids(&builtins));
+    let shipped: Vec<String> = by_builtin.iter().chain(&ids(&market)).cloned().collect();
+    let taken = |id: &str, above: &[&Vec<String>]| {
+        above.iter().any(|ids| ids.iter().any(|known| known == id))
+    };
     let mut found = Found::default();
-    for (mut script, stamp) in builtins.scripts {
-        if !taken(&script.id) {
-            script.origin = Origin::Builtin;
-            found.scripts.push((script, stamp));
+    for (layer, origin, above) in [
+        (market, Origin::Market, vec![&by_user, &by_builtin]),
+        (builtins, Origin::Builtin, vec![&by_user]),
+    ] {
+        for (mut script, stamp) in layer.scripts {
+            if !taken(&script.id, &above) {
+                script.origin = origin;
+                found.scripts.push((script, stamp));
+            }
         }
+        found.broken.extend(
+            layer
+                .broken
+                .into_iter()
+                .filter(|(id, _)| !taken(id, &above)),
+        );
     }
     for (mut script, stamp) in user.scripts {
         if shipped.contains(&script.id) {
@@ -299,12 +316,7 @@ pub fn merge(builtins: Found, user: Found) -> Found {
         }
         found.scripts.push((script, stamp));
     }
-    found.broken = builtins
-        .broken
-        .into_iter()
-        .filter(|(id, _)| !taken(id))
-        .chain(user.broken)
-        .collect();
+    found.broken.extend(user.broken);
     found.scripts.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
     found.broken.sort();
     found
@@ -361,7 +373,7 @@ pub fn install_builtins(root: &Path, files: &[(&str, &str)]) -> std::io::Result<
 
 /// What the runtime writes beside a script's entry at each load: never the
 /// user's work.
-const GENERATED: [&str; 2] = ["gpui-kit.d.ts", "jsconfig.json"];
+pub(crate) const GENERATED: [&str; 2] = ["gpui-kit.d.ts", "jsconfig.json"];
 
 /// Takes away, from the user's folder `root`, a copy of builtin `id` that is
 /// no fork: one that was written there as an example and never touched, one
@@ -522,7 +534,9 @@ const OFFERED: &str = ".examples";
 /// A fingerprint of an example's files, stable from one build to the next
 /// (FNV-1a) — `std`'s hasher may change with the compiler, and a changed
 /// fingerprint reads as an example the user edited.
-fn fingerprint<'a>(files: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> String {
+pub(crate) fn fingerprint<'a>(
+    files: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for (path, content) in files {
         for byte in path
@@ -675,7 +689,11 @@ pub fn status_text(
                 ", builtin — read-only in `{}`, fork it to change it",
                 script.dir.display()
             ),
-            Origin::Fork => ", fork of the builtin".to_string(),
+            Origin::Fork => ", fork — the user's copy, in place of the shipped one".to_string(),
+            Origin::Market => format!(
+                ", installed from a marketplace — read-only in `{}`, fork it to change it",
+                script.dir.display()
+            ),
         };
         out.push_str(&format!(
             "\n## `{}` ({kind}{origin}) — {}\n",
@@ -1041,22 +1059,35 @@ mod tests {
             scripts: vec![at("mine", "/u"), at("sentry", "/u")],
             broken: vec![("tetris".into(), "no entry".into())],
         };
-        let found = merge(builtins, user);
+        let market = Found {
+            scripts: vec![at("acme.tools.board", "/m"), at("acme.tools.mine", "/m")],
+            broken: Vec::new(),
+        };
+        let user = Found {
+            scripts: user
+                .scripts
+                .into_iter()
+                .chain([at("acme.tools.mine", "/u")])
+                .collect(),
+            broken: user.broken,
+        };
+        let found = merge(market, builtins, user);
         let listed: Vec<(&str, &str, Origin)> = found
             .scripts
             .iter()
             .map(|(script, _)| {
-                let root = if script.dir.starts_with("/b") {
-                    "/b"
-                } else {
-                    "/u"
-                };
+                let root = ["/b", "/m", "/u"]
+                    .into_iter()
+                    .find(|root| script.dir.starts_with(root))
+                    .unwrap();
                 (script.id.as_str(), root, script.origin)
             })
             .collect();
         assert_eq!(
             listed,
             [
+                ("acme.tools.board", "/m", Origin::Market),
+                ("acme.tools.mine", "/u", Origin::Fork),
                 ("http", "/b", Origin::Builtin),
                 ("mine", "/u", Origin::User),
                 ("sentry", "/u", Origin::Fork),

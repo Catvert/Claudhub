@@ -551,6 +551,10 @@ pub struct Settings {
     /// A list of what is off rather than of what is on, so that a script
     /// newly written — or newly shipped — is on.
     pub disabled_plugins: Vec<String>,
+    /// The plugin marketplaces, as the user wrote them — `owner/repo`, a
+    /// GitHub address, `#branch` — see `crate::market`. None by default:
+    /// Claudhub names no marketplace of its own.
+    pub plugin_markets: Vec<String>,
     /// The WSL distribution the workers run in, on Windows.
     ///
     /// Empty: it has not been chosen yet, and the interface asks for it on first
@@ -663,6 +667,7 @@ impl Default for Settings {
             notes_dir: String::new(),
             home_script: String::new(),
             disabled_plugins: Vec::new(),
+            plugin_markets: Vec::new(),
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             folded_panels: Vec::new(),

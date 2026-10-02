@@ -40,6 +40,7 @@ pub mod json;
 pub mod just;
 pub mod logging;
 pub mod lsp;
+pub mod market;
 pub mod outside;
 pub mod release;
 pub mod runtime;

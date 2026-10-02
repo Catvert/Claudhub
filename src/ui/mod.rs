@@ -41,6 +41,7 @@ mod jumps;
 mod keyring;
 mod listed;
 mod lsp;
+mod market;
 mod merge;
 mod merge_view;
 mod motion;

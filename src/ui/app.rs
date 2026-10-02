@@ -1893,6 +1893,7 @@ impl ClaudhubApp {
         // Remotely this send is dropped with the rest — `backend_ready`
         // resends it with the repositories, and for the same reason.
         self.git.send(Cmd::ReleaseCheck);
+        self.fetch_markets(false, cx);
     }
 
     /// One dock per screen, restored or built, and the one that was being looked
@@ -2652,6 +2653,7 @@ impl ClaudhubApp {
                 message,
             } => self.action_failed(ticket, worktree, action, message, window, cx),
             Evt::Fetched { main } => self.fetched(main),
+            Evt::MarketFetched { source, fetched } => self.market_fetched(source, fetched, cx),
             Evt::ReleaseChecked { version, url } => {
                 // Compared against the window's own version, not the
                 // fetcher's: in remote mode the server did the round trip,

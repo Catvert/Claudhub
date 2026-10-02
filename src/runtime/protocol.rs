@@ -260,6 +260,15 @@ pub enum Cmd {
     /// launch. Network queue — an HTTP round trip — and, like `AutoFetch`,
     /// **silent on failure**: offline is a normal day.
     ReleaseCheck,
+    /// Fetches a plugin marketplace with the user's `git` — see
+    /// `crate::market` —, unless its head is still `known`. `source` is the
+    /// marketplace as the settings name it, and comes back with the answer.
+    FetchMarket {
+        source: String,
+        url: String,
+        branch: Option<String>,
+        known: Option<String>,
+    },
     Pull {
         worktree: WorktreeId,
     },
@@ -1060,6 +1069,7 @@ impl Cmd {
             Self::Fetch { .. } => "Fetch",
             Self::AutoFetch { .. } => "AutoFetch",
             Self::ReleaseCheck => "ReleaseCheck",
+            Self::FetchMarket { .. } => "FetchMarket",
             Self::Pull { .. } => "Pull",
             Self::Push { .. } => "Push",
             Self::Reconcile { .. } => "Reconcile",
@@ -1272,6 +1282,12 @@ pub enum Evt {
     ReleaseChecked {
         version: String,
         url: String,
+    },
+    /// What a marketplace's fetch found: its scripts' files as text, never a
+    /// path — the interface writes them under its own configuration.
+    MarketFetched {
+        source: String,
+        fetched: crate::market::Fetched,
     },
     /// The message the agent proposes for what is staged.
     ///

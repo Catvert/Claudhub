@@ -288,6 +288,10 @@ impl ClaudhubApp {
         // The startup check was dropped with everything sent before the
         // handshake: asked again here, like the repositories above.
         self.git.send(crate::runtime::Cmd::ReleaseCheck);
+        // A fetch sent before the handshake, or to a server that died, will
+        // not answer: it is no longer under way.
+        self.scripts.markets.fetching.clear();
+        self.fetch_markets(false, cx);
         if let Some(active) = self.active.clone() {
             self.git.send(crate::runtime::Cmd::Watch {
                 worktree: active.clone(),
