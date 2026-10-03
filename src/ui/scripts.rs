@@ -1956,6 +1956,25 @@ mod tests {
         module
     }
 
+    /// A board starts reading the scripts' folder before it looks for its
+    /// scripts in what was found: a script that is only looked up never
+    /// gets mounted, and nothing else started the reading at launch.
+    #[test]
+    fn a_board_reads_the_scripts_folder_before_looking_its_scripts_up() {
+        let source = include_str!("focus_view.rs");
+        let board = &source[source
+            .find("fn render_focus_board(")
+            .expect("the board's render")..];
+        let watch = board.find("self.watch_scripts(cx)");
+        let lookup = board
+            .find("self.board_script(")
+            .expect("the board's script");
+        assert!(
+            watch.is_some_and(|watch| watch < lookup),
+            "render_focus_board must call watch_scripts before board_script"
+        );
+    }
+
     /// What the module registers is what it declares: the runtime refuses a
     /// module whose two halves differ, and it would refuse it at every mount.
     #[test]

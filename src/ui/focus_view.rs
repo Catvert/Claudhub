@@ -1200,6 +1200,11 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The scripts' folder is read from the first board drawn: their tabs
+        // and the home script are looked up in what it found, and waiting for
+        // a script to be mounted first meant none ever was — the scripts
+        // showed only once the Plugins screen had started the reading.
+        self.watch_scripts(cx);
         let view = self.board_view(path, cx);
         // A script's tab, chosen, stands in the place of the view; a home
         // script, in the place of the home.
