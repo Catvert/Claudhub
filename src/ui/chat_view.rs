@@ -326,6 +326,10 @@ pub struct ChatView {
     deleting: Option<String>,
     /// A login was launched in a terminal: the auth screen says to come back.
     login_launched: bool,
+    /// The prompt the chat was opened for — the library's skill —, sent
+    /// once the session is up: before that, `deliver` would only fill the
+    /// composer.
+    opening: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -385,6 +389,7 @@ impl ChatView {
             pasted: Vec::new(),
             deleting: None,
             login_launched: false,
+            opening: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -439,9 +444,19 @@ impl ChatView {
 
     /// A line from the agent.
     pub fn receive(&mut self, line: &str, cx: &mut Context<Self>) {
-        let out = self.chat.receive(line);
+        let mut out = self.chat.receive(line);
+        if self.chat.is_ready() {
+            if let Some(text) = self.opening.take() {
+                out.extend(self.chat.prompt_with(&text, &[], &[]));
+            }
+        }
         self.sync(cx);
         self.send(out, cx);
+    }
+
+    /// Sends `text` as the first prompt, as soon as the session is up.
+    pub fn open_with(&mut self, text: String) {
+        self.opening = Some(text);
     }
 
     /// The agent's process is gone.

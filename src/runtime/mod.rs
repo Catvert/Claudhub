@@ -124,6 +124,7 @@ fn is_background(cmd: &Cmd) -> bool {
             | Cmd::WtQuestions { .. }
             | Cmd::JustLoad { .. }
             | Cmd::TestsLoad { .. }
+            | Cmd::LibraryLoad { .. }
     )
 }
 
@@ -1332,6 +1333,40 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             });
             evts
         }
+        Cmd::LibraryLoad { worktree } => vec![Evt::Library {
+            skills: crate::library::discover(&worktree),
+            worktree,
+        }],
+        Cmd::LibraryShare {
+            worktree,
+            dir,
+            reader,
+        } => written(
+            worktree,
+            true,
+            Action::FileOp,
+            Refresh::OnSuccess,
+            |worktree| {
+                crate::library::share(worktree, &dir, reader)
+                    .map(|copied| copied.display().to_string())
+            },
+            library_reread,
+        ),
+        Cmd::LibraryPrompt {
+            worktree,
+            name,
+            text,
+        } => written(
+            worktree,
+            true,
+            Action::FileOp,
+            Refresh::OnSuccess,
+            |worktree| {
+                crate::library::save_prompt(worktree, &name, &text)
+                    .map(|file| file.display().to_string())
+            },
+            library_reread,
+        ),
         Cmd::WriteContext { path, text } => {
             if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
                 if let Err(e) = crate::files::write_at(&path, &text, None) {
@@ -2096,6 +2131,17 @@ fn quiet<T>(op: impl FnOnce(&Path) -> Result<T>) -> impl FnOnce(&Path) -> Result
     move |dir| op(dir).map(|_| String::new())
 }
 
+/// A worktree's library listed again after it was written to, and its
+/// status: what was written is a file of the project, to be committed.
+fn library_reread(worktree: PathBuf) -> Vec<Evt> {
+    let mut evts = vec![Evt::Library {
+        skills: crate::library::discover(&worktree),
+        worktree: worktree.clone(),
+    }];
+    evts.extend(status_read(worktree));
+    evts
+}
+
 /// The worktree's status read again, when it can be.
 fn status_read(worktree: PathBuf) -> Vec<Evt> {
     match status::status(&worktree) {
@@ -2754,6 +2800,22 @@ mod tests {
             known: None,
         };
         assert_eq!(queue_of(&market), Queue::Network);
+        // The library walks the user's folders, which a diff never waits on;
+        // sharing a skill is a local write, answered at once.
+        assert_eq!(
+            queue_of(&Cmd::LibraryLoad {
+                worktree: worktree(),
+            }),
+            Queue::Background
+        );
+        assert_eq!(
+            queue_of(&Cmd::LibraryShare {
+                worktree: worktree(),
+                dir: worktree(),
+                reader: crate::library::Reader::Claude,
+            }),
+            Queue::Reads
+        );
         // A review point is a local write of milliseconds, and it is what the
         // notes' sending waits on before the agent starts rewriting the tree.
         assert_eq!(

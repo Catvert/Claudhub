@@ -39,6 +39,7 @@ mod icons;
 mod inflight;
 mod jumps;
 mod keyring;
+mod library;
 mod listed;
 mod lsp;
 mod market;

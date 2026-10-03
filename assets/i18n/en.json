@@ -58,6 +58,7 @@
   "chat-option-search": "Search…",
   "chat-option-none": "No match",
   "chat-with": "Chat with %{agent}",
+  "library-no-agent": "No chat agent named “%{agent}” in the settings",
   "chat-configure": "Set up a chat agent…",
   "chat-placeholder": "Ask the agent…  (/ commands · @ files)",
   "chat-send": "Send",

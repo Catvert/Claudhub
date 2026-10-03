@@ -99,6 +99,7 @@ src/
   market.rs     les marketplaces de plugins : source, clone par `git`, catalogue,
                 installation épinglée
   skill.rs      la skill Claude Code livrée : où, quelle version, l'installer
+  library.rs    les skills de Claude et Codex : relevé, partage, prompts
   agent.rs      les agents dans `/proc`, et le suivi (travaille, fini, attend)
   agent_hooks.rs  les hooks de Claude Code : la ligne shell, le fichier lu, la
                 fusion dans `.claude/settings.local.json`
@@ -158,6 +159,7 @@ src/
     plugins_view.rs  l'écran Plugins : la liste, l'aperçu, l'agent qui écrit
     market.rs        les marketplaces dans l'écran Plugins : catalogues, fiche,
                      installer, mettre à jour, désinstaller
+    library.rs       la bibliothèque agent : liste, partage, chat lancé
     summary_view.rs  les onglets d'un tableau, et son Accueil
     pr_view.rs       l'onglet PR : le formulaire, ou la PR, ses vérifications,
                      ses fils de revue et ses gestes
@@ -569,15 +571,20 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   Un exemple (`assets/scripts/`) est écrit une fois, puis **mis à jour tant
   qu'on n'y a pas touché** (empreinte dans `.examples`) ; modifié ou
   supprimé, il reste tel quel.
-- **Les intégrés** (`ui::scripts::BUILTINS` : `sentry`, `http-client`) sont
-  **réécrits à chaque version** dans `<config>/scripts-builtin/`, à nous
-  seuls. **Forker** = copier dans le dossier de l'utilisateur **sous le même
-  nom** : la copie prend la place (`scripts::merge`), et avec elle les
-  données, secrets et la tâche des tableaux, tous rangés par id ; revenir
-  l'écarte dans `.forks/`, jamais effacée. Une copie qui n'est pas un fork
-  (exemple intact, fichiers identiques, empreinte connue d'une version
-  passée) est retirée au démarrage (`scripts::retire`). `sentry` est le
-  portillon d'acceptation : un panneau entier, réglages, jeton et requêtes.
+- **Les intégrés** (`ui::scripts::BUILTINS`) sont **réécrits à chaque
+  version** dans `<config>/scripts-builtin/`, à nous seuls. **Forker** =
+  copier dans le dossier de l'utilisateur **sous le même nom** : la copie
+  prend la place (`scripts::merge`), et avec elle les données, secrets et la
+  tâche des tableaux, tous rangés par id ; revenir l'écarte dans `.forks/`,
+  jamais effacée. Une copie qui n'est pas un fork (exemple intact, fichiers
+  identiques, empreinte connue d'une version passée) est retirée au démarrage
+  (`scripts::retire`). `sentry` est le portillon d'acceptation : un panneau
+  entier, réglages, jeton et requêtes.
+- **La bibliothèque agent** (`agent-library`, `crate::library`) : **la portée
+  projet est le dépôt** — partager copie la skill dans le projet (refusé hors
+  de la liste relevée), son prompt d'accompagnement est
+  `.claudhub/prompts/<nom>.md`. Le premier message d'un chat lancé **attend la
+  session** (`ChatView::open_with`) : `deliver` remplirait le champ.
 - **Un script se désactive** (`disabled_plugins` des réglages, la liste de
   ce qui est éteint : un nouveau est allumé) : aucun tableau ne le montre,
   ses vues sont lâchées, l'écran Plugins l'aperçoit encore. **Retiré**, il
@@ -601,14 +608,9 @@ composants sont nos cartes et nos onglets (`HostModule::component`).
   le plugin pourra faire, et Installer en est le consentement ; son
   `send_to_agent` passe par le dialogue de relecture. Désinstaller emporte
   données et secrets.
-- **Ce que Claudhub prête** (`ui::script_kit`) : des pièces peintes par
-  nous — `CodeBlock` et `CodeLine` (coloration mise en cache : un composant
-  est rebâti à chaque repeint), `Icon`, `Badge`, `ShareBar`, un ton se
-  **nomme** ; `sizes()` (nos hauteurs, pour une liste virtuelle) et
-  `palette()` (les tons que `cx.theme().colors` n'a pas) — et des
-  gestes : `locate`/`open_file` (seul un fichier que `locate` trouve s'ouvre,
-  le chemin venant de données reçues), `ask_agent` (le dialogue de relecture),
-  `relative_time`.
+- **Ce que Claudhub prête** (`ui::script_kit`, la liste en tête du module) :
+  des pièces peintes par nous, dont le ton se **nomme**, et des gestes — seul
+  un fichier que `locate` trouve s'ouvre.
 - **L'écran Plugins** (`ui::plugins_view`), ouvert du pied de la barre
   latérale à la place des tableaux : la liste, l'aperçu du script choisi sur
   un worktree qu'on choisit, et un **chat ACP** (l'agent qu'on choisit)
@@ -993,7 +995,5 @@ là où une régression donne une liste plausible mais fausse. Le même motif
 partout : **la décision vit dans un module pur, devant la vue qui la peint**
 (`notes.rs`, `focus.rs`, `inflight.rs`, `vim.rs`, `motion.rs`, `jumps.rs`,
 `merge.rs`, `hunks.rs`, `quick.rs`, `db/scope.rs`…).
-`watch::tests::a_real_write_reaches_the_receiver` et
-`ui::scripts::tests::the_shipped_scripts_load_against_the_module` (un dossier
-temporaire), `market::tests::a_marketplace_is_fetched_written_and_installed`
-(un vrai dépôt) sont les seuls tests qui touchent le système de fichiers ; `tests/server_wire.rs` lance le vrai serveur.
+Les tests qui touchent le système de fichiers le font dans un dossier
+temporaire ; `tests/server_wire.rs` lance le vrai serveur.

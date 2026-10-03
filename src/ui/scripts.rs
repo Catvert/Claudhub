@@ -119,6 +119,22 @@ pub(super) const BUILTINS: &[(&str, &str)] = &[
         "http-client/texts.js",
         include_str!("../../assets/scripts/http-client/texts.js"),
     ),
+    (
+        "agent-library/claudhub.json",
+        include_str!("../../assets/scripts/agent-library/claudhub.json"),
+    ),
+    (
+        "agent-library/main.js",
+        include_str!("../../assets/scripts/agent-library/main.js"),
+    ),
+    (
+        "agent-library/library.js",
+        include_str!("../../assets/scripts/agent-library/library.js"),
+    ),
+    (
+        "agent-library/texts.js",
+        include_str!("../../assets/scripts/agent-library/texts.js"),
+    ),
 ];
 
 /// Fingerprints of earlier versions of the builtins, as they may still lie
@@ -1270,6 +1286,23 @@ export interface ScriptInfo {
   /** Shipped with Claudhub, the user's own, the user's copy of a shipped one, or installed from a marketplace. */
   origin: "builtin" | "user" | "fork" | "market";
 }
+/** A skill an agent started in this worktree can read — see the agent library. */
+export interface Skill {
+  name: string;
+  description: string;
+  /** What it takes after its name, as its front matter says; empty when it says nothing. */
+  argument_hint: string;
+  /** Its folder, and its `SKILL.md`: paths of the machine the agents run on. */
+  dir: string;
+  file: string;
+  /** The project's — versioned, shared by a commit —, the user's, or an installed plugin's. */
+  scope: "project" | "personal" | "plugin";
+  /** The agent that finds it of itself where it lies; any agent can read the file. */
+  reader: "claude" | "codex";
+  plugin: string | null;
+  /** The project's companion prompt for it — `.claudhub/prompts/<name>.md`, versioned —; empty when none. */
+  prompt: string;
+}
 export type Tab = "home" | "git" | "review" | "pr" | "tests" | "notes" | "todo" | "terminals";
 /** A piece of the board painted by Claudhub: `Card.new("id")`. */
 export interface HostComponent { "new"(id: string, props?: HostValue): NativeElement; }
@@ -1281,6 +1314,23 @@ export function terminals(): Terminal[];
 export function scripts(): ScriptInfo[];
 /** The interface's language: `"fr"` or `"en"`. */
 export function language(): string;
+/** The skills an agent started in this worktree can read, the project's first; null while they are listed. */
+export function skills(): Skill[] | null;
+/** A skill's `SKILL.md` past its front matter, by its folder; null when it is not listed. */
+export function skill_body(dir: string): string | null;
+/** Lists the skills again — after one was written, pulled or installed. */
+export function reload_skills(): void;
+/** Copies a personal or plugin skill into the project's folder for its agent, where a commit shares it. */
+export function share_skill(dir: string): void;
+/** Writes a skill's companion prompt into the project, by the skill's name; a blank one is removed. */
+export function save_skill_prompt(name: string, text: string): void;
+/** The chat agents the settings offer, by name. */
+export function chat_agents(): string[];
+/**
+ * Opens a chat with the agent of that name on the worktree, and sends it `prompt`
+ * once its session is up; the chat becomes the terminal `Terminals` shows.
+ */
+export function start_agent(agent: string, prompt: string): void;
 
 /** Shows one of the board's own tabs. */
 export function open_tab(tab: Tab): void;
@@ -1364,6 +1414,63 @@ fn module(
             read(&app, path, |this, _, cx| this.script_list(cx)),
         )
         .function("language", |_| Ok(HostValue::from(&*rust_i18n::locale())))
+        .function("skills", {
+            let (app, path) = (app.clone(), path.to_path_buf());
+            move |_| change(&app, |this, _| Ok(this.script_skills(&path)))
+        })
+        .function("skill_body", {
+            let (app, path) = (app.clone(), path.to_path_buf());
+            move |arguments| {
+                let dir = arguments.string(0)?.to_string();
+                change(&app, |this, _| Ok(this.script_skill_body(&path, &dir)))
+            }
+        })
+        .function("reload_skills", {
+            let (app, path) = (app.clone(), path.to_path_buf());
+            move |_| {
+                change(&app, |this, _| {
+                    this.reload_library(&path);
+                    Ok(HostValue::Null)
+                })
+            }
+        })
+        .function("share_skill", {
+            let (app, path) = (app.clone(), path.to_path_buf());
+            move |arguments| {
+                let dir = arguments.string(0)?.to_string();
+                change(&app, |this, _| {
+                    this.share_skill(&path, &dir)
+                        .map(|()| HostValue::Null)
+                        .map_err(HostError::new)
+                })
+            }
+        })
+        .function("save_skill_prompt", {
+            let (app, path) = (app.clone(), path.to_path_buf());
+            move |arguments| {
+                let name = arguments.string(0)?.to_string();
+                let text = arguments.string(1)?.to_string();
+                change(&app, |this, _| {
+                    this.save_skill_prompt(&path, &name, &text);
+                    Ok(HostValue::Null)
+                })
+            }
+        })
+        .function("chat_agents", |_| {
+            gpui_shell::with_current_app(|cx| ClaudhubApp::script_chat_agents(cx))
+                .ok_or_else(unreachable)
+        })
+        .function("start_agent", {
+            let (app, path) = (app.clone(), path.to_path_buf());
+            move |arguments| {
+                let agent = arguments.string(0)?.to_string();
+                let prompt = arguments.string(1)?.to_string();
+                let path = path.clone();
+                later(&app, window, move |this, window, cx| {
+                    this.start_library_agent(&path, &agent, prompt, window, cx)
+                })
+            }
+        })
         .function("storage_get", {
             let (app, id) = (app.clone(), id.clone());
             move |arguments| {
@@ -1987,6 +2094,7 @@ mod tests {
         assert_eq!(
             origins,
             [
+                ("agent-library", scripts::Origin::Builtin),
                 ("http-client", scripts::Origin::Fork),
                 ("sentry", scripts::Origin::Builtin),
             ]
@@ -2009,6 +2117,7 @@ mod tests {
         assert_eq!(
             kinds,
             [
+                ("agent-library", Kind::Tab),
                 ("dashboard", Kind::Tab),
                 ("home-columns", Kind::Home),
                 ("http-client", Kind::Tab),

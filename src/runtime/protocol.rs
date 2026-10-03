@@ -730,6 +730,27 @@ pub enum Cmd {
         scope: crate::skill::Scope,
         install: bool,
     },
+    /// Lists every skill an agent started in the worktree can read — the
+    /// project's, the user's, the plugins' — for the agent library
+    /// (`crate::library`). Background queue: a walk of a few folders, asked
+    /// when the library is drawn.
+    LibraryLoad {
+        worktree: WorktreeId,
+    },
+    /// Copies a skill's folder into the project's, where a commit shares it
+    /// — then lists the library again and reads the status.
+    LibraryShare {
+        worktree: WorktreeId,
+        dir: PathBuf,
+        reader: crate::library::Reader,
+    },
+    /// Writes a skill's companion prompt into the project — removes it when
+    /// blank —, then lists the library again and reads the status.
+    LibraryPrompt {
+        worktree: WorktreeId,
+        name: String,
+        text: String,
+    },
     /// Writes a worktree's context sheet — what an agent reads of its
     /// environment — when it differs from what is there: it is written at
     /// every sweep, and a file rewritten identical every ten seconds wakes
@@ -1123,6 +1144,9 @@ impl Cmd {
             Self::ReadCanvasPicture { .. } => "ReadCanvasPicture",
             Self::DeleteCanvasPicture { .. } => "DeleteCanvasPicture",
             Self::SetSkill { .. } => "SetSkill",
+            Self::LibraryLoad { .. } => "LibraryLoad",
+            Self::LibraryShare { .. } => "LibraryShare",
+            Self::LibraryPrompt { .. } => "LibraryPrompt",
             Self::WriteContext { .. } => "WriteContext",
             Self::CreateCanvasNote { .. } => "CreateCanvasNote",
             Self::WriteCanvasFile { .. } => "WriteCanvasFile",
@@ -1599,6 +1623,11 @@ pub enum Evt {
     SkillStatus {
         worktree: WorktreeId,
         status: crate::skill::Status,
+    },
+    /// The skills of a worktree's agent library.
+    Library {
+        worktree: WorktreeId,
+        skills: Vec<crate::library::Skill>,
     },
     /// A worktree's node files: full path, private or not, stamp, and text —
     /// `None` when the stamp is the one `ReadCanvas` gave — and the pictures

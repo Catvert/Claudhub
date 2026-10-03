@@ -1168,6 +1168,8 @@ pub struct ClaudhubApp {
     pub(super) generations: Vec<crate::ui::canvas_view::Generation>,
     /// Where the Claudhub skill is installed, by checkout asked about.
     pub(super) skill_status: HashMap<PathBuf, crate::skill::Status>,
+    /// The agent library's skills, per worktree — see `ui::library`.
+    pub(super) library: crate::ui::library::Library,
     /// The worktrees whose kept terminals have been opened again: those, and
     /// only those, have their open terminals written back — a worktree whose
     /// repository has not answered yet would otherwise be written empty.
@@ -1740,6 +1742,7 @@ impl ClaudhubApp {
             canvas_reads: Default::default(),
             sweep: Default::default(),
             skill_status: HashMap::new(),
+            library: Default::default(),
             generations: Vec::new(),
             canvas_pictures: HashMap::new(),
             terminals_revived: std::collections::HashSet::new(),
@@ -2575,6 +2578,7 @@ impl ClaudhubApp {
                 self.skill_status.insert(worktree, status);
                 cx.notify();
             }
+            Evt::Library { worktree, skills } => self.library_arrived(worktree, skills, cx),
             Evt::CanvasWritten { worktree, created } => self.canvas_written(worktree, created, cx),
             Evt::Outlines { outlines } => {
                 self.sweep.answered(super::sweep::Reading::Outlines);

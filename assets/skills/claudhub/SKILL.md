@@ -2,7 +2,7 @@
 name: claudhub
 description: Use when working inside a Claudhub worktree (the CLAUDHUB_WORKTREE environment variable is set) and the user asks to add, read or edit a note, a code review or a node on the Claudhub home screen, to build or change a panel, a tab or the home of Claudhub's focus view (a script), or asks what the environment is — branch, base, changes, other worktrees, open terminals. Explains where Claudhub's nodes and scripts live on disk and their exact format.
 ---
-<!-- claudhub-skill-version: 10 -->
+<!-- claudhub-skill-version: 11 -->
 
 # Claudhub
 
@@ -224,6 +224,19 @@ export default class Example extends View {
   `send_to_agent` shows the text to the user before sending. Keep each
   folder self-contained, set `version`, and set `claudhub` when using
   something recent of the module.
+- **Skills and agents**: `skills()` lists the skills an agent started in the
+  worktree can read (`{name, description, argument_hint, dir, file, scope:
+  "project" | "personal" | "plugin", reader: "claude" | "codex", plugin,
+  prompt}`, `prompt` being the project's companion prompt for it, empty
+  when none; null while they are listed), `skill_body(dir)` gives one's
+  `SKILL.md` past its header, `reload_skills()` lists them again,
+  `share_skill(dir)`
+  copies a personal or plugin skill into the project,
+  `save_skill_prompt(name, text)` writes its companion prompt into
+  `.claudhub/prompts/` (blank removes it); `chat_agents()` names
+  the chat agents the settings offer, and `start_agent(agent, prompt)` opens
+  a chat with one on the worktree, `prompt` its first message — it shows in
+  `Terminals`.
 - **Pieces Claudhub draws for you**, to match its own panels: `CodeBlock`
   (`{path, lines: [{line, text}], mark}` — coloured by the path's language,
   numbered, one line marked), `Icon` (`{name, size, tone}`, Claudhub's
@@ -239,7 +252,7 @@ export default class Example extends View {
   what a script knows of the worktree comes from the module; ask the user,
   or use `send_to_agent`.
 - **Builtins** ship with Claudhub in `$CLAUDHUB_BUILTIN_SCRIPTS/<id>/`
-  (`sentry`, `http-client`) and are rewritten at each update: never edit
+  (`sentry`, `http-client`, `agent-library`) and are rewritten at each update: never edit
   them there. To change one, **fork** it — copy its folder into
   `$CLAUDHUB_SCRIPTS/` under the same id (the Plugins screen's Fork button
   does it): the copy replaces the builtin, keeps its storage and secrets,

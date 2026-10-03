@@ -1,0 +1,9 @@
+{
+  "title": { "fr": "Bibliothèque agent", "en": "Agent library" },
+  "kind": "tab",
+  "icon": "book-open",
+  "description": {
+    "fr": "Les skills que Claude et Codex lisent dans ce worktree — du projet, personnelles, des plugins — avec leur description, et un agent lancé sur l'une d'elles d'un clic. Celles du projet vivent dans son dépôt : un commit les partage.",
+    "en": "The skills Claude and Codex read in this worktree — the project's, your own, the plugins' — with their description, and an agent launched on one in a click. The project's live in its repository: a commit shares them."
+  }
+}

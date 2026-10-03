@@ -38,6 +38,7 @@ pub mod home;
 pub mod instance;
 pub mod json;
 pub mod just;
+pub mod library;
 pub mod logging;
 pub mod lsp;
 pub mod market;
