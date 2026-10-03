@@ -129,6 +129,9 @@ struct Pasted {
     /// Base64, as the prompt carries it.
     data: String,
     bytes: usize,
+    /// The thumbnail, built once: a `gpui_kit::Image` digests its bytes to
+    /// key the texture, and a render runs every frame.
+    image: Arc<gpui_kit::Image>,
 }
 
 /// The formats Claude reads, and the size past which the API refuses one.
@@ -902,6 +905,7 @@ impl ChatView {
                 mime: image.format.mime_type(),
                 data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
                 bytes: image.bytes.len(),
+                image: Arc::new(image.clone()),
             });
             took = true;
         }
@@ -1879,16 +1883,23 @@ impl ChatView {
             .enumerate()
             .map(|(ix, image)| {
                 h_flex()
-                    .gap_1()
+                    .gap_2()
                     .items_center()
-                    .pl_2()
-                    .pr_1()
-                    .py(px(1.))
+                    .p_1()
                     .rounded(theme.radius)
                     .border_1()
                     .border_color(theme.border)
                     .text_xs()
-                    .child(icon("image").xsmall().text_color(theme.muted_foreground))
+                    .child(
+                        // The corners are the image's own: gpui's content
+                        // mask is rectangular, a rounded parent would not
+                        // clip it.
+                        gpui_kit::img(image.image.clone())
+                            .size(rems(2.5))
+                            .flex_none()
+                            .rounded(theme.radius)
+                            .object_fit(gpui_kit::ObjectFit::Cover),
+                    )
                     .child(tr!("chat-image-chip", {
                         n: ix + 1,
                         size: (image.bytes / 1024).max(1)
