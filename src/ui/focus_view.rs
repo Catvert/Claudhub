@@ -441,6 +441,7 @@ impl ClaudhubApp {
                 rows.push(self.render_focus_row(&path, rank, shown, doings, cx));
             }
         }
+        rows.push(self.open_repo_row(cx));
         let list = v_flex()
             .id("focus-sidebar-list")
             .track_scroll(&self.focus_sidebar_scroll)
@@ -491,8 +492,8 @@ impl ClaudhubApp {
             .child(hint);
         // At the foot, how the worktrees chosen above are looked at — the two
         // views, what either hid — then what speaks for the whole screen and
-        // not a worktree: the skill, another repository, putting the
-        // worktrees on show back as the rules lay them, and the settings.
+        // not a worktree: the skill, putting the worktrees on show back as
+        // the rules lay them, and the settings.
         let foot = v_flex()
             .flex_none()
             .w_full()
@@ -510,7 +511,6 @@ impl ClaudhubApp {
                     .child(self.render_skill_button(false, cx))
                     .children(self.render_hidden_menu(true, cx))
                     .child(div().flex_1())
-                    .child(self.open_repo_button(cx))
                     .child(self.reset_button(cx))
                     .child(settings_button(cx)),
             );
@@ -533,7 +533,35 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// Opening another repository: it joins the list at once.
+    /// Opening another repository, said in words after the last project:
+    /// where the list ends is where one looks for more of it. A bare glyph at
+    /// the foot, among the screen's own buttons, went unseen.
+    fn open_repo_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (muted, foreground) = (theme.muted_foreground, theme.foreground);
+        h_flex()
+            .id("focus-open-repo-row")
+            .w_full()
+            .mt_3()
+            .pl_3()
+            .pr_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .cursor_pointer()
+            .text_sm()
+            .text_color(muted)
+            .hover(move |style| style.bg(theme.list_hover).text_color(foreground))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.prompt_open_repository(window, cx);
+            }))
+            .child(icon("folder-plus").xsmall())
+            .child(div().flex_1().min_w_0().truncate().child(tr!("repo-open")))
+            .into_any_element()
+    }
+
+    /// Opening another repository, on the folded rail: it joins the list at
+    /// once.
     fn open_repo_button(&self, cx: &mut Context<Self>) -> Button {
         Button::new("focus-open-repo")
             .ghost()
