@@ -337,6 +337,7 @@ pub fn configure(worktree: &Path, install: bool) -> Result<bool> {
     use crate::git::{git_ok, repo};
 
     let path = worktree.join(SETTINGS_FILE);
+    settle(worktree, CHECKOUT_WAIT)?;
     if git_ok(
         worktree,
         &["ls-files", "--error-unmatch", "--", SETTINGS_FILE],
@@ -390,6 +391,50 @@ pub fn configure(worktree: &Path, install: bool) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// How long `configure` waits for a worktree's checkout to finish.
+const CHECKOUT_WAIT: Duration = Duration::from_secs(20);
+
+/// Waits until no checkout is under way in the worktree, or says it still is.
+///
+/// **A worktree is hooked as soon as it appears in `git worktree list`**,
+/// which `git worktree add` fills before it checks anything out. Until the
+/// checkout ends there is no index, `ls-files` sees nothing tracked, and a
+/// settings file the project versions was written over — git then wrote its
+/// index on our file, and the new worktree opened with a change nobody made.
+/// A read worker waits here, a second at most on a real checkout.
+fn settle(worktree: &Path, wait: Duration) -> Result<()> {
+    let Some(git_dir) = crate::git::repo::git_dir(worktree) else {
+        return Ok(());
+    };
+    let deadline = std::time::Instant::now() + wait;
+    while checking_out(worktree, &git_dir) {
+        if std::time::Instant::now() >= deadline {
+            bail!("the checkout of {} is still under way", worktree.display());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+/// Is a checkout being written in this worktree?
+///
+/// `index.lock` is held from the first file written to the index that ends
+/// it. Before the lock, an index still missing while HEAD names a commit is
+/// a checkout about to start; `git worktree add` also parks a null id in
+/// HEAD for an instant before pointing it at the branch. A repository with
+/// no commit has no index either, and nothing to wait for.
+fn checking_out(worktree: &Path, git_dir: &Path) -> bool {
+    if git_dir.join("index.lock").exists() {
+        return true;
+    }
+    if git_dir.join("index").exists() {
+        return false;
+    }
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).unwrap_or_default();
+    head.trim().bytes().all(|byte| byte == b'0')
+        || crate::git::git_ok(worktree, &["rev-parse", "--verify", "-q", "HEAD^{commit}"])
 }
 
 /// Adds a line to `info/exclude`, which every worktree of the repository reads
@@ -739,6 +784,46 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(repo.join(SETTINGS_FILE)).expect("r"))
                 .expect("json");
         assert_eq!(back, users());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A worktree hooked while `git worktree add` checks it out: the file
+    /// is in the commit, not yet in an index. Configuring waits for the
+    /// index, then sees the file tracked and leaves it alone.
+    #[test]
+    fn a_checkout_under_way_is_waited_for() {
+        let repo = scratch("checkout");
+        git(&repo, &["init", "-q"]);
+        std::fs::create_dir_all(repo.join(".claude")).expect(".claude");
+        std::fs::write(repo.join(SETTINGS_FILE), "").expect("write");
+        git(&repo, &["add", SETTINGS_FILE]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "c",
+            ],
+        );
+        let index = repo.join(".git/index");
+        let aside = repo.join(".git/index.aside");
+        std::fs::rename(&index, &aside).expect("aside");
+        assert!(checking_out(&repo, &repo.join(".git")));
+        assert!(settle(&repo, Duration::ZERO).is_err());
+        let back = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::rename(&aside, &index).expect("back");
+        });
+        assert!(configure(&repo, true).is_err(), "tracked, once checked out");
+        back.join().expect("thread");
+        assert_eq!(
+            std::fs::read_to_string(repo.join(SETTINGS_FILE)).expect("r"),
+            ""
+        );
         let _ = std::fs::remove_dir_all(&repo);
     }
 
