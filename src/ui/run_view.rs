@@ -32,8 +32,9 @@ use crate::ui::run::{self, RunConfig};
 impl ClaudhubApp {
     /// A worktree's configurations — see `run::configs`.
     pub(super) fn run_configs(&self, worktree: &Path) -> Vec<RunConfig> {
-        let recipes: Vec<String> = self
-            .just_recipes(worktree)
+        let snapshot = self.just_recipes(worktree);
+        let recipes: Vec<String> = snapshot
+            .as_ref()
             .map(|snapshot| {
                 snapshot
                     .recipes
@@ -42,7 +43,13 @@ impl ClaudhubApp {
                     .collect()
             })
             .unwrap_or_default();
-        run::configs(self.env_controls(worktree).is_some(), &recipes)
+        run::configs(
+            self.env_controls(worktree).is_some(),
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.default.as_deref()),
+            &recipes,
+        )
     }
 
     /// Whether the project's environment can be started and stopped from
@@ -159,10 +166,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let configs = self.run_configs(worktree);
-        let default = self
-            .just_recipes(worktree)
-            .and_then(|snapshot| snapshot.default.clone());
-        let shown = run::shown(self.run_choice.get(worktree), &configs, default.as_deref())?;
+        let shown = run::shown(self.run_choice.get(worktree), &configs)?;
         let theme = cx.theme().clone();
         let running = self.runs(worktree, &shown);
         let others = configs
