@@ -15,6 +15,7 @@ fn main() {
     // often an agent, and its session markers would make every agent we start
     // a sub-session of its own.
     claudhub::agent::disinherit_session();
+    claudhub::agent::disinherit_cargo_run();
     claudhub::logging::init();
     // And before the window is paid for: a folder right-clicked in the
     // Explorer usually belongs to a Claudhub already up, and the answer is to

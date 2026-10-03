@@ -19,6 +19,7 @@ fn main() {
     // markers of whatever launched us would make each of them a sub-session of
     // its own.
     claudhub::agent::disinherit_session();
+    claudhub::agent::disinherit_cargo_run();
     claudhub::logging::init();
 
     let mut stdout = std::io::stdout().lock();

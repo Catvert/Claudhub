@@ -56,6 +56,62 @@ pub fn disinherit_session() {
     }
 }
 
+/// Clears from our own environment what `cargo run` set for us — the package's
+/// name, version, manifest and `OUT_DIR` —, so that nothing we start inherits
+/// it.
+///
+/// A development build is launched by `cargo run`, and what it starts works
+/// on Claudhub itself: the agent of a chat or a terminal, the rust-analyzer of
+/// the worktree (`lsp`). Their `cargo` then ran with `CARGO_PKG_NAME=claudhub`,
+/// `OUT_DIR` and the rest, which `ring`'s build script watches
+/// (`rerun-if-env-changed`, against the values of cargo's own process): it ran
+/// again, and with it `ring`, `rustls`, `sqlx`, `gpui-shell`… — then once more
+/// at the next `cargo run` from a plain terminal, which has none of them. The
+/// two took turns over the same `target/` at every change.
+///
+/// **To be called at the very start of `main`**, for the reason
+/// [`disinherit_session`] gives.
+pub fn disinherit_cargo_run() {
+    for name in
+        cargo_run_variables(std::env::vars_os().filter_map(|(name, value)| {
+            Some((name.into_string().ok()?, value.into_string().ok()?))
+        }))
+    {
+        std::env::remove_var(name);
+    }
+}
+
+/// The variables `cargo run` set for this package, among `vars` — none when
+/// it is not ours that cargo describes: a Claudhub started from a build
+/// script, or from another crate's `cargo run`, leaves that crate's alone.
+pub fn cargo_run_variables(vars: impl Iterator<Item = (String, String)>) -> Vec<String> {
+    let vars: Vec<(String, String)> = vars.collect();
+    let ours = vars
+        .iter()
+        .any(|(name, value)| name == "CARGO_PKG_NAME" && value == env!("CARGO_PKG_NAME"));
+    if !ours {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = vars
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "CARGO"
+                    | "OUT_DIR"
+                    | "CARGO_MANIFEST_DIR"
+                    | "CARGO_MANIFEST_PATH"
+                    | "CARGO_CRATE_NAME"
+                    | "CARGO_BIN_NAME"
+                    | "CARGO_PRIMARY_PACKAGE"
+            ) || name.starts_with("CARGO_PKG_")
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// An agent process found in a worktree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Process {
@@ -642,6 +698,47 @@ pub fn parse_cpu_ticks(stat: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// What `cargo run` set for us goes; the user's cargo configuration and
+    /// what another crate's run set stay.
+    #[test]
+    fn only_what_cargo_run_set_for_claudhub_is_forgotten() {
+        let vars = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        let ran = [
+            ("CARGO", "/usr/bin/cargo"),
+            ("CARGO_HOME", "/home/a/.cargo"),
+            ("CARGO_MANIFEST_DIR", "/w/claudhub"),
+            ("CARGO_PKG_NAME", env!("CARGO_PKG_NAME")),
+            ("CARGO_PKG_VERSION_MAJOR", "0"),
+            (
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+                "/nix/clang-wild",
+            ),
+            ("OUT_DIR", "/w/claudhub/target/debug/build/claudhub-1/out"),
+            ("PATH", "/bin"),
+        ];
+        assert_eq!(
+            super::cargo_run_variables(vars(&ran)),
+            [
+                "CARGO",
+                "CARGO_MANIFEST_DIR",
+                "CARGO_PKG_NAME",
+                "CARGO_PKG_VERSION_MAJOR",
+                "OUT_DIR"
+            ]
+        );
+        let other = [
+            ("CARGO", "/usr/bin/cargo"),
+            ("CARGO_PKG_NAME", "ring"),
+            ("OUT_DIR", "/r/out"),
+        ];
+        assert!(super::cargo_run_variables(vars(&other)).is_empty());
+    }
 
     #[test]
     fn a_claude_process_file_names_its_pid_and_its_conversation() {
