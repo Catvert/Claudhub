@@ -267,15 +267,21 @@ impl ClaudhubApp {
             RunConfig::Env => !running && can_up,
             RunConfig::Recipe(_) => true,
         };
-        let start = if switching {
-            Button::new("run-start")
-                .ghost()
-                .with_size(size)
-                .disabled(true)
-                .icon(icon("loader-circle").text_color(theme.warning))
+        // An environment that runs cannot be started again: ■ alone says
+        // what there is to do, where a greyed ▶ beside it said nothing.
+        let start = if shown == RunConfig::Env && running && !switching {
+            None
+        } else if switching {
+            Some(
+                Button::new("run-start")
+                    .ghost()
+                    .with_size(size)
+                    .disabled(true)
+                    .icon(icon("loader-circle").text_color(theme.warning)),
+            )
         } else {
             let again = running && matches!(shown, RunConfig::Recipe(_));
-            Button::new("run-start")
+            let button = Button::new("run-start")
                 .ghost()
                 .with_size(size)
                 .disabled(!can_start)
@@ -293,7 +299,8 @@ impl ClaudhubApp {
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.start_config(&start_worktree, &start_config, window, cx);
-                }))
+                }));
+            Some(button)
         };
         let can_stop = running
             && !switching
@@ -317,7 +324,7 @@ impl ClaudhubApp {
                 .flex_none()
                 .items_center()
                 .child(selector)
-                .child(start)
+                .children(start)
                 .children(stop)
                 .into_any_element(),
         )
